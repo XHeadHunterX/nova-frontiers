@@ -1,0 +1,37 @@
+# Nova Frontiers Map Fixes — Open Space / 10s Refresh / Larger Map / Live Movement / Nodes
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- CHANGELOG_MAP_FIXES.txt
+
+Fixes applied:
+- Open-space clicks now show Go Here instead of only Cancel.
+- Galaxy map blank-space clicks now support Go Here and Scan Area.
+- System map blank-space clicks still support Go Here and Scan Area.
+- Frontend state refresh changed from every 1 second to every 10 seconds.
+- Map world size increased from 1,200 x 780 to 12,000 x 7,800.
+- Default zoom changed so the much larger world is usable immediately.
+- Pan bounds updated for the larger map.
+- Wheel/buttons use smaller zoom steps for smoother control.
+- NPC traffic now uses stable IDs and stable routes instead of ORDER BY RANDOM every refresh.
+- NPC traffic positions now advance along backend timestamped routes.
+- Traffic/map objects transition left/top over 9.5 seconds so they visibly move between 10-second backend syncs.
+- Galaxy map now includes visible ore signatures.
+- Galaxy map now includes visible ancient/exploration sites.
+- System map now includes visible ancient/exploration sites.
+- System map still includes visible ore and salvage objects.
+- Added backend deterministic exploration-site builder.
+- Added backend scan_area action.
+- Added backend scan_exploration_site action.
+- Added backend investigate_exploration_site action.
+- Mining action now supports both system ore IDs and galaxy ore IDs.
+- Map summaries now include ore, ancient, wreck, hostile, and traffic counts.
+
+Validation:
+- backend/app/main.py Python compile: passed.
+- Backend import: passed.
+- FastAPI TestClient login: passed.
+- /api/state returned galaxy ore/exploration and system ore/exploration nodes.
+- /api/action go_here on galaxy blank-space coordinate: passed.

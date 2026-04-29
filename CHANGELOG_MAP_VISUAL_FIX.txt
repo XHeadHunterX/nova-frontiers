@@ -1,0 +1,13 @@
+# CHANGELOG — Map Visual Fix
+
+Adjusted the full project after the large map expansion.
+
+Fixes:
+- Restored a cleaner deep-space background on the enlarged map.
+- Removed the strange tiled/square-looking visual effect.
+- Increased map node card size.
+- Increased planet/galaxy card image size.
+- Increased moving ship icon size.
+- Increased ore / salvage / exploration node icon size.
+- Increased travel progress badge size.
+- Kept the 10x map scale and 10-second refresh behavior.

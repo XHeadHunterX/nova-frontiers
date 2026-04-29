@@ -1,0 +1,69 @@
+# CHANGELOG — Planet-Level Faction Wars
+
+Backend:
+- Reworked faction war model from galaxy capture-station wars to planet-level wars.
+- Galaxy ownership no longer flips from a single station/capture point.
+- Galaxy ownership now flips only when every planet in that galaxy is controlled by the same faction.
+- Added planet-level war tables:
+  - planet_faction_wars
+  - planet_war_presence
+- Added planet faction ownership:
+  - planets.faction_id
+  - planets.war_cooldown_until
+- Existing planet control now works with faction control and guild controller fields.
+- Added guild war requirements:
+  - guild must have at least 10 members
+  - only one guild can declare war on a planet at a time
+  - declaring guild pays from guild treasury
+  - declaration cost scales exponentially with number of planets the guild already controls
+- Added planet war declaration cost formula:
+  - base declaration cost
+  - planet defense multiplier
+  - owned-planet exponential multiplier
+- Added 2-day planet-war countdown before the capture ring opens.
+- Added planet-level king-of-the-hill capture:
+  - active red ring appears around the target planet on Planet View
+  - attacker faction and defender faction are the only sides counted
+  - third faction cannot count inside the capture ring once the war starts
+  - one side alone in the ring starts a 5-minute hold timer
+  - contested or empty ring resets the hold timer
+  - winner controls the planet
+  - attacker win assigns the planet guild controller to the declaring guild
+  - post-war cooldown is applied to the planet
+- Added galaxy ownership sync after planet capture.
+- Added guild hourly bonus per owned planet:
+  - guild XP per hour per owned planet
+  - guild respect per hour per owned planet
+- Removed old siege/assault resolution path from active use.
+- Old declare_war action now proxies to planet faction war declaration.
+- Old siege/launch assault actions now return a clear removed-flow error.
+
+Frontend:
+- Replaced Galaxy War page with Faction War page.
+- Faction War page now shows:
+  - current faction/guild status
+  - faction planet/galaxy control balance
+  - ongoing/upcoming planet wars
+  - 2-day open timer
+  - 5-minute capture hold timer
+  - declaring guild and declaration cost
+  - local planet targets
+  - resolved planet wars
+- Star Map Planet View now renders planet capture rings, not galaxy station rings.
+- Galaxy View no longer offers direct galaxy war declaration.
+- Galaxy View explains that galaxies flip only after planet control is complete.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- CHANGELOG_PLANET_FACTION_WARS.txt
+- ASSET_MANIFEST.json
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Backend import passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- Verified planet_faction_wars and planet_war_presence tables.
+- Verified 54 planets have faction ownership initialized.
+- Verified frontend Faction War page/static hooks.

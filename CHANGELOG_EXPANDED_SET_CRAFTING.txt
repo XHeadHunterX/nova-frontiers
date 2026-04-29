@@ -1,0 +1,43 @@
+# CHANGELOG — Expanded Set Crafting / Loop-Specialized Gear
+
+Backend:
+- Added 28 new base craftable loop-specialized ship modules.
+- Ranked crafting expansion now produces 255 craftable recipes total.
+- Every new module receives Basic, Improved, Advanced, Elite, and Legendary recipe variants.
+- Basic remains unlimited.
+- Improved+ remain consumable recipe-copy crafts.
+- Added base module template seeding for the new set modules.
+- Added set loop metadata to module previews and installed module payloads.
+- Expanded set bonus definitions from 2 sets to 11 sets.
+- Added set bonuses for the major gameplay loops:
+  - Mining
+  - Mining / Refining
+  - Salvage
+  - Exploration
+  - Trading / Hauling
+  - Smuggling
+  - PvE / PvP Combat
+  - Tank / Defense
+  - Bounty / Security
+  - Crafting / Engineering
+  - Medical / Survival
+- Fixed Ghostline set to use the existing Hidden Smuggling Bay module code `smuggle_compartment`.
+- Kept ammo removed from crafting/loot flow.
+
+Frontend:
+- Recipe cards now show set loop specialization next to the set name.
+- Set bonus eligible text now includes the loop specialty.
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Imported backend module successfully.
+- Ran fresh SQLite migration successfully.
+- Verified 255 crafting recipes.
+- Verified 51 Legendary recipes.
+- Verified 185 set-linked recipes.
+- Verified 28 new base set module templates.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- CHANGELOG_EXPANDED_SET_CRAFTING.txt

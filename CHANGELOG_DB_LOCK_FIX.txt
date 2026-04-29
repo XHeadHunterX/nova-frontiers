@@ -1,0 +1,28 @@
+# CHANGELOG — SQLite database lock fix
+
+Root cause:
+- /api/state and /api/action can overlap while the UI polls and actions mutate the same SQLite DB.
+- build_state() still performs some server-side timestamp/update work, including energy regeneration and DB-backed map/NPC refresh.
+- SQLite was using a short busy timeout and rollback journal behavior, making refresh/action overlap more likely to throw `sqlite3.OperationalError: database is locked`.
+
+Fixes:
+- Updated SQLite connection settings:
+  - isolation_level=None
+  - PRAGMA busy_timeout = 30000
+  - PRAGMA journal_mode = WAL
+  - PRAGMA synchronous = NORMAL
+- Made regenerate_energy() tolerate transient `database is locked` errors and retry naturally on the next tick instead of crashing /api/state.
+- Fixed bad FK in the new NPC map state table:
+  - npc_map_state.npc_id now references npc_agents(id), not a non-existent npcs table.
+
+Changed files:
+- backend/app/main.py
+- CHANGELOG_DB_LOCK_FIX.txt
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- WAL mode verified.
+- busy_timeout verified at 30000 ms.
+- npc_map_state generation verified.

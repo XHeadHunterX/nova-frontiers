@@ -1,0 +1,30 @@
+# CHANGELOG — Intercept Course / Docking / Salvage / Map Readability Fix
+
+Backend:
+- Fixed traveler target references so `traveler:<npc_id>:<map_type>` works.
+- Intercept no longer immediately attacks or errors from a moving target.
+- Intercept now plots an intercept course.
+- When intercept travel completes, combat auto-resolves at close range.
+- Open-space combat salvage is created after victory.
+- Salvage from intercepts stores x/y map coordinates where the fight occurred.
+- Salvage wrecks expire after 24 hours.
+- Existing salvage_sites table is migrated with x_pct and y_pct columns.
+- Docked-only services are blocked during active travel/open-space state:
+  market, crafting-like inventory actions, repairs/refuel, hangar ship switching,
+  local PvE/combat, property/services, planet-control services.
+
+Frontend:
+- Added Find My Ship button on the map toolbar.
+- Find My Ship centers and zooms to your ship if traveling/intercepting.
+- If docked, Find My Ship centers and highlights the current planet/station.
+- Intercept course appears as active travel and uses backend timestamps.
+- Map object sizes now counter-scale against zoom so icons keep a readable minimum size.
+- Player/current-location highlight is now visually distinct from NPCs/resources.
+- Blank-space map popup exposes Go Here and Scan Area for both galaxy/system maps.
+- Docking status explains that market/crafting/repair/hangar services require being docked.
+
+CSS:
+- Increased minimum NPC/resource icon size.
+- Increased minimum node/card/image size.
+- Added unique white/green self/current-location highlight styling.
+- Added Find My Ship button styling.

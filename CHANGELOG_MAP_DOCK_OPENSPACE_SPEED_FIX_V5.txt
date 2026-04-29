@@ -1,0 +1,33 @@
+Nova Frontiers Map Dock/Open-Space/Speed Fix V5
+================================================
+
+Files changed
+-------------
+- backend/app/main.py
+- frontend/src/main.jsx
+- CHANGELOG_MAP_DOCK_OPENSPACE_SPEED_FIX_V5.txt
+
+Backend changes
+---------------
+- Added map_route_seconds_for_distance() so map travel duration is calculated from map distance using one constant apparent speed.
+- Travel distance now changes ETA, but not ship movement speed. Effective speed is still derived from ship mass/size and jump-drive/module bonuses.
+- Removed fixed travel padding/minimums from open-space waypoints and docking approaches because they made short hops look slow and long hops look faster.
+- Updated local planet travel to use map-coordinate distance for visual/timestamp duration.
+- Added dock_requested handling for the travel action.
+- System-map Dock actions now set travel_mode='dock' and dock on arrival instead of ending as generic local travel.
+- Docking approaches preserve coordinate route metadata so the travel line starts from the actual ship/open-space position.
+- Galaxy route segments and intercept routes now use the same map-distance timing helper for consistent apparent movement speed.
+
+Frontend changes
+----------------
+- TravelStatus now shows "Open Space Status" when the player is in open space instead of always showing "Docked at ..." whenever travel is inactive.
+- System map planet clicks now pass dock:true for Dock behavior.
+- Fixed missing Dock button caused by backend nodes using kind='planet' while the UI only checked kind='node'.
+- Dock options now work for planet/station-style system nodes from both the context popup and selected-object panel.
+- Galaxy node inspect/jump behavior was preserved separately.
+
+Validation
+----------
+- backend/app/main.py ast.parse passed.
+- python -m py_compile backend/app/main.py passed.
+- npm run build could not run because frontend/node_modules is missing vite in this container.

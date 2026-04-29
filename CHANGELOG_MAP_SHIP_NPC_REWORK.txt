@@ -1,0 +1,73 @@
+# CHANGELOG — Map / Open Space / Ship Size / NPC Objective Rework
+
+Frontend:
+- Sidebar now shows one visible map entry: `Map`.
+- Removed visible/active separate Galaxy/System map page routes.
+- Map page now internally switches between:
+  - System view
+  - Galaxy view
+- System/Galaxy toggle moved into the map toolbar beside zoom/reset/find-ship controls.
+- Map now auto-centers on the ship/current dock location whenever entering the map, switching views, traveling, or holding open space.
+- Hangar UI now shows ship size, mass, and effective map speed.
+
+Backend:
+- Added `SHIP_SIZE_BALANCE` tuning group.
+- Added ship size classes:
+  - S = Small
+  - M = Medium
+  - L = Large
+  - C = Capital
+- Added ship mass support:
+  - `ship_templates.size_class`
+  - `ship_templates.mass`
+  - `ships.size_class`
+  - `ships.mass`
+- Existing ships/templates are backfilled by `ensure_ship_size_content`.
+- Ship movement speed now uses:
+  - base ship drive speed
+  - ship size class
+  - ship mass
+  - equipped engine/core/jump-drive module quality
+  - module durability
+- `go_here` now correctly uses current open-space position as the origin when already undocked.
+- `go_here` waypoint metadata now stores exact origin X/Y and destination X/Y.
+- Open-space movement no longer snaps/pretends to move between static objects.
+- Local planet travel and galaxy gate travel now use the same effective map speed calculation.
+- Active ship and hangar state now include `speed_profile`.
+
+Map/object behavior:
+- Ore sites no longer reroll positions every refresh bucket.
+- Ancient/exploration sites no longer reroll positions every refresh bucket.
+- System ore/exploration contacts are now stable across map refreshes.
+- NPCs can now travel directly toward objective coordinates, not only planet-to-planet nodes.
+- NPC objective routing now supports:
+  - mining ore sites
+  - salvaging wrecks
+  - scanning/exploring ancient sites
+  - pirate interception
+  - bounty/security hunting
+  - patrol scanning
+  - trade hauling
+  - smuggling
+  - escorting
+  - docking/refueling
+- NPC visible contact behavior remains radar-limited.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- CHANGELOG_MAP_SHIP_NPC_REWORK.txt
+- ASSET_MANIFEST.json
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Backend module import passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- Ship sizes/masses verified.
+- Effective map speed verified.
+- System traffic count verified at 42.
+- Ore site stability verified.
+- Exploration site stability verified.
+- `go_here` open-space waypoint smoke test passed.
+- Frontend static hooks verified for Map route, toolbar toggle, auto-centering, and ship size/speed display.

@@ -1,0 +1,32 @@
+# CHANGELOG — Pirate Stations Open-World Balance Pass
+
+Backend:
+- Pirate stations are no longer single-player-only locks.
+- Added max players per station via PIRATE_STATION_BALANCE.max_players_per_station.
+- Default capacity is 3 pilots per station.
+- Station map lock now means capacity full, not occupied by someone else.
+- Pirate defenders are treated as a shared station resource for active/returning pilots.
+- Pirate damage/defeats persist across pilots in the same station.
+- Pirates now move slowly toward the closest active pilot in the station.
+- Enemy movement no longer stops when a battle panel is open.
+- Player movement no longer stops when a battle panel is open.
+- Enemy movement speed reduced for open-world pacing.
+- Retreat updates shared station state while preserving defender damage.
+- Station clear event is ready for a final-kill reward hook later.
+
+Frontend:
+- Pirate Station page wording changed to open-world mode.
+- Movement buttons remain enabled while battle panel is open.
+- Battle overlay is now non-blocking.
+- Added pilot capacity readout.
+- Added pilots-inside panel.
+- Station map shows other pilots.
+- Pirates display their current target pilot.
+- Pirates targeting the current player are highlighted.
+- System map button now says Station At Capacity when full.
+
+Tuning:
+- PIRATE_STATION_BALANCE.max_players_per_station
+- PIRATE_STATION_BALANCE.enemy_move_pct_per_tick
+- PIRATE_STATION_BALANCE.enemy_tick_seconds
+- PIRATE_STATION_BALANCE.enemy_attack_range_pct

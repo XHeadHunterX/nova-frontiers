@@ -1,0 +1,458 @@
+{
+  "package": "nova-frontiers-phase23b-full-project-with-assets",
+  "base": "nova-frontiers-phase21-open-world-market-travel(1).zip",
+  "overlay": "Phase 23B targeted code + generated image asset library",
+  "asset_file_count": 87,
+  "asset_folders": [
+    "frontend/src/assets/avatars",
+    "frontend/src/assets/icons",
+    "frontend/src/assets/materials",
+    "frontend/src/assets/modules",
+    "frontend/src/assets/planets",
+    "frontend/src/assets/ships",
+    "frontend/src/assets/stations"
+  ],
+  "ui_asset_resolver": "frontend/src/assets/gameAssets.js",
+  "notes": [
+    "This is a full project zip, not changed-files-only.",
+    "main.jsx imports ./assets/gameAssets.",
+    "GameImage uses local bundled fallbacks when backend image_url is empty, missing, null, undefined, or broken.",
+    "Map transit ships, ore nodes, salvage nodes, exploration sites, selected map object panels, items, ships, stations, planets, avatars, modules, weapons, and armor now resolve to bundled art."
+  ],
+  "force_generated_assets_fix": true,
+  "placeholder_paths_are_ignored": true,
+  "changed_files_for_this_fix": [
+    "frontend/src/assets/gameAssets.js",
+    "frontend/src/main.jsx",
+    "frontend/src/styles.css",
+    "CHANGELOG_FORCE_GENERATED_ASSETS.txt"
+  ],
+  "map_visual_fix": {
+    "background_restored": true,
+    "icons_enlarged": true,
+    "changed_files": [
+      "frontend/src/styles.css",
+      "CHANGELOG_MAP_VISUAL_FIX.txt"
+    ]
+  },
+  "intercept_docking_salvage_fix": {
+    "intercept_course": true,
+    "auto_attack_on_close": true,
+    "salvage_decay_hours": 24,
+    "find_my_ship": true,
+    "minimum_icon_size": true,
+    "docked_services_blocked_while_traveling": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_INTERCEPT_DOCKING_SALVAGE_FIX.txt"
+    ]
+  },
+  "intercept_waypoint_wheel_fix": {
+    "exact_blank_space_waypoints": true,
+    "intercept_proximity_resolution": true,
+    "map_wheel_page_scroll_blocked": true,
+    "self_ship_generated_art_marker": true,
+    "dock_here_label": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_INTERCEPT_WAYPOINT_WHEEL_FIX.txt"
+    ]
+  },
+  "radar_range_pass": {
+    "base_radar_every_ship": true,
+    "radar_modules_added": [
+      "basic_radar_array",
+      "civilian_radar_array",
+      "military_radar_array",
+      "deep_space_radar"
+    ],
+    "player_radar_ring": true,
+    "player_visibility_limited_by_radar": true,
+    "npc_visibility_limited_by_radar": true,
+    "planets_stations_galaxies_always_visible": true,
+    "tuning_location": "backend/app/main.py RADAR_BALANCE",
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_RADAR_RANGE_FIX.txt"
+    ]
+  },
+  "npc_objective_pass": {
+    "weighted_objectives": true,
+    "all_npcs_can_all_actions": true,
+    "role_alignment_weighted": true,
+    "radar_limited_objectives": true,
+    "objectives": [
+      "trade_haul",
+      "mine",
+      "salvage",
+      "explore",
+      "pirate_intercept",
+      "bounty_hunt",
+      "patrol_scan",
+      "smuggle",
+      "escort",
+      "dock_refuel",
+      "search"
+    ],
+    "tuning_location": "backend/app/main.py NPC_OBJECTIVE_BALANCE",
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_NPC_OBJECTIVES_FIX.txt"
+    ]
+  },
+  "admin_game_tuning_pass": {
+    "runtime_db_overrides": true,
+    "settings_table": "game_settings",
+    "admin_page": "Admin Game Tuning",
+    "actions": [
+      "admin_save_game_config",
+      "admin_reset_game_config",
+      "admin_reset_all_game_configs"
+    ],
+    "editable_groups": [
+      "CLIENT_RUNTIME_BALANCE",
+      "NPC_OBJECTIVE_BALANCE",
+      "RADAR_BALANCE",
+      "OPEN_WORLD_BALANCE",
+      "SIMULATION_BALANCE",
+      "NPC_MARKET_BALANCE",
+      "TRAVEL_BALANCE",
+      "CARGO_HANDLING_BALANCE",
+      "MARKET_LAW_BALANCE",
+      "COMBAT_BALANCE",
+      "PVE_BALANCE",
+      "CRAFTING_BALANCE",
+      "PLAYER_MARKET_BALANCE",
+      "PLANET_CONTROL_BALANCE",
+      "PLANETARY_DEFENSE_BALANCE",
+      "INVENTORY_BALANCE",
+      "TIER_BALANCE",
+      "SKILL_XP_BALANCE",
+      "ECONOMY_BALANCE",
+      "ECONOMY_CONFIG"
+    ],
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_ADMIN_GAME_TUNING.txt"
+    ]
+  },
+  "crafting_timers_pass": {
+    "timed_crafting": true,
+    "queue_table": "crafting_queue",
+    "actions": [
+      "craft_recipe",
+      "claim_crafting",
+      "cancel_crafting"
+    ],
+    "admin_tuning_group": "CRAFTING_BALANCE",
+    "timing_examples": {
+      "low_tier_ammo": "5s per unit",
+      "large_high_tier_capital_ship": "2+ days",
+      "max_ship_timer_default": "7 days"
+    },
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_CRAFTING_TIMERS.txt"
+    ]
+  },
+  "pirate_station_open_world_pass": {
+    "max_players_per_station": true,
+    "default_capacity": 3,
+    "shared_defender_resource": true,
+    "pirates_target_closest_pilot": true,
+    "battle_panel_non_blocking": true,
+    "final_kill_reward_hook": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_PIRATE_STATIONS_OPEN_WORLD.txt"
+    ]
+  },
+  "salvage_material_cargo_drops_pass": {
+    "destroyed_ships_leave_salvage_contents": true,
+    "estimated_ship_build_material_recovery_pct": 0.1,
+    "cargo_drop_range_pct": [
+      0.05,
+      0.5
+    ],
+    "player_cargo_sources": [
+      "cargo_hold",
+      "inventory cargo/material categories"
+    ],
+    "npc_cargo_role_aware": true,
+    "pirate_station_defenders_leave_salvage_points": true,
+    "admin_tuning_group": "COMBAT_BALANCE",
+    "changed_files": [
+      "backend/app/main.py",
+      "CHANGELOG_SALVAGE_DROPS.txt"
+    ]
+  },
+  "expanded_set_crafting_pass": {
+    "ranked_recipe_total": 255,
+    "legendary_recipe_total": 51,
+    "set_total": 11,
+    "new_base_loop_modules": 28,
+    "loop_sets": [
+      "Prospector Set",
+      "Deepcore Set",
+      "Reclaimer Set",
+      "Pathfinder Set",
+      "Merchant Set",
+      "Ghostline Set",
+      "Vanguard Set",
+      "Bastion Set",
+      "Marshal Set",
+      "Artisan Set",
+      "Lifeline Set"
+    ],
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "CHANGELOG_EXPANDED_SET_CRAFTING.txt"
+    ]
+  },
+  "recipe_balance_and_drops_pass": {
+    "admin_tuning_groups_added": [
+      "RANKED_CRAFTING_BALANCE",
+      "RECIPE_DROP_BALANCE"
+    ],
+    "legendary_reserved_for_world_events": true,
+    "normal_combat_recipe_drops": {
+      "max_recipes": 2,
+      "allowed_ranks": [
+        "improved",
+        "advanced"
+      ],
+      "legendary_excluded": true
+    },
+    "pirate_base_completion_recipe_drops": {
+      "min_recipes": 2,
+      "max_recipes": 4,
+      "allowed_ranks": [
+        "improved",
+        "advanced",
+        "elite"
+      ],
+      "legendary_excluded": true,
+      "inside_base_pirates_drop_recipes": false
+    },
+    "craft_time_caps": {
+      "module_weapon_armor_seconds": 604800,
+      "ship_seconds": 1209600
+    },
+    "changed_files": [
+      "backend/app/main.py",
+      "CHANGELOG_RECIPE_BALANCE_AND_DROPS.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  },
+  "galaxy_war_factions_pass": {
+    "factions": [
+      "Solar Accord",
+      "Iron Meridian",
+      "Umbral Veil"
+    ],
+    "galaxies": 12,
+    "planets": 54,
+    "directional_gate_links": 46,
+    "capturable_galaxies": 6,
+    "home_safe_galaxies": 6,
+    "star_map_unified": true,
+    "galaxy_war_page": true,
+    "king_of_the_hill_capture": {
+      "declare_delay_hours": 24,
+      "hold_seconds": 300,
+      "cooldown_hours": 24,
+      "requires_adjacent_owned_galaxy": true,
+      "home_areas_not_capturable": true
+    },
+    "center_gradient_content": true,
+    "weak_faction_capture_help": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_GALAXY_WAR_FACTIONS.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  },
+  "image_asset_pass": {
+    "generated_item_images": 90,
+    "generated_module_images": 198,
+    "generated_asset_folder": "frontend/src/assets/generated",
+    "updated_files": [
+      "frontend/src/assets/gameAssets.js",
+      "frontend/src/main.jsx",
+      "CHANGELOG_GALAXY_WAR_FACTIONS.txt",
+      "ASSET_MANIFEST.json"
+    ],
+    "notes": [
+      "exact code-based resolution for items/modules",
+      "recipe outputs now use unique visuals",
+      "duplicate placeholder reuse reduced via generated assets"
+    ]
+  },
+  "planet_faction_wars_pass": {
+    "war_scope": "planet",
+    "galaxy_flips_after_all_planets_controlled": true,
+    "war_declare_delay_hours": 48,
+    "capture_hold_seconds": 300,
+    "third_faction_locked_out_of_ring": true,
+    "one_guild_declaration_per_planet": true,
+    "min_guild_members": 10,
+    "guild_declare_cost_exponential_by_owned_planets": true,
+    "guild_hourly_xp_per_owned_planet": true,
+    "removed_direct_galaxy_station_war": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "CHANGELOG_PLANET_FACTION_WARS.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  },
+  "map_ship_npc_rework_pass": {
+    "single_visible_map_nav": true,
+    "internal_map_modes": [
+      "system",
+      "galaxy"
+    ],
+    "map_toggle_location": "map toolbar next to zoom/reset/find-ship controls",
+    "auto_center_on_ship_location": true,
+    "open_space_go_here_fixed": true,
+    "static_ore_positions": true,
+    "static_exploration_positions": true,
+    "ship_size_classes": [
+      "S",
+      "M",
+      "L",
+      "C"
+    ],
+    "ship_speed_uses_mass": true,
+    "ship_speed_uses_jump_drive_quality": true,
+    "npc_objective_coordinate_routing": true,
+    "npc_objectives": [
+      "mine",
+      "salvage",
+      "explore",
+      "pirate_intercept",
+      "bounty_hunt",
+      "patrol_scan",
+      "trade_haul",
+      "smuggle",
+      "escort",
+      "dock_refuel"
+    ],
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "CHANGELOG_MAP_SHIP_NPC_REWORK.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  },
+  "achievements_profile_pass": {
+    "achievement_loops": 18,
+    "tiers_per_loop": 8,
+    "badge_assets": 144,
+    "tier_thresholds": [
+      10,
+      50,
+      200,
+      750,
+      2000,
+      6000,
+      15000,
+      24000
+    ],
+    "tier8_passive_buffs": true,
+    "selected_profile_badge": true,
+    "public_profile_modal": true,
+    "public_profile_hides_wealth_and_strength": true,
+    "chat_profile_click": true,
+    "map_player_profile_click": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "frontend/src/assets/generated/achievements",
+      "frontend/src/assets/generated/asset_manifest.json",
+      "CHANGELOG_ACHIEVEMENTS_PROFILE.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  },
+  "achievement_badge_icons": {
+    "mode": "individual_generated_png_files",
+    "count": 144,
+    "source": "programmatic_individual_badge_render_v3_no_sheets",
+    "notes": [
+      "No sheet images are included or used.",
+      "Each badge is a standalone PNG file.",
+      "Existing filenames preserved so the game uses them automatically.",
+      "Higher tiers are more ornate with stronger glow/frame/detail progression."
+    ]
+  },
+  "db_map_operations_pass": {
+    "db_backed_map_objects": true,
+    "tables_added": [
+      "map_objects",
+      "player_map_operations",
+      "npc_map_state"
+    ],
+    "open_space_origin_persisted": true,
+    "next_go_here_uses_current_open_space_position": true,
+    "player_map_operation_indicator": true,
+    "tool_gated_buttons": true,
+    "inspect_modal_overlay": true,
+    "persistent_npc_map_state": true,
+    "npc_working_state_updates_objects": true,
+    "folded_in_v2_achievement_badges": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "frontend/src/assets/generated/achievements",
+      "frontend/src/assets/generated/asset_manifest.json",
+      "ASSET_MANIFEST.json",
+      "CHANGELOG_DB_MAP_OPERATIONS.txt"
+    ]
+  },
+  "db_lock_fix_pass": {
+    "sqlite_wal": true,
+    "busy_timeout_ms": 30000,
+    "regenerate_energy_lock_tolerant": true,
+    "npc_map_state_fk_fixed": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "CHANGELOG_DB_LOCK_FIX.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  },
+  "map_polish_living_world_fix": {
+    "context_click_no_longer_opens_inspect": true,
+    "inspect_modal_explicit_only": true,
+    "secondary_player_ping_removed": true,
+    "marker_motion_smoothed": true,
+    "intercept_uses_contact_range_not_radar": true,
+    "open_space_intercept_origin_persisted": true,
+    "tool_buttons_hidden_when_missing_required_tool": true,
+    "changed_files": [
+      "backend/app/main.py",
+      "frontend/src/main.jsx",
+      "frontend/src/styles.css",
+      "CHANGELOG_MAP_POLISH_LIVING_WORLD_FIX.txt",
+      "ASSET_MANIFEST.json"
+    ]
+  }
+}

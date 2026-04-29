@@ -1,0 +1,2306 @@
+
+import React, { useEffect, useMemo, useState, useRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Home, Globe2, Store, Rocket, Users, Crosshair, Briefcase, Factory,
+  Hammer, Brain, Building2, Mail, Trophy, Settings, Shield, Zap, Info, Plus,
+  ShipWheel, HeartPulse, AlertTriangle, Coins, Fuel, Package, Clock, Swords,
+  UserRound, MessageCircle, Send, Save
+} from 'lucide-react';
+import './styles.css';
+import { resolveAsset, imageFallbackFor } from './assets/gameAssets';
+
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const uid = () => crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+
+const nav = [
+  ['Dashboard', Home], ['Profile', UserRound], ['Chat', MessageCircle], ['Map', Globe2], ['Pirate Station', Crosshair], ['Market', Store], ['Inventory', Package],
+  ['Ships & Hangar', Rocket], ['Fight', Swords], ['Guild', Users], ['Faction War', Crosshair], ['Warfare', Crosshair], ['Planet Control', Building2], ['Contracts', Briefcase],
+  ['Jobs', Briefcase], ['Skills', Brain], ['Industry', Factory], ['Crafting', Hammer], ['Properties', Building2],
+  ['Medical', HeartPulse], ['Messages', Mail], ['Leaderboards', Trophy], ['Admin', Settings]
+];
+
+function App() {
+  const [token, setToken] = useState(localStorage.getItem('nova_token') || '');
+  const [state, setState] = useState(null);
+  const [page, setPage] = useState('Dashboard');
+  const [log, setLog] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [clock, setClock] = useState(Date.now());
+
+  async function login(username, password) {
+    const res = await fetch(`${API}/api/auth/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username, password}) });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    localStorage.setItem('nova_token', data.token);
+    setToken(data.token);
+  }
+
+  async function load() {
+    if (!token) return;
+    const res = await fetch(`${API}/api/state`, { headers:{Authorization:`Bearer ${token}`} });
+    if (!res.ok) { localStorage.removeItem('nova_token'); setToken(''); return; }
+    setState(await res.json());
+  }
+
+  async function act(type, payload={}) {
+    setLoading(true);
+    try {
+      const res = await fetch(`${API}/api/action`, { method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify({type, payload, nonce: uid()}) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || JSON.stringify(data));
+      setState(data.state);
+      if (data.result?.openPage) { const mapPages = new Set(['Galaxies','System Map','Star Map']); setPage(mapPages.has(data.result.openPage) ? 'Map' : data.result.openPage); }
+      setLog(l => [data.result?.message || `${type} complete`, ...l].slice(0, 8));
+      return data;
+    } catch (e) {
+      setLog(l => [`ERROR: ${e.message}`, ...l].slice(0, 8));
+    } finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, [token]);
+  useEffect(() => { const id = setInterval(() => setClock(Date.now()), 100); return () => clearInterval(id); }, []);
+  const refreshSeconds = Math.max(1, Number(state?.game_tuning?.client_runtime?.state_refresh_seconds || 10));
+  useEffect(() => { if (token) { const id = setInterval(load, refreshSeconds * 1000); return () => clearInterval(id); }}, [token, refreshSeconds]);
+
+  if (!token) return <Login onLogin={login} />;
+  if (!state) return <div className="boot">Loading Nova Frontiers...</div>;
+
+  const ctx = { state, act, loading, log, setPage, clock };
+  return <div className="appShell">
+    <Sidebar page={page} setPage={setPage} state={state} />
+    <main className="main">
+      <Topbar state={state} onLogout={() => { localStorage.removeItem('nova_token'); setToken(''); }} />
+      <div className="content">
+        {page === 'Dashboard' && <Dashboard {...ctx} />}
+        {page === 'Profile' && <Profile {...ctx} />}
+        {page === 'Chat' && <Chat {...ctx} />}
+        {page === 'Map' && <StarMap {...ctx} />}
+        {page === 'Pirate Station' && <PirateStation {...ctx} />}
+        {page === 'Market' && <Market {...ctx} />}
+        {page === 'Inventory' && <Inventory {...ctx} />}
+        {page === 'Ships & Hangar' && <Ships {...ctx} />}
+        {page === 'Fight' && <Fight {...ctx} />}
+        {page === 'Guild' && <Guild {...ctx} />}
+        {page === 'Faction War' && <FactionWar {...ctx} />}
+        {page === 'Warfare' && <Warfare {...ctx} />}
+        {page === 'Planet Control' && <PlanetControl {...ctx} />}
+        {page === 'Contracts' && <Contracts {...ctx} />}
+        {page === 'Jobs' && <Jobs {...ctx} />}
+        {page === 'Skills' && <Skills {...ctx} />}
+        {page === 'Industry' && <Industry {...ctx} />}
+        {page === 'Crafting' && <Crafting {...ctx} />}
+        {page === 'Properties' && <Properties {...ctx} />}
+        {page === 'Medical' && <Medical {...ctx} />}
+        {page === 'Messages' && <Messages {...ctx} />}
+        {page === 'Leaderboards' && <Leaderboards {...ctx} />}
+        {page === 'Admin' && <Admin {...ctx} />}
+      </div>
+      <ActionLog log={log} />
+    </main>
+  </div>;
+}
+
+function Login({onLogin}) {
+  const [u,setU] = useState('godmode'); const [p,setP] = useState('godmode123'); const [err,setErr] = useState('');
+  const submit = async (e) => { e.preventDefault(); try { await onLogin(u,p); } catch(ex) { setErr(ex.message); }};
+  return <div className="loginScreen">
+    <div className="loginCard panel">
+      <div className="brand big"><span className="brandMark">✦</span><div>NOVA<br/><b>FRONTIERS</b></div></div>
+      <p className="muted">Persistent space trading, PvE, illicit market risk, guild warfare, ships, crafting, and solo-friendly NPC systems.</p>
+      <form onSubmit={submit} className="loginForm">
+        <input value={u} onChange={e=>setU(e.target.value)} placeholder="username" />
+        <input value={p} onChange={e=>setP(e.target.value)} placeholder="password" type="password" />
+        <button className="primary">Login</button>
+      </form>
+      <div className="quickLogin">
+        <button onClick={()=>{setU('godmode'); setP('godmode123')}}>God Mode</button>
+        <button onClick={()=>{setU('pilot'); setP('pilot123')}}>Live Account</button>
+      </div>
+      {err && <div className="error">{err}</div>}
+      <div className="note">God mode has max everything, instant travel, no timers, and admin tools. Live account is normal progression.</div>
+    </div>
+  </div>;
+}
+
+function Sidebar({page,setPage,state}) {
+  return <aside className="sidebar">
+    <div className="brand"><span className="brandMark">✦</span><div>NOVA<br/><b>FRONTIERS</b></div></div>
+    <div className="pilotCard">
+      <div className="avatar profileAvatarSmall"><ProfileAvatar profile={state.profile} size="sm" /></div>
+      <div><b>{state.profile?.displayName || state.player.callsign}</b><br/><span>@{state.profile?.username || state.user.username} • Level {state.player.level}</span></div>
+    </div>
+    <div className="bars">
+      <Bar label="XP" value={state.player.xp} max={state.next_level_xp || Math.max(1000, state.player.level*state.player.level*1200)} />
+      <Bar label="Health" value={state.player.health} max={state.player.max_health} danger />
+      <Bar label="Fuel" value={state.player.fuel} max={state.player.max_fuel} />
+      <Bar label="Energy" value={state.player.energy} max={state.player.max_energy} />
+      <Bar label="Cargo" value={state.cargo_usage?.total ?? state.player.cargo} max={state.cargo_usage?.max ?? state.player.max_cargo} />
+    </div>
+    <nav>{nav.map(([n,Icon]) => <button key={n} className={page===n?'active':''} onClick={()=>setPage(n)}><Icon size={18}/><span>{n}</span>{n==='Messages' && <em>8</em>}</button>)}</nav>
+    <div className="sector">UTC {new Date(state.server_time).toLocaleTimeString()}<br/>Sector VX-9 / ECHO</div>
+  </aside>
+}
+
+function Topbar({state,onLogout}) {
+  const p = state.player, ship = state.active_ship || {}, travel = state.travel_state || {};
+  return <header className="topbar">
+    <div className="identityStat"><ProfileAvatar profile={state.profile} size="sm" /><span>{state.profile?.displayName || state.player.callsign}<small>@{state.profile?.username || state.user.username}</small></span></div>
+    <div className="stat"><Coins/> Credits <b>{fmt(p.credits)}</b></div>
+    <div className="stat"><Fuel/> Fuel <b>{fmt(p.fuel)} / {fmt(p.max_fuel)}</b></div>
+    <div className="stat"><Package/> Cargo <b>{fmt(state.cargo_usage?.total ?? p.cargo)} / {fmt(state.cargo_usage?.max ?? p.max_cargo)}</b></div>
+    <div className="stat"><Zap/> Energy <b>{fmt(p.energy)} / {fmt(p.max_energy)}</b></div>
+    <div className="stat"><Brain/> Skill Points <b>{fmt(p.skill_points)}</b></div>
+    <div className="stat"><Shield/> Ship <b>{ship.name || 'None'}</b></div>
+    {travel.active && <div className="stat travelTop"><Clock/> {label(travel.mode)} Travel <b>{travel.destination_galaxy_name || travel.destination_planet_name} • {clockTimeLeft(travel.arrival_at)}</b></div>}
+    {state.user.god_mode && <div className="god">GOD MODE</div>}
+    <button onClick={onLogout}>Logout</button>
+  </header>
+}
+
+function Dashboard({state,act,setPage,clock}) {
+  const p = state.player;
+  const currentGalaxy = state.galaxies.find(g => g.id === state.location?.galaxy_id) || {};
+  const currentLocations = state.planets.filter(pl => pl.galaxy_id === state.location?.galaxy_id);
+  const basicOps = state.operations.filter(o =>
+    o.galaxy_id === state.location?.galaxy_id &&
+    o.operation_tier === 'basic'
+  ).slice(0, 5);
+  const activeJob = state.jobs.find(j => j.active);
+  const careerTasks = (state.career_tasks || []).slice(0, 3);
+  const sectorActivity = (state.npc_activity || []).filter(a => a.galaxy_id === state.location?.galaxy_id).slice(0, 10);
+  const sim = state.simulation || {};
+
+  return <Grid>
+    <Panel title="Current Galaxy" help="This panel only summarizes the galaxy your ship is currently in. Galaxy-to-galaxy movement stays on the Galaxies map.">
+      <div className="currentGalaxyCard">
+        <div className={`galaxy ${currentGalaxy.color || 'blue'}`}>
+          <h3>{currentGalaxy.name || state.location.galaxy_name}</h3>
+          <p>{currentGalaxy.sector || state.location.galaxy_code}</p>
+          <small>Current location: {state.location.name}</small>
+        </div>
+        <Stats pairs={{Locations:currentLocations.length, Stations:currentLocations.filter(x=>x.type==='station').length, Planets:currentLocations.filter(x=>x.type!=='station').length, Sector:currentGalaxy.sector || '—'}} />
+      </div>
+      <div className="tagCloud">{currentLocations.map(pl=><span key={pl.id}>{pl.name}</span>)}</div>
+      <button onClick={()=>setPage('Map')}>Open Galaxy Map</button><button onClick={()=>setPage('Map')}>Open System Map</button>
+    </Panel>
+
+    <TravelStatus state={state} clock={clock} />
+    <ShipStatusPanel state={state} />
+    <MarketPressure state={state} />
+
+    <Panel title="Planet Stats" help="Current planet/station conditions. NPC ticks can slowly move market activity, security, stability, and pirate pressure.">
+      <Stats pairs={{
+        Population:fmt(state.npc_summary?.population||0),
+        Traffic:state.location?.npc_activity || 0,
+        Security:state.location?.security_level || 0,
+        Stability:state.location?.stability_level || 0,
+        Customs:state.location?.customs_rating || 0,
+        Pirates:state.location?.pirate_activity || 0,
+        Market:state.location?.market_activity || 0,
+        Lawfulness:state.location?.lawfulness || 0,
+        Defense:state.location?.defense_strength || 0
+      }} />
+      <div className="tagCloud">{(state.npc_summary?.careers||[]).slice(0,8).map(c=><span key={c.career}>{label(c.career)}: {c.count}</span>)}</div>
+    </Panel>
+
+    <Panel title="Planet Control" help="Local control affects prices, mission risk, illegal trade risk, crafting bonuses, and travel danger.">
+      <Stats pairs={{
+        Controller:state.planet_control?.effects?.controller_label || label(state.location?.controller_type || 'npc'),
+        Economy:label(state.location?.economy_type || 'balanced'),
+        Influence:state.location?.player_influence || 0,
+        Conflict:state.location?.conflict_level || 0,
+        Tax:`${state.planet_control?.effects?.tax_rate_pct ?? 0}%`,
+        IllegalRisk:state.planet_control?.effects?.illegal_risk || 0,
+        TravelDanger:state.planet_control?.effects?.travel_danger || 0,
+        CraftingBonus:`${state.planet_control?.effects?.crafting_bonus ?? 0}%`
+      }} />
+      <div className="controlQuickActions">{(state.planet_control?.actions || []).slice(0,3).map(a=><button key={a.key} onClick={()=>act('planet_control_action',{action_key:a.key})}>{a.name}</button>)}</div>
+      <button onClick={()=>setPage('Planet Control')}>Open Planet Control</button>
+    </Panel>
+
+    <Panel title="Locations" help="Only locations inside the current galaxy are shown here. Use the Galaxies map for cross-galaxy movement.">
+      <div className="routeList">{currentLocations.map(pl => <div key={pl.id}>
+        <span>{state.location.name} → {pl.name}</span>
+        {pl.id === state.location.id ? <button disabled>Current</button> : <button onClick={()=>act('travel',{planet_id:pl.id})}>Travel</button>}
+      </div>)}</div>
+    </Panel>
+
+    <Panel title="Active Ship" help="Ship loss is not permanent character death. Insurance pays part of the loss and the permanent starter ship is always usable.">
+      <ShipCard ship={state.active_ship}/><div className="moduleRow">{state.modules.filter(m=>m.equipped).slice(0,8).map(m=><span key={m.id}>{m.name}</span>)}</div>
+      <button onClick={()=>setPage('Ships & Hangar')}>Manage Ship</button>
+    </Panel>
+
+    <Panel title="Local Goods" help="Current location prices. Legal goods are safer; illicit goods carry more risk and larger spread.">
+      <TwoCols leftTitle="Legal Goods" rightTitle="Illicit Goods" left={state.market.filter(m=>m.legal).slice(0,5)} right={state.market.filter(m=>!m.legal).slice(0,5)} />
+      <button onClick={()=>setPage('Market')}>View Market</button>
+    </Panel>
+
+    <Panel title="PvE Operations" help="Dashboard operations are limited to basic credit/XP work plus current-career jobs. Bosses, raids, wars, and galaxy-scale content stay off this quick panel.">
+      <h3 className="panelSubhead">Basic Work</h3>
+      <div className="opList detailed">{basicOps.map(o=><OperationRow key={o.code} item={o} actionLabel="Run" onRun={()=>act('pve_operation',{code:o.code})} />)}</div>
+      {activeJob && <h3 className="panelSubhead">Career: {activeJob.name}</h3>}
+      <div className="opList detailed">{careerTasks.map(t=><OperationRow key={t.key} item={t} actionLabel="Run Job" onRun={()=>act('career_task',{task_key:t.key})} />)}</div>
+    </Panel>
+
+    <Panel title="Recommended Next Actions" help="Sorted from current career, skills, ship power, energy use, and local planet conditions.">
+      <div className="opList detailed">{(state.recommended_actions || []).slice(0,5).map(r=><OperationRow key={`${r.kind}-${r.code}`} item={r} actionLabel={r.kind === 'career' ? 'Run Job' : 'Run'} onRun={()=>act(r.kind === 'career' ? 'career_task' : 'pve_operation', r.kind === 'career' ? {task_key:r.code} : {code:r.code})} />)}</div>
+    </Panel>
+
+    <Panel title="Recent Sector Activity" help="Server-side NPC simulation events from planets and stations in your current galaxy.">
+      <div className="simulationMeta">
+        <span>Tick: {sim.balance?.tick_minutes || '—'} min</span>
+        <span>Last actions: {sim.last_action_count ?? 0}</span>
+        <span>Last tick: {sim.last_tick_at ? new Date(sim.last_tick_at).toLocaleTimeString() : 'pending'}</span>
+      </div>
+      <EnhancedEventFeed events={sectorActivity} />
+    </Panel>
+
+    <Panel title="Medical & Recovery" help="Hospital time exists after ship destruction or serious injury. Surgery payments reduce time but never below 10 minutes.">
+      <div className="hugeTimer">{p.hospital_until ? timeLeft(p.hospital_until) : 'Clear'}</div>
+      <button onClick={()=>act('hospital_expedite',{minutes:30})}>Expedite Surgery</button>
+    </Panel>
+  </Grid>
+}
+
+
+
+function Profile({state,act}) {
+  const profile = state.profile || {};
+  const avatars = state.avatar_options || [];
+  const achievements = state.achievements || profile.achievements || {loops:[], unlockedBadges:[], passiveBuffs:{}};
+  const [tab,setTab] = useState('overview');
+  const [form,setForm] = useState({username:profile.username || '', displayName:profile.displayName || '', bio:profile.bio || '', avatarId:profile.avatarId || 'default', selectedBadgeCode:profile.selectedBadgeCode || ''});
+  useEffect(()=>{ setForm({username:profile.username || '', displayName:profile.displayName || '', bio:profile.bio || '', avatarId:profile.avatarId || 'default', selectedBadgeCode:profile.selectedBadgeCode || ''}); }, [profile.username, profile.displayName, profile.bio, profile.avatarId, profile.selectedBadgeCode]);
+  const selected = avatars.find(a=>a.id===form.avatarId) || avatars[0] || {url:'/assets/avatars/default.svg', label:'Default Pilot'};
+  const save = () => act('update_profile', form);
+  const stats = profile.stats || {};
+  const topLoops = [...(achievements.loops || [])].sort((a,b)=>(b.tierUnlocked-a.tierUnlocked)||(b.progress-a.progress)).slice(0,8);
+  const badgeOptions = achievements.unlockedBadges || [];
+  return <Page title="Profile" sub="Pilot identity, public profile, stats, achievement badges, and passive tier-8 bonuses.">
+    <div className="profileLayout">
+      <Panel title="Pilot Card" help="Your selected achievement badge appears on the lower-right of your profile image in chat, sidebar, and public profile views.">
+        <div className="profileHero">
+          <ProfileAvatar profile={{...profile, avatarUrl:selected.url, selectedBadgeCode:form.selectedBadgeCode, selectedBadgeUrl:form.selectedBadgeCode}} size="lg" />
+          <div>
+            <h3>{form.displayName || profile.displayName || 'Nova Pilot'}</h3>
+            <span>@{form.username || profile.username}</span>
+            <p>{form.bio || 'No status message set.'}</p>
+          </div>
+        </div>
+        <Stats pairs={{Level:state.player.level, XP:stats.xp || state.player.xp, Credits:stats.credits || state.player.credits, Galaxy:profile.homeGalaxy || '—', Location:profile.currentLocation || '—', Career:profile.currentJob?.name || '—', Ship:profile.currentShip?.name || profile.currentShip?.template_name || '—'}} />
+      </Panel>
+
+      <Panel title="Edit Profile">
+        <div className="profileForm">
+          <label>Username<input value={form.username} maxLength={24} onChange={e=>setForm(f=>({...f, username:e.target.value}))} /></label>
+          <label>Display Name<input value={form.displayName} maxLength={32} onChange={e=>setForm(f=>({...f, displayName:e.target.value}))} /></label>
+          <label>Status / Bio<textarea value={form.bio} maxLength={180} onChange={e=>setForm(f=>({...f, bio:e.target.value}))} placeholder="Short pilot status" /></label>
+          <button className="primary" onClick={save}><Save size={16}/> Save Profile</button>
+        </div>
+      </Panel>
+    </div>
+
+    <div className="tabBar profileTabs">
+      {['overview','achievements','badges','avatars'].map(t=><button key={t} className={tab===t?'active':''} onClick={()=>setTab(t)}>{label(t)}</button>)}
+    </div>
+
+    {tab === 'overview' && <Grid>
+      <Panel title="Career Stats">
+        <Stats pairs={{Travel:stats.travelEvents || 0, Combat:stats.combatEvents || 0, Mining:stats.miningEvents || 0, Salvage:stats.salvageEvents || 0, Exploration:stats.explorationEvents || 0, Crafting:stats.craftingEvents || 0, ShipPower:stats.shipPower || 0, Cargo:stats.cargo || 0}} />
+      </Panel>
+      <Panel title="Top Achievements">
+        <div className="achievementTopList">{topLoops.map(a=><div key={a.loopKey}><AchievementBadge badge={a.badgeUrl} size="sm"/><b>{a.name}</b><span>Tier {a.tierUnlocked || 0} • {fmt(a.progress)} / {fmt(a.nextTarget)}</span><Progress value={a.percentToNext || 0}/></div>)}</div>
+      </Panel>
+      <Panel title="Tier 8 Passive Buffs">
+        <div className="buffGrid">{Object.entries(achievements.passiveBuffs || {}).map(([k,v])=><span key={k}>{label(k)} <b>{typeof v === 'number' ? `${(v*100).toFixed(2)}%` : String(v)}</b></span>)}{!Object.keys(achievements.passiveBuffs || {}).length && <p className="muted">No tier-8 passive buffs unlocked yet.</p>}</div>
+      </Panel>
+    </Grid>}
+
+    {tab === 'achievements' && <Panel title="Game Loop Achievements" help="Each loop has 8 tiers. Tier 7 is tuned as a long active-play goal; Tier 8 is a deeper 8-month-style chase and unlocks a small relevant passive.">
+      <div className="achievementGrid">{(achievements.loops || []).map(a=><div key={a.loopKey} className={`achievementLoopCard tier${a.tierUnlocked || 0}`}>
+        <div className="achievementLoopHead"><AchievementBadge badge={a.badgeUrl} size="md"/><div><b>{a.name}</b><span>{a.summary}</span></div><em>T{a.tierUnlocked || 0}/8</em></div>
+        <Progress value={a.percentToNext || 0}/>
+        <small>{fmt(a.progress)} / {fmt(a.nextTarget)} actions toward next tier</small>
+        <div className="badgeRow">{a.badges.map(b=><AchievementBadge key={b.code} badge={b} size="tiny" locked={!b.unlocked}/>)}</div>
+        <small>Tier 8 passive: {Object.entries(a.tier8PassiveBuff || {}).map(([k,v])=>`${label(k)} ${(Number(v)*100).toFixed(2)}%`).join(', ') || 'none'}</small>
+      </div>)}</div>
+    </Panel>}
+
+    {tab === 'badges' && <Panel title="Showcase Badge" help="Pick one unlocked achievement badge. It overlays the lower-right of your profile image.">
+      <div className="badgePicker">
+        <button className={!form.selectedBadgeCode ? 'selectedBadgeChoice' : ''} onClick={()=>setForm(f=>({...f, selectedBadgeCode:''}))}>No badge</button>
+        {badgeOptions.map(b=><button key={b.code} className={form.selectedBadgeCode===b.code?'selectedBadgeChoice':''} onClick={()=>setForm(f=>({...f, selectedBadgeCode:b.code}))}><AchievementBadge badge={b} size="sm"/><span>{b.name} T{b.tier}</span></button>)}
+      </div>
+      <button className="primary" onClick={save}>Save Badge</button>
+    </Panel>}
+
+    {tab === 'avatars' && <Panel title="Avatar Selection" help="24 local sci-fi pilot portraits plus fallback. Selection is data-driven from the backend avatar manifest.">
+      <div className="avatarGrid">
+        {avatars.map(a=><button key={a.id} className={form.avatarId===a.id?'selectedAvatar':''} onClick={()=>setForm(f=>({...f, avatarId:a.id}))}>
+          <GameImage src={a.url} assetType="avatar" alt={a.label} />
+          <span>{a.label}</span>
+        </button>)}
+      </div>
+    </Panel>}
+  </Page>;
+}
+
+function Chat({state,act,setPage}) {
+  const [message,setMessage] = useState('');
+  const [profileModal,setProfileModal] = useState(null);
+  const messages = state.chat_messages || [];
+  const profiles = state.public_profiles || [];
+  const send = (e) => {
+    e.preventDefault();
+    const text = message.trim();
+    if (!text) return;
+    act('send_chat_message', {message:text});
+    setMessage('');
+  };
+  const openProfile = (m) => {
+    const p = findPublicProfile(profiles, m);
+    if (p) setProfileModal(p);
+  };
+  return <Page title="Local Chat" sub="Chat identity uses your selected profile image, badge, and display name.">
+    <div className="chatLayout">
+      <Panel title="Pilot Identity">
+        <div className="chatIdentity"><ProfileAvatar profile={state.profile} size="md" /><div><b>{state.profile?.displayName || state.player.callsign}</b><span>@{state.profile?.username || state.user.username}</span><small>{state.profile?.bio || 'No public status.'}</small></div></div>
+        <button onClick={()=>setPage('Profile')}>Edit Profile</button>
+      </Panel>
+      <Panel title="Sector Channel" help="Click a pilot image/name to view their public profile. Wealth and private strength stats stay hidden.">
+        <div className="chatFeed">
+          {messages.length === 0 && <div className="emptyChat">No messages yet.</div>}
+          {messages.map(m=><div key={m.id} className={`chatMessage ${m.isCurrentUser?'mine':''} ${m.senderType || 'player'}`}>
+            <ProfileAvatar profile={{avatarUrl:m.avatarUrl, selectedBadgeCode:m.selectedBadgeCode, selectedBadgeUrl:m.selectedBadgeUrl, displayName:m.senderName}} size="sm" onClick={()=>openProfile(m)} />
+            <div>
+              <button className="chatNameButton" onClick={()=>openProfile(m)}><b>{m.senderName}<em>{label(m.senderType || 'player')}</em></b></button>
+              <p>{m.message}</p>
+              <small>{m.createdAt ? new Date(m.createdAt).toLocaleString() : ''}</small>
+            </div>
+          </div>)}
+        </div>
+        <form className="chatComposer" onSubmit={send}>
+          <input value={message} maxLength={420} onChange={e=>setMessage(e.target.value)} placeholder="Send a sector message" />
+          <button className="primary"><Send size={16}/> Send</button>
+        </form>
+      </Panel>
+    </div>
+    <PublicProfileModal profile={profileModal} onClose={()=>setProfileModal(null)} />
+  </Page>;
+}
+
+
+function StarMap({state,act,clock}) {
+  const travel = state.travel_state || {};
+  const preferredMode = travel.active && travel.mode === 'galaxy' ? 'galaxy' : travel.open_space && travel.open_space_map_type === 'galaxy' ? 'galaxy' : 'system';
+  const [mode,setMode] = useState(preferredMode);
+  useEffect(() => { setMode(preferredMode); }, [preferredMode, state.location?.planet_id, state.location?.galaxy_id]);
+  const mapModeProps = {mapMode:mode, onMapModeChange:setMode};
+  return <div>
+    {mode === 'galaxy' ? <Galaxies state={state} act={act} clock={clock} {...mapModeProps} /> : <SystemMap state={state} act={act} clock={clock} {...mapModeProps} />}
+  </div>
+}
+
+
+function MapOperationPanel({state, clock}) {
+  const op = state.map_operation;
+  if (!op || op.status !== 'active') return null;
+  return <div className="mapOperationBanner"><b>{label(op.operation_type || 'operation')} active</b><span>{op.message || 'Working on map objective.'}</span><small>{op.ends_at ? `ETA ${clockTimeLeft(op.ends_at)}` : ''}</small></div>;
+}
+
+function Galaxies({state,act,clock,mapMode,onMapModeChange}) {
+  const map = state.galaxy_map || {nodes:[], lanes:[]};
+  const travel = state.travel_state || {};
+  return <Page title="Map — Galaxy View" sub="Galaxy travel now uses adjacent gate lanes. Use planet view to dock at a Jump Gate, then jump one galaxy at a time.">
+    <TravelStatus state={state} clock={clock} />
+    <CargoOperationPanel state={state} />
+    <Panel title="Galaxy Map" help="Nodes summarize security, market activity, conflict, influence, and known locations across each galaxy.">
+      <MapView type="galaxy" map={map} travel={travel}
+        onTravel={(node)=>act('galaxy_travel',{galaxy_id:node.id})}
+        onGoHere={(pos)=>act('go_here',{...pos,map_type:'galaxy'})}
+        onCancelTravel={()=>act('cancel_travel',{})}
+        onScanArea={(pos)=>act('scan_area',{...pos,map_type:'galaxy'})}
+        onIntercept={(ship)=>act('intercept_traveler',{target_ref:ship.combatTargetRef || ship.id})}
+        onResolveIntercept={()=>act('resolve_intercept_now',{})}
+        onScanSite={(site)=>act('scan_exploration_site',{site_id:site.explorationSiteId || site.id})}
+        onInvestigate={(site)=>act('investigate_exploration_site',{site_id:site.explorationSiteId || site.id})}
+        currentId={map.current_galaxy_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} publicProfiles={state.public_profiles || []} />
+      <div className="routeLegend"><span className="solid">Visited route</span><span className="dash">Available route</span><span className="activeLine">Active travel</span><span>Ship marker follows backend timestamp progress.</span></div>
+    </Panel>
+    <div className="cards3">{map.nodes.map(g => <Panel key={g.id} title={g.name}>
+      <div className="nodeHeader"><ItemVisual item={g} size="ship"/><div><b>{g.sector}</b><span>{g.faction_name || 'Neutral'} control • {g.capturable ? 'Capturable' : 'Home safe'} • Center value {fmt(g.center_value || 0)}</span></div></div>
+      <Stats pairs={{Locations:g.planet_count, Gates:g.gate_count, SecurityAvg:g.security_avg, Market:g.market_activity_avg, Conflict:g.conflict_avg, Bonus:`${g.control_bonus_pct||0}%`}} />
+      {g.current ? <button disabled>Current Galaxy</button> : <button disabled={travel.active} onClick={()=>act('galaxy_travel',{galaxy_id:g.id})}>Jump via Gate</button>}
+      <small className="muted">{g.declare_reason || 'Planet wars happen from Planet View. Galaxy flips after all planets are controlled.'}</small>
+    </Panel>)}</div>
+  </Page>
+}
+
+function SystemMap({state,act,clock,mapMode,onMapModeChange}) {
+  const map = state.system_map || {nodes:[], lanes:[]};
+  const travel = state.travel_state || {};
+  return <Page title="Map — System View" sub="Planet view shows local planets, stations, pirate stations, resources, and galaxy gates leading to adjacent galaxies.">
+    <TravelStatus state={state} clock={clock} />
+    <CargoOperationPanel state={state} />
+    <MapOperationPanel state={state} clock={clock} />
+    <Panel title={`${state.location?.galaxy_name || 'Current Galaxy'} Local Map`} help="Planet/station nodes expose security, stability, faction control, market strength, operation count, and route danger.">
+      <MapView type="system" map={map} travel={travel}
+        onTravel={(node)=>node.kind === 'gate' ? act('galaxy_travel',{galaxy_id:node.target_galaxy_id}) : act('travel',{planet_id:node.id,dock:true})}
+        onGoHere={(pos)=>act('go_here',{...pos,map_type:'system'})}
+        onCancelTravel={()=>act('cancel_travel',{})}
+        onScanArea={(pos)=>act('scan_area',{...pos,map_type:'system'})}
+        onIntercept={(ship)=>act('intercept_traveler',{target_ref:ship.combatTargetRef || ship.id})}
+        onResolveIntercept={()=>act('resolve_intercept_now',{})}
+        onMine={(site)=>act('mine_ore_site',{site_id:site.siteId || site.id})}
+        onSalvage={(site)=>act('salvage_site',{site_id:site.salvageSiteId || site.id})}
+        onScanSite={(site)=>act('scan_exploration_site',{site_id:site.explorationSiteId || site.id})}
+        onInvestigate={(site)=>act('investigate_exploration_site',{site_id:site.explorationSiteId || site.id})}
+        onEnterPirateStation={(station)=>act('enter_pirate_station',{station_id:station.stationId || station.id})}
+        currentId={map.current_planet_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} publicProfiles={state.public_profiles || []} />
+      <div className="routeLegend"><span className="solid">Visited local route</span><span className="dash">Available local route</span><span className="activeLine">Active local travel</span></div>
+    </Panel>
+    <div className="cards3">{map.nodes.map(pl => <Panel key={pl.id} title={pl.name}>
+      <div className="nodeHeader"><ItemVisual item={pl} size="ship"/><div><b>{pl.type}</b><span>{label(pl.economy_type || 'balanced')} economy • {label(pl.controller_type || 'npc')} control</span></div></div>
+      <Stats pairs={{Security:pl.security_level, Stability:pl.stability_level, Risk:pl.risk_level, LegalMarket:pl.legal_market_strength, IllicitMarket:pl.illicit_market_strength, PvE:pl.available_operations}} />
+      {pl.current ? <button disabled>Current Location</button> : <button disabled={travel.active} onClick={()=>act('travel',{planet_id:pl.id})}>Travel Local</button>}
+    </Panel>)}</div>
+  </Page>
+}
+
+function Market({state,act}) {
+  const [tab,setTab] = useState('legal');
+  const [category,setCategory] = useState('all');
+  const [query,setQuery] = useState('');
+  const legalGoods = state.market.filter(m=>m.legal);
+  const illicitGoods = state.market.filter(m=>!m.legal);
+  const inventory = state.inventory_summary || [];
+  const categories = [['all','All'], ...Object.entries(state.inventory_categories || {})];
+  const sellable = inventory.filter(i => i.sellable !== false && i.available_qty > 0 && (category === 'all' || i.category === category) && `${i.name} ${i.item_code} ${i.category_label}`.toLowerCase().includes(query.toLowerCase()));
+  const sellItem = (item, qty) => {
+    const safeQty = Math.max(1, Math.min(qty, item.available_qty || item.qty || 1));
+    if (item.source === 'cargo_hold' && item.commodity_id) act('sell_commodity',{commodity_id:item.commodity_id,qty:safeQty});
+    else act('sell_inventory_item',{item_code:item.item_code,qty:safeQty});
+  };
+  const listItem = (item, defaultQty=1) => {
+    const maxQty = Math.max(1, item.available_qty || item.qty || 1);
+    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const base = Number(item.base_value || item.avg_cost || 100);
+    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice };
+    act('create_player_listing', payload);
+  };
+  const buyListing = (listing, qty=1) => {
+    const safeQty = Math.max(1, Math.min(qty, listing.remaining_qty || 1));
+    act('buy_player_listing', {listing_id:listing.id, qty:safeQty});
+  };
+  const playerMarket = state.player_market || {active:[], history:[], balance:{}};
+  return <Page title="Commodities Market" sub="Legal trade is safe. Illicit trade uses real heat, jail, bribe, breakout, cooldown, demand, stock, and restock state.">
+    <div className="tabBar">
+      <button className={tab==='legal'?'active':''} onClick={()=>setTab('legal')}>Legal Goods</button>
+      <button className={tab==='illicit'?'active':''} onClick={()=>setTab('illicit')}>Illicit Goods</button>
+      <button className={tab==='sell'?'active':''} onClick={()=>setTab('sell')}>Sell Inventory</button>
+      <button className={tab==='player'?'active':''} onClick={()=>setTab('player')}>Player Market</button>
+      <button className={tab==='activity'?'active':''} onClick={()=>setTab('activity')}>Market Activity</button>
+    </div>
+
+    <JailHeatPanel state={state} act={act} />
+    <CargoOperationPanel state={state} />
+
+    {(tab === 'legal' || tab === 'illicit') && <>
+      <Panel title="Cargo Usage" help="Buying market goods uses backend cargo capacity checks. Legal goods carry no legal risk; illicit goods can trigger arrest.">
+        <Stats pairs={{Used:state.cargo_usage?.total ?? state.player.cargo, Free:state.cargo_usage?.free ?? Math.max(0,state.player.max_cargo-state.player.cargo), Max:state.cargo_usage?.max ?? state.player.max_cargo, MarketCargo:state.cargo_usage?.market_mass ?? 0, Inventory:state.cargo_usage?.inventory_mass ?? 0, Modules:state.cargo_usage?.module_mass ?? 0, Pending:state.cargo_usage?.pending_mass ?? 0}} />
+        <Progress value={((state.cargo_usage?.total ?? state.player.cargo) / Math.max(1, state.cargo_usage?.max ?? state.player.max_cargo))*100} danger={state.cargo_usage?.over_capacity} />
+        {state.cargo_usage?.over_capacity && <div className="warningLine"><AlertTriangle size={16}/> Cargo exceeds current ship capacity. Sell, craft, or swap to a larger ship.</div>}
+      </Panel>
+      <MarketPressure state={state} />
+    </>}
+
+    {tab === 'legal' && <Panel title="Legal Goods" help="Legal buying and selling has no heat, no arrest roll, no jail risk, and no illegal cooldown."><MarketTable rows={legalGoods} act={act} /></Panel>}
+    {tab === 'illicit' && <Panel title="Illicit Goods" help="Illicit goods pay better but raise heat and can cause jail. Risk scales with item severity, quantity, security, stability, heat, ship stealth, and skills."><MarketTable rows={illicitGoods} act={act} illegal /></Panel>}
+
+    {tab === 'sell' && <>
+      <Panel title="Inventory Filters">
+        <div className="inventoryToolbar">
+          <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search inventory" />
+          <div className="chipRow">{categories.map(([key,name])=><button key={key} className={category===key?'active':''} onClick={()=>setCategory(key)}>{name}</button>)}</div>
+        </div>
+      </Panel>
+      <Panel title="Sell Inventory" help="Selling legal items restocks the local market with no risk. Selling illicit inventory rolls heat/jail risk and can seize cargo.">
+        <table><thead><tr><th>Item</th><th>Category</th><th>Status</th><th>Qty</th><th>Mass</th><th>Value</th><th>Risk</th><th></th></tr></thead><tbody>
+          {sellable.map(i=><tr key={`${i.source}-${i.id}-${i.item_code}`}>
+            <td><div className="itemNameCell"><ItemVisual item={i} /><div><b>{i.name}</b><br/><small>{i.description || i.item_code}</small></div></div></td>
+            <td>{i.category_label || label(i.category)}</td>
+            <td className={i.legal?'ok':'bad'}>{i.legal?'Legal':'Illegal'} • {label(i.rarity || 'common')} <TierBadge item={i}/></td>
+            <td>{fmt(i.available_qty)}</td>
+            <td>{fmt(i.cargo_mass)}</td>
+            <td>{fmt(i.market_sell_estimate?.unit || i.base_value)}</td>
+            <td>{i.legal ? <span className="safeTrade">No risk</span> : <span className="heatText">{label(i.illegal_risk?.level || 'risk')} • {fmt(i.illegal_risk?.score || 0)}%</span>}</td>
+            <td><button disabled={state.heat_jail?.jailed} onClick={()=>sellItem(i,1)}>Sell 1</button><button disabled={state.heat_jail?.jailed} onClick={()=>sellItem(i,Math.min(5,i.available_qty || i.qty))}>Sell 5</button><button onClick={()=>listItem(i,1)}>List 1</button><button onClick={()=>listItem(i,Math.min(5,i.available_qty || i.qty))}>List Qty</button></td>
+          </tr>)}
+        </tbody></table>
+      </Panel>
+    </>}
+
+    {tab === 'player' && <>
+      <Panel title="Player Market Rules" help="Listings remove items into exchange custody. Cancelling returns remaining inventory. Successful sales pay the seller after exchange fees.">
+        <Stats pairs={{ActiveListings:playerMarket.active.length, ListingFee:`${Math.round((playerMarket.balance?.listing_fee_rate || 0)*1000)/10}%`, SaleFee:`${Math.round((playerMarket.balance?.sale_fee_rate || 0)*1000)/10}%`, MaxPriceMult:`${playerMarket.balance?.max_unit_price_mult || 12}x`}} />
+      </Panel>
+      <Panel title="Active Player Listings">
+        <table><thead><tr><th>Item</th><th>Seller</th><th>Status</th><th>Qty</th><th>Unit</th><th>Total</th><th></th></tr></thead><tbody>
+          {(playerMarket.active || []).map(l=><tr key={l.id}>
+            <td><div className="itemNameCell"><ItemVisual item={l} /><div><b>{l.item_name}</b><br/><small>{l.description || l.item_code}</small></div></div></td>
+            <td>{l.seller_name}<br/><small>{l.planet_name || 'Unknown origin'}</small></td>
+            <td className={l.legal?'ok':'bad'}>{l.legal?'Legal':'Illegal'} • {label(l.category)} • {label(l.rarity || 'common')} <TierBadge item={l}/></td>
+            <td>{fmt(l.remaining_qty)} / {fmt(l.qty)}</td>
+            <td>{fmt(l.unit_price)}</td>
+            <td>{fmt((l.remaining_qty || 0) * (l.unit_price || 0))}</td>
+            <td>{l.own_listing ? <button onClick={()=>act('cancel_player_listing',{listing_id:l.id})}>Cancel</button> : <><button onClick={()=>buyListing(l,1)}>Buy 1</button><button onClick={()=>buyListing(l,Math.min(5,l.remaining_qty || 1))}>Buy 5</button><button onClick={()=>buyListing(l,l.remaining_qty || 1)}>Buy All</button></>}</td>
+          </tr>)}
+        </tbody></table>
+      </Panel>
+      <Panel title="My Listing History">
+        <div className="feedList compactFeed">{(playerMarket.history || []).slice(0,30).map(l=><div key={l.id}><b>{label(l.status)}: {l.item_name}</b><span>{fmt(l.remaining_qty)} / {fmt(l.qty)} left • {fmt(l.unit_price)} each • {l.seller_name}</span><small>{l.planet_name || 'Unknown'} • {new Date(l.created_at).toLocaleString()}</small></div>)}</div>
+      </Panel>
+    </>}
+
+    {tab === 'activity' && <>
+      <Panel title="Recent Player Transactions">
+        {(state.market_transactions || []).slice(0,20).map(t=><div className="itemLine" key={t.id}><b>{label(t.action)}: {t.item_name}</b><span>{fmt(t.qty)} @ {fmt(t.unit_price)} • Net {fmt(t.net)} • Fee {fmt(t.fee)} • {t.planet_name}</span></div>)}
+      </Panel>
+      <Panel title="Price Movement" help="Player buying depletes supply and raises demand. Player selling restocks local markets and reduces demand. System restock slowly replenishes depleted stock.">{(state.market_history || []).slice(0,20).map(h=><div className="itemLine" key={h.id}><b>{h.commodity_name}</b><span>{label(h.source)} • Supply {h.supply_delta > 0 ? '+' : ''}{h.supply_delta} • Demand {h.demand_delta > 0 ? '+' : ''}{h.demand_delta} • Buy {fmt(h.buy_price)} • Sell {fmt(h.sell_price)} • {h.planet_name}</span></div>)}</Panel>
+    </>}
+  </Page>
+}
+
+function MarketTable({rows,act,illegal}) {
+  const heat = rows?.[0]?.illicitRisk?.heat;
+  return <table><thead><tr><th>Commodity</th><th>Type</th><th>Pressure</th><th>Stock</th><th>Demand</th><th>Trend</th><th>Buy</th><th>Sell</th><th>Risk</th><th></th></tr></thead><tbody>{rows.map(m=>{
+    const stockPct = Number(m.stockPct ?? Math.round(((m.supply || 0) / 130) * 100));
+    const out = !!m.outOfStock || Number(m.supply || 0) <= 0;
+    const risk = m.illicitRisk || {};
+    const cooldown = risk.blockedReason;
+    return <tr key={m.commodity_id} className={out?'rowMuted':''}>
+      <td><div className="itemNameCell"><ItemVisual item={m} /><div><b>{m.name}</b><br/><small>{m.description}</small></div></div></td>
+      <td className={m.legal?'ok':'bad'}>{m.legal?'LEGAL':'ILLICIT'} • {label(m.category)} <TierBadge item={m}/></td>
+      <td><PressureBadge item={m}/></td>
+      <td><Progress value={stockPct}/><small>{out ? 'Out of Stock • 0%' : `${stockPct}% • ${label(m.supplyRating)}`}</small></td>
+      <td><Progress value={m.demand}/><small>{m.demand}% • {label(m.demandRating)}</small></td>
+      <td>{trendIcon(m.priceTrend)} {label(m.priceTrend || 'flat')}<br/><small>{label(m.scarcityLevel)}</small></td>
+      <td>{fmt(m.buy_price)}</td><td>{fmt(m.sell_price)}</td>
+      <td>{m.legal ? <span className="safeTrade">No risk</span> : <span className="heatText">{fmt(risk.caughtChance)}% caught<br/><small>{label(risk.severity)} • jail {fmt(risk.jailMinutesMin)}-{fmt(risk.jailMinutesMax)}m</small></span>}</td>
+      <td><button disabled={out || !!cooldown} title={out?'Out of stock':cooldown || ''} onClick={()=>act('buy_commodity',{commodity_id:m.commodity_id,qty:1})}>Buy 1</button><button disabled={out || !!cooldown} title={out?'Out of stock':cooldown || ''} onClick={()=>act('buy_commodity',{commodity_id:m.commodity_id,qty:5})}>Buy 5</button>{!illegal && <button disabled={out} onClick={()=>act('buy_commodity',{commodity_id:m.commodity_id,qty:25})}>Buy 25</button>}</td>
+    </tr>})}</tbody></table>
+}
+
+function JailHeatPanel({state,act}) {
+  const h = state.heat_jail || {};
+  if (!h || (h.heat === 0 && !h.jailed && !h.illegalActionCooldownUntil)) return null;
+  return <Panel title="Heat / Jail Status" help="Heat is created only by illegal activity. Legal trade never raises heat. Heat decays slowly server-side.">
+    <div className={`jailHeatPanel ${h.jailed ? 'jailed' : ''}`}>
+      <div className="heatBlock"><b>Heat</b><Progress value={h.heat || 0} danger={(h.heat||0)>=40}/><span>{fmt(h.heat)} / 100 • {label(h.heatLevel || 'cold')}</span></div>
+      {h.illegalActionCooldownUntil && <div className="cooldownBlock"><b>Illegal Cooldown</b><span>{clockTimeLeft(h.illegalActionCooldownUntil)} remaining</span></div>}
+      {h.jailed && <div className="jailBlock"><b>JAILED</b><span>{h.jailReason}</span><small>{h.jailLocation} • {label(h.jailSeverity)} • {clockTimeLeft(h.jailedUntil)} remaining</small><div className="buttonRow"><button disabled={!h.bribe?.available} onClick={()=>act('attempt_bribe')}>Bribe {fmt(h.bribe?.cost || 0)}</button><button disabled={!h.breakout?.available} onClick={()=>act('attempt_breakout')}>Breakout {fmt(h.breakout?.chance || 0)}%</button></div>{h.breakoutCooldownUntil && <small>Breakout cooldown: {clockTimeLeft(h.breakoutCooldownUntil)}</small>}</div>}
+    </div>
+  </Panel>;
+}
+
+function PressureBadge({item}) {
+  return <span className={`pressureBadge ${item.legal ? 'legal' : 'illegal'}`}>{fmt(item.pressureScore)} • {label(item.scarcityLevel || 'balanced')}</span>
+}
+
+function Inventory({state,act}) {
+  const [category,setCategory] = useState('all');
+  const [query,setQuery] = useState('');
+  const [sort,setSort] = useState('value');
+  const [filter,setFilter] = useState('all');
+  const [selected,setSelected] = useState(null);
+  const categories = [['all','All'], ...Object.entries(state.inventory_categories || {})];
+  const inventoryItems = state.inventory_summary || [];
+  const filteredItems = inventoryItems
+    .filter(i => category === 'all' || i.category === category)
+    .filter(i => `${i.name} ${i.item_code} ${i.category_label} ${i.subcategory || ''}`.toLowerCase().includes(query.toLowerCase()))
+    .filter(i => filter === 'all' ||
+      (filter === 'legal' && i.legal) ||
+      (filter === 'illegal' && !i.legal) ||
+      (filter === 'usable' && i.usable) ||
+      (filter === 'sellable' && i.sellable) ||
+      (filter === 'equippable' && i.equippable) ||
+      (filter === 'crafting' && i.craftable_material) ||
+      (filter === 'reserved' && (i.reserved_qty || 0) > 0)
+    )
+    .sort((a,b) => {
+      if (sort === 'qty') return (b.available_qty||0)-(a.available_qty||0);
+      if (sort === 'mass') return (b.cargo_mass||0)-(a.cargo_mass||0);
+      if (sort === 'rarity') return (b.rarity_rank||0)-(a.rarity_rank||0) || (b.total_value||0)-(a.total_value||0);
+      if (sort === 'name') return String(a.name).localeCompare(String(b.name));
+      if (sort === 'category') return String(a.category_label).localeCompare(String(b.category_label)) || String(a.name).localeCompare(String(b.name));
+      return (b.total_value||b.base_value||0)-(a.total_value||a.base_value||0);
+    });
+  const totals = inventoryItems.reduce((a,i)=>{
+    a.items += 1; a.units += Number(i.qty || 0); a.reserved += Number(i.reserved_qty || 0); a.value += Number(i.total_value || ((i.base_value || 0) * (i.qty || 0)));
+    if (!i.legal) a.illegal += Number(i.qty || 0);
+    return a;
+  }, {items:0, units:0, reserved:0, value:0, illegal:0});
+  const sellItem = (item, qty) => {
+    const safeQty = Math.max(1, Math.min(qty, item.available_qty || item.qty || 1));
+    if (item.source === 'cargo_hold' && item.commodity_id) act('sell_commodity',{commodity_id:item.commodity_id,qty:safeQty});
+    else act('sell_inventory_item',{item_code:item.item_code,qty:safeQty});
+  };
+  const listItem = (item) => {
+    const maxQty = Math.max(1, item.available_qty || item.qty || 1);
+    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, '1')) || 1));
+    const base = Number(item.market_sell_estimate?.unit || item.base_value || item.avg_cost || 100);
+    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    act('create_player_listing', { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice });
+  };
+  const canUse = (i) => i.usable && (i.available_qty || 0) > 0 && i.source !== 'cargo_hold';
+  const canEquip = (i) => i.equippable && (i.available_qty || 0) > 0 && i.source === 'inventory';
+  const cargoPct = state.cargo_usage?.pct ?? (((state.cargo_usage?.total || 0) / Math.max(1, state.cargo_usage?.max || 1))*100);
+  return <Page title="Inventory" sub="Unified cargo, loose inventory, materials, modules, consumables, illegal goods, market listing readiness, and item inspection.">
+    <Panel title="Cargo Capacity">
+      <Stats pairs={{Used:state.cargo_usage?.total ?? 0, Free:state.cargo_usage?.free ?? 0, Max:state.cargo_usage?.max ?? 0, Full:`${Math.round(cargoPct)}%`, Value:totals.value, Reserved:totals.reserved}} />
+      <Progress value={cargoPct} danger={state.cargo_usage?.over_capacity || cargoPct >= 95} />
+      {(state.cargo_usage?.warnings || []).map(w=><div className="warningLine" key={w}><AlertTriangle size={16}/> {label(w)}</div>)}
+    </Panel>
+
+    <Panel title="Inventory Controls">
+      <div className="inventoryToolbar advancedInventoryToolbar">
+        <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search item, category, code, subcategory" />
+        <div className="chipRow">{categories.map(([key,name])=><button key={key} className={category===key?'active':''} onClick={()=>setCategory(key)}>{name}</button>)}</div>
+        <div className="inventorySelectRow">
+          <select value={sort} onChange={e=>setSort(e.target.value)}>
+            <option value="value">Sort by total value</option><option value="name">Sort by name</option><option value="category">Sort by category</option><option value="rarity">Sort by rarity</option><option value="qty">Sort by quantity</option><option value="mass">Sort by cargo mass</option>
+          </select>
+          <select value={filter} onChange={e=>setFilter(e.target.value)}>
+            <option value="all">All statuses</option><option value="legal">Legal only</option><option value="illegal">Illegal only</option><option value="usable">Usable</option><option value="sellable">Sellable</option><option value="equippable">Equippable</option><option value="crafting">Crafting materials</option><option value="reserved">Reserved/listed</option>
+          </select>
+        </div>
+      </div>
+    </Panel>
+
+    <div className="inventoryLayout">
+      <div className="inventoryCardGrid deepInventoryGrid">{filteredItems.map(i=><div className={`inventoryCard ${i.legal ? '' : 'illegalItem'} rarity-${i.rarity || 'common'} ${selected?.item_code===i.item_code && selected?.source===i.source ? 'selectedInventoryCard' : ''}`} key={`${i.source}-${i.id}-${i.item_code}`}>
+        <ItemVisual item={i} />
+        <div className="inventoryCardMain"><b>{i.name}</b><span>{i.category_label || label(i.category)} • {label(i.subcategory || i.item_type)} • {label(i.rarity || 'common')} <TierBadge item={i}/></span><p>{i.description || i.item_code}</p></div>
+        <div className="inventoryStats"><small>Avail</small><b>{fmt(i.available_qty)}</b></div>
+        <div className="inventoryStats"><small>Mass</small><b>{fmt(i.cargo_mass)}</b></div>
+        <div className="inventoryStats"><small>Value</small><b>{fmt(i.total_value || i.base_value)}</b></div>
+        <div className="inventoryFlags"><span className={i.legal?'ok':'bad'}>{i.legal?'Legal':'Illegal'}</span><span className={`rarityBadge ${i.rarity || 'common'}`}>{label(i.rarity || 'common')}</span><TierBadge item={i}/><span>{i.source}</span>{i.reserved_qty > 0 && <span className="warn">Reserved {fmt(i.reserved_qty)}</span>}{i.used_in_recipe_count > 0 && <span>Used in {i.used_in_recipe_count} recipes</span>}</div>
+        <div className="actions inventoryActions">
+          <button onClick={()=>setSelected(i)}>Inspect</button>
+          {i.sellable && <button disabled={(i.available_qty||0)<=0} onClick={()=>sellItem(i,1)}>Sell 1</button>}
+          {i.sellable && <button disabled={(i.available_qty||0)<=0} onClick={()=>sellItem(i,Math.min(5,i.available_qty || i.qty))}>Sell 5</button>}
+          {i.allowed_actions?.includes('list') && <button disabled={(i.available_qty||0)<=0} onClick={()=>listItem(i)}>List</button>}
+          {canUse(i) && <button onClick={()=>act('use_inventory_item',{item_code:i.item_code,qty:1})}>Use</button>}
+          {canEquip(i) && <button onClick={()=>act('equip_inventory_item',{item_code:i.item_code})}>Equip</button>}
+          {i.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:i.item_code})}>Upgrade</button>}
+          {i.salvage_preview && <button onClick={()=>confirm(`Salvage ${i.name}?`) && act('salvage_inventory_item',{item_code:i.item_code,qty:1})}>Salvage</button>}
+        </div>
+      </div>)}</div>
+      <InventoryDetails item={selected || filteredItems[0]} act={act} sellItem={sellItem} listItem={listItem} />
+    </div>
+    {!filteredItems.length && <Panel title="Empty Inventory"><p className="muted">No items match the current filters.</p></Panel>}
+  </Page>;
+}
+
+function InventoryDetails({item, act, sellItem, listItem}) {
+  if (!item) return <Panel title="Item Details"><p className="muted">Select an item to inspect cargo, market, crafting, legality, and action status.</p></Panel>;
+  const risk = item.illegal_risk || {};
+  return <Panel title="Item Details" help="Inspection uses backend-resolved item data, not frontend-only guesses.">
+    <div className={`inventoryDetailPanel rarity-${item.rarity || 'common'} ${item.legal ? '' : 'illegalItem'}`}>
+      <ItemVisual item={item} size="lg" />
+      <div><h3>{item.name}</h3><p>{item.description || item.item_code}</p></div>
+      <Stats pairs={{Owned:item.qty, Available:item.available_qty, Reserved:item.reserved_qty || 0, Tier:`T${item.current_tier ?? item.tier ?? 1}/${item.max_tier ?? '—'}`, UnitValue:item.unit_value ?? item.base_value, TotalValue:item.total_value, Cargo:item.cargo_mass}} />
+      <div className="inventoryFlags detailFlags"><span>{item.category_label || label(item.category)}</span><span>{label(item.subcategory || item.item_type)}</span><span className={`rarityBadge ${item.rarity || 'common'}`}>{label(item.rarity || 'common')}</span><TierBadge item={item}/><span className={item.legal?'ok':'bad'}>{item.legal?'Legal':'Illegal'}</span>{item.cargo_exempt ? <span>Cargo Exempt</span> : null}</div>
+      {!item.legal && <div className="warningLine"><AlertTriangle size={16}/> {risk.message || 'Illegal goods risk depends on current security.'} Risk score {fmt(risk.score || 0)}</div>}
+      <div className="detailGrid">
+        <div><b>Market estimate</b><span>Unit {fmt(item.market_sell_estimate?.unit)} • Net all {fmt(item.market_sell_estimate?.net)} • Fee {fmt(item.market_sell_estimate?.fee)}</span></div>
+        <div><b>Tier upgrade</b><span>{item.tier_upgrade?.can_upgrade ? `Next T${item.tier_upgrade.next_tier} • ${fmt(item.tier_upgrade.credits)} Cr • ${Math.round((item.tier_upgrade.success_odds || 0)*100)}%` : (item.tier_upgrade?.reason || 'Not upgradeable')}</span></div>
+        <div><b>Salvage output</b><span>{item.salvage_preview ? `${fmt(item.salvage_preview.scrap)} scrap + ${(item.salvage_preview.materials || []).map(m=>`${m.qty}x ${m.name}`).join(', ')}` : 'Not salvageable'}</span></div>
+        <div><b>Allowed actions</b><span>{(item.allowed_actions || []).join(', ') || 'None'}</span></div>
+        <div><b>Blocked reasons</b><span>{(item.blocked_action_reasons || []).join(', ') || 'None'}</span></div>
+        <div><b>Acquired</b><span>{item.acquired_at ? new Date(item.acquired_at).toLocaleString() : 'Unknown'}</span></div>
+      </div>
+      {!!item.crafting_usage?.length && <div className="recipeUseList"><b>Crafting usage</b>{item.crafting_usage.slice(0,6).map(r=><span key={r.code}>{r.name}: needs {fmt(r.required)}</span>)}</div>}
+      <div className="actions inventoryActions detailActions">
+        {item.sellable && <button disabled={(item.available_qty||0)<=0} onClick={()=>sellItem(item,1)}>Sell 1</button>}
+        {item.allowed_actions?.includes('list') && <button disabled={(item.available_qty||0)<=0} onClick={()=>listItem(item)}>List on Market</button>}
+        {item.usable && <button disabled={(item.available_qty||0)<=0 || item.source==='cargo_hold'} onClick={()=>act('use_inventory_item',{item_code:item.item_code,qty:1})}>Use</button>}
+        {item.equippable && <button disabled={(item.available_qty||0)<=0 || item.source!=='inventory'} onClick={()=>act('equip_inventory_item',{item_code:item.item_code})}>Equip</button>}
+        {item.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:item.item_code})}>Upgrade Tier</button>}
+        {item.salvage_preview && <button onClick={()=>confirm(`Salvage ${item.name}?`) && act('salvage_inventory_item',{item_code:item.item_code,qty:1})}>Salvage</button>}
+      </div>
+    </div>
+  </Panel>
+}
+
+
+function Guild({state,act}) {
+  const skills = ['fleet_logistics','supply_lines','siege_weaponry','trade_influence','smuggling_network','mercenary_command','planetary_governance','industrial_efficiency','recon_operations','defensive_grid','recruitment','black_ops','orbital_command','resource_cartels','deep_storage','elite_contracts','tax_optimization','law_enforcement'];
+  return <Page title="Guild Command" sub="Guilds earn respect from wars, control, missions, and activity. Respect unlocks a large guild skill tree with small useful buffs.">
+    <Panel title={state.guild ? `Guild: ${state.guild.name}` : 'No Guild'}><Stats pairs={state.guild ? {Respect:state.guild.respect,Treasury:state.guild.treasury,Tag:state.guild.tag} : {}}/><button onClick={()=>act('create_guild',{name:'New Frontier Guild'})}>Create Guild</button><button onClick={()=>act('donate_guild',{credits:100000})}>Donate 100k</button></Panel>
+    <div className="skillGrid">{skills.map(k=><button key={k} onClick={()=>act('guild_skill',{skill_key:k})}><b>{label(k)}</b><small>Small member buff. Costs respect.</small></button>)}</div>
+  </Page>
+}
+
+
+function FactionWar({state,act,clock}) {
+  const wars = state.planet_wars || state.galaxy_wars || [];
+  const resolved = state.resolved_planet_wars || state.resolved_galaxy_wars || [];
+  const factions = state.factions || [];
+  const mapNodes = state.galaxy_map?.nodes || [];
+  const planets = state.system_map?.nodes?.filter(n => n.kind === 'planet') || state.planets || [];
+  const currentFaction = state.player_faction || {};
+  const guild = state.guild || {};
+  return <Page title="Faction War" sub="Wars are declared by guilds on planets. A galaxy flips only after one faction controls every planet inside it.">
+    <div className="cards3">
+      <Panel title="Your Side">
+        <div className="nodeHeader"><ItemVisual item={{name:currentFaction.name || 'Faction', category:currentFaction.color || 'faction'}} /><div><b>{currentFaction.name || 'Unassigned'}</b><span>{guild.name ? `${guild.name} guild` : 'No guild'} • planet wars use whole-faction attacker/defender sides.</span></div></div>
+        <Stats pairs={{GuildXP:guild.xp || 0, GuildRespect:guild.respect || 0, Treasury:guild.treasury || 0, ActiveWars:wars.filter(w=>w.status==='active').length, UpcomingWars:wars.filter(w=>w.status==='declared').length}} />
+      </Panel>
+      <Panel title="Faction Balance">
+        <div className="factionStack">{factions.map(f => {
+          const galaxyCount = mapNodes.filter(g=>g.faction_id===f.id).length;
+          const planetCount = (state.planets || []).filter(p=>p.faction_id===f.id).length;
+          return <div key={f.id} className="factionLine"><b>{f.name}</b><Progress value={galaxyCount*8}/><span>{galaxyCount} galaxies / {planetCount} planets</span>{f.id===currentFaction.id && <em>You</em>}</div>
+        })}</div>
+      </Panel>
+      <Panel title="Rules">
+        <p className="mutedBlock">One guild declares on one planet. Guild requires 10 members and pays a large scaling treasury cost. The capture ring opens after 2 days. Only attacker and defender factions can count inside the ring; the third faction is locked out until the planet war ends. Hold the ring alone for 5 minutes to win.</p>
+      </Panel>
+    </div>
+
+    <Panel title="Ongoing / Upcoming Planet Wars">
+      <div className="warGrid">{wars.map(w => {
+        const active = w.status === 'active';
+        const opensIn = clockTimeLeft(w.opens_at);
+        const holdLeft = w.capture_started_at ? clockTimeLeft(new Date(new Date(w.capture_started_at).getTime()+5*60*1000).toISOString()) : 'Not holding';
+        return <div className={`warCard galaxyWarCard ${active ? 'activeWar' : ''}`} key={w.id}>
+          <b>{w.planet_name}</b>
+          <span>{w.attacking_faction_name} vs {w.defending_faction_name || 'Neutral'} • {label(w.status)}</span>
+          <small>Declared by {w.declaring_guild_name} • {w.galaxy_name}</small>
+          <small>{active ? `Capture hold: ${holdLeft}` : `Opens: ${opensIn}`}</small>
+          <small>Declare cost {fmt(w.declare_cost || 0)} • Galaxy flips only after all planets fall</small>
+          <button onClick={()=>act('navigate_to_planet_war',{war_id:w.id})}>Navigate To</button>
+        </div>
+      })}{!wars.length && <p className="muted">No active or upcoming planet wars.</p>}</div>
+    </Panel>
+
+    <Panel title="Local Planet War Targets">
+      <div className="cards3">{planets.filter(p=>p.kind === 'planet' || p.galaxy_id).map(p => <div className="miniGalaxyCard" key={p.id}>
+        <b>{p.name}</b><span>{p.faction_name || 'Neutral'} control • Defense {p.defense_strength || 0}</span>
+        <small>{p.can_declare_planet_war ? `Cost ${fmt(p.declare_cost || 0)}` : (p.declare_reason || 'Unavailable')}</small>
+        <button disabled={!p.can_declare_planet_war} onClick={()=>act('declare_planet_war',{planet_id:p.id})}>Declare Planet War</button>
+      </div>)}</div>
+    </Panel>
+
+    <Panel title="Resolved Planet Wars">
+      <div className="feedList compactFeed">{resolved.map(w=><div key={w.id}><b>{w.planet_name}</b><span>Winner: {w.winner_faction_name || 'Unknown'} • {w.galaxy_name}</span><small>{w.resolved_at ? new Date(w.resolved_at).toLocaleString() : ''}</small></div>)}</div>
+    </Panel>
+  </Page>
+}
+
+
+function Warfare({state,act,clock}) {
+  return <FactionWar state={state} act={act} clock={clock} />;
+}
+
+
+function PlanetControl({state,act}) {
+  const pc = state.planet_control || {effects:{}, actions:[], events:[]};
+  const planet = pc.planet || state.location || {};
+  const effects = pc.effects || {};
+  return <Page title="Planet Control" sub="Local influence, faction control, security, stability, taxes, conflict, and economy modifiers for the current planet or station.">
+    <PlanetControlVisual state={state} />
+    <div className="cards3">
+      <Panel title="Current Control">
+        <Stats pairs={{
+          Planet:planet.name,
+          Controller:effects.controller_label || label(planet.controller_type || 'npc'),
+          Economy:label(planet.economy_type || 'balanced'),
+          Influence:planet.player_influence || 0,
+          Security:planet.security_level || 0,
+          Stability:planet.stability_level || 0,
+          Conflict:planet.conflict_level || 0,
+          Pirates:planet.pirate_activity || 0,
+          Market:planet.market_activity || 0,
+          Production:planet.production_bonus || 0,
+          MarketMod:planet.market_modifier || 0,
+          Tax:`${effects.tax_rate_pct ?? 0}%`
+        }} />
+      </Panel>
+      <Panel title="Control Effects">
+        <Stats pairs={{
+          IllegalRisk:effects.illegal_risk,
+          TravelDanger:effects.travel_danger,
+          CraftingBonus:`${effects.crafting_bonus ?? 0}%`,
+          LegalPricePressure:effects.legal_price_pressure,
+          ProductionSupplyBonus:effects.production_supply_bonus
+        }} />
+        <p className="mutedBlock">{effects.mission_effect}</p>
+      </Panel>
+      <Panel title="Faction Position">
+        <div className="influenceStack">
+          <InfluenceBar label="Player Influence" value={planet.player_influence || 0} />
+          <InfluenceBar label="Security" value={planet.security_level || 0} />
+          <InfluenceBar label="Stability" value={planet.stability_level || 0} />
+          <InfluenceBar label="Conflict" value={planet.conflict_level || 0} danger />
+          <InfluenceBar label="Pirate Pressure" value={planet.pirate_activity || 0} danger />
+        </div>
+      </Panel>
+    </div>
+
+    <Panel title="Control Actions" help="Actions are small nudges. Job-matched actions gain extra influence but still consume energy/fuel/credits.">
+      <div className="controlActionGrid">{(pc.actions || []).map(a=><div className={`controlActionCard ${a.job_bonus?'matchedControl':''}`} key={a.key}>
+        <div><b>{a.name}</b><em>{a.job_bonus ? 'Career Bonus' : 'Neutral'}</em></div>
+        <p>{a.desc}</p>
+        <span>Energy {fmt(a.energy)} • Fuel {fmt(a.fuel)} • Credits {fmt(a.credits)} • Influence +{fmt(a.influence_preview)}</span>
+        <small>Security {signed(a.security)} • Stability {signed(a.stability)} • Pirates {signed(a.pirates)} • Market {signed(a.market)} • Conflict {signed(a.conflict)}</small>
+        <button onClick={()=>act('planet_control_action',{action_key:a.key})}>Run Action</button>
+      </div>)}</div>
+    </Panel>
+
+    <Panel title="Recent Control Events">
+      <div className="feedList compactFeed">{(pc.events || []).map(e=><div key={e.id}>
+        <b>{e.action_name}</b>
+        <span>{e.message}</span>
+        <small>{e.actor} • Influence {signed(e.influence_delta)} • {new Date(e.created_at).toLocaleString()}</small>
+      </div>)}</div>
+    </Panel>
+  </Page>
+}
+
+function InfluenceBar({label,value,danger}) {
+  return <div className="influenceBar"><span>{label}</span><i><b className={danger?'danger':''} style={{width:`${Math.max(0,Math.min(100,Number(value)||0))}%`}} /></i><em>{fmt(value)}</em></div>
+}
+
+function Contracts({state,act}) {
+  const [tab,setTab] = useState('recommended');
+  const currentGalaxyOps = state.operations.filter(o => o.galaxy_id === state.location?.galaxy_id);
+  const basic = currentGalaxyOps.filter(o => o.operation_tier === 'basic');
+  const advanced = currentGalaxyOps.filter(o => o.operation_tier !== 'basic');
+  const recommended = state.recommended_actions || [];
+  return <Page title="Operations Hub" sub="PvE now uses career rank, skill levels, ship power, fuel/energy cost, local security, stability, pirate pressure, and job fit.">
+    <div className="tabBar">
+      <button className={tab==='recommended'?'active':''} onClick={()=>setTab('recommended')}>Recommended</button>
+      <button className={tab==='basic'?'active':''} onClick={()=>setTab('basic')}>Basic Work</button>
+      <button className={tab==='advanced'?'active':''} onClick={()=>setTab('advanced')}>Advanced</button>
+      <button className={tab==='bounties'?'active':''} onClick={()=>setTab('bounties')}>Bounties</button>
+    </div>
+
+    {tab === 'recommended' && <Panel title="Recommended Action Queue" help="High fit does not mean no risk. It means your current build is better suited for the action.">
+      <div className="opList detailed">{recommended.map(r=><OperationRow key={`${r.kind}-${r.code}`} item={r} actionLabel={r.kind === 'career' ? 'Run Job' : 'Run'} onRun={()=>act(r.kind === 'career' ? 'career_task' : 'pve_operation', r.kind === 'career' ? {task_key:r.code} : {code:r.code})} />)}</div>
+    </Panel>}
+
+    {tab === 'basic' && <Panel title="Basic Money / XP Work" help="Available to all players. Lower reward, higher success rate, low energy cost.">
+      <div className="opList detailed">{basic.map(o=><OperationRow key={o.code} item={o} actionLabel="Run" onRun={()=>act('pve_operation',{code:o.code})} />)}</div>
+    </Panel>}
+
+    {tab === 'advanced' && <Panel title="Advanced Operations" help="Better rewards. Lower success rate unless your ship, skills, and current job fit the operation.">
+      <div className="opList detailed">{advanced.map(o=><OperationRow key={o.code} item={o} actionLabel="Accept" onRun={()=>act('pve_operation',{code:o.code})} />)}</div>
+    </Panel>}
+
+    {tab === 'bounties' && <Panel title="Bounties">
+      <div className="opList detailed">{state.bounties.map(b=><div className="operationCard" key={b.id}>
+        <div className="operationMain"><b>{b.name}</b><p>{b.planet_name} fugitive contract.</p><span>Threat {b.threat} • Reward {fmt(b.reward)} Cr • Combat/scanning career fit</span></div>
+        <button onClick={()=>act('accept_bounty',{bounty_id:b.id})}>Hunt</button>
+      </div>)}</div>
+    </Panel>}
+  </Page>
+}
+
+function Industry({state,act}) {
+  const sites = state.salvage_sites || [];
+  return <Page title="Industry" sub="Mining, battlefield salvage, refining, NPC contracts, and materials for crafting modules and ship parts.">
+    <div className="cards3">
+      <Panel title="Mining"><p>Mine NPC asteroid fields and feed supply chains.</p><button onClick={()=>act('mine')}>Mine Asteroids</button></Panel>
+      <Panel title="General Salvaging"><p>Fallback derelict salvage. Fresh combat wrecks below are better and are tied to real local battles.</p><button onClick={()=>act('salvage')}>Salvage Derelict</button></Panel>
+      <Panel title="Inventory Materials">{state.inventory.filter(i=>['material','component','ammo','salvage'].includes(i.item_type) || i.category==='salvage').slice(0,12).map(i=><div className="itemLine visualLine" key={i.id}><ItemVisual item={i} size="sm"/><b>{i.name}</b><span>x{i.qty}</span></div>)}</Panel>
+    </div>
+
+    <Panel title="Fresh Combat Wrecks" help="These are defeated ships in the current area. Player battles, PvE combat, PvP, and occasional NPC-vs-NPC fights can populate this list. Zero available wrecks is valid if the area has been cleaned out.">
+      {sites.length ? <div className="salvageSiteGrid">{sites.map(site=><div className="salvageSiteCard" key={site.id}>
+        <GameImage src={site.image_url} assetType="ship" category={site.ship_role} alt={site.ship_name} />
+        <div>
+          <h3>{site.ship_name}</h3>
+          <p>{label(site.source_type)} • {label(site.ship_role)} • T{site.ship_tier} • Difficulty {site.difficulty}</p>
+          <div className="tagCloud">{Object.entries(site.materials || {}).map(([k,v])=><span key={k}>{label(k)} x{fmt(v)}</span>)}</div>
+          <small>Energy {fmt(site.energy_cost)} • Value {fmt(site.salvage_value)} • Source {site.source_name}</small>
+          <button onClick={()=>act('salvage_site',{site_id:site.id})}>Salvage Wreck</button>
+        </div>
+      </div>)}</div> : <div className="emptyState">No salvageable combat wrecks in this area. New wrecks can appear from player combat, PvE fights, PvP, or occasional NPC skirmishes.</div>}
+    </Panel>
+  </Page>
+}
+
+function Crafting({state,act,clock}) {
+  const [category,setCategory] = useState('all');
+  const [query,setQuery] = useState('');
+  const recipes = state.crafting_recipes || [];
+  const queue = state.crafting_queue || [];
+  const activeJobs = queue.filter(j => j.status === 'active');
+  const establishments = state.establishments || [];
+  const refineryOnline = establishments.some(e => (e.service_type || '').toLowerCase() === 'refinery');
+  const categories = ['all', ...Array.from(new Set(recipes.map(r=>r.category))).filter(Boolean)];
+  const shown = recipes.filter(r =>
+    (category === 'all' || r.category === category) &&
+    `${r.name} ${r.description} ${r.code} ${r.category}`.toLowerCase().includes(query.toLowerCase())
+  );
+  const inputs = (state.inventory_summary || state.inventory || []).filter(i =>
+    ['raw_materials','crafting_materials','refined_materials','goods','illicit_goods','consumables'].includes(i.category) ||
+    ['material','component','food','medical','contraband','booster','consumable','refined','chemical','ore'].includes(i.item_type)
+  );
+  return <Page title="Crafting & Fabrication" sub="Crafting is timed. Raw ore now feeds refinery recipes first, then refined outputs feed higher-end manufacturing. Materials, credits, and energy are committed up front.">
+    <Panel title="Crafting Controls" help="Timed crafting jobs persist through refresh. Completed jobs auto-resolve on state refresh or when you press Claim Completed. Ore refining recipes require refinery access at the current planet or station.">
+      <div className="inventoryToolbar">
+        <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search recipes" />
+        <div className="chipRow">{categories.map(c=><button key={c} className={category===c?'active':''} onClick={()=>setCategory(c)}>{c === 'all' ? 'All' : c}</button>)}</div>
+        <button onClick={()=>act('claim_crafting')}>Claim Completed</button>
+      </div>
+      <div className="craftTimingSummary">
+        <span>Active jobs <b>{fmt(activeJobs.length)}</b></span>
+        <span>Queue max <b>{fmt(state.game_tuning?.groups?.find(g=>g.key==='CRAFTING_BALANCE')?.value?.max_active_jobs || 6)}</b></span>
+        <span>Refinery <b>{refineryOnline ? 'Available' : 'Offline'}</b></span>
+        <span>Fastest item <b>5s/unit</b></span>
+        <span>Legendary capitals <b>2d–4d</b></span>
+      </div>
+    </Panel>
+
+    <CraftingQueue queue={queue} act={act} clock={clock} />
+
+    <div className="recipeGrid">
+      {shown.map(r=><RecipeCard key={r.code} recipe={r} act={act} />)}
+      {!shown.length && <Panel title="No Recipes"><p className="muted">No recipes match the current filter.</p></Panel>}
+    </div>
+
+    <div className="cards2">
+      <Panel title="Production Inputs" help="Market cargo and loose inventory both count toward recipe requirements. Raw ore appears here so it can be routed into refinery recipes.">
+        <div className="feedList compactFeed">{inputs.slice(0,40).map(i=><div className="feedVisual" key={`${i.source || 'inv'}-${i.id}-${i.item_code}`}><ItemVisual item={i} size="sm"/><div><b>{i.name}</b><span>x{fmt(i.available_qty ?? i.qty)} • {i.legal ? 'Legal' : 'Illegal'} • {i.category_label || label(i.category || i.item_type)}</span><small>{i.source || 'inventory'} • Mass {fmt(i.cargo_mass ?? (i.mass * i.qty))}</small></div></div>)}</div>
+      </Panel>
+      <Panel title="Crafting History">
+        <div className="feedList compactFeed">{(state.crafting_history || []).slice(0,20).map(h=>{
+          const output = jsonSafe(h.output_json, {});
+          return <div key={h.id}><b>{label(h.outcome)}: {h.recipe_name}</b><span>{output.name || output.item_code || output.kind || 'Output'} x{output.qty || output.scrap || 1}</span><small>XP {fmt(h.xp_reward)} • Credits {fmt(h.credits_spent)} • Energy {fmt(h.energy_spent)} • {new Date(h.created_at).toLocaleString()}</small></div>
+        })}</div>
+      </Panel>
+    </div>
+  </Page>
+}
+
+function CraftingQueue({queue, act, clock}) {
+  const active = (queue || []).filter(j => j.status === 'active');
+  const recent = (queue || []).filter(j => j.status !== 'active').slice(0,8);
+  if (!active.length && !recent.length) return null;
+  return <Panel title="Fabrication Queue" help="Active jobs finish on backend timestamps. Long projects keep running while you are away.">
+    <div className="craftQueueGrid">
+      {active.map(j => {
+        const started = new Date(j.started_at).getTime();
+        const ends = new Date(j.completes_at).getTime();
+        const total = Math.max(1, ends - started);
+        const remainingMs = Math.max(0, ends - clock);
+        const pct = Math.max(0, Math.min(100, ((clock - started) / total) * 100));
+        return <div className="craftJob activeCraftJob" key={j.id}>
+          <ItemVisual item={j.output_preview || {name:j.recipe_name, category:'crafting'}} size="sm"/>
+          <div>
+            <b>{j.recipe_name}</b>
+            <span>{Math.round(pct)}% • {clockTimeLeft(j.completes_at)} remaining</span>
+            <small>Total {j.total_label || secondsLabel(j.total_seconds)} • Odds {Math.round((j.success_odds || 0)*100)}%</small>
+            <Progress value={pct}/>
+          </div>
+          <button onClick={()=>act('cancel_crafting',{job_id:j.id})}>Cancel</button>
+        </div>
+      })}
+      {recent.map(j => <div className={`craftJob ${j.status}`} key={j.id}>
+        <ItemVisual item={j.output || j.output_preview || {name:j.recipe_name, category:'crafting'}} size="sm"/>
+        <div><b>{label(j.status)}: {j.recipe_name}</b><span>{j.message || j.outcome || 'Complete'}</span><small>{j.completed_at ? new Date(j.completed_at).toLocaleString() : ''}</small></div>
+      </div>)}
+    </div>
+  </Panel>;
+}
+
+function secondsLabel(seconds) {
+  const s = Math.max(0, Number(seconds || 0));
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.ceil(s/60)}m`;
+  if (s < 86400) return `${(s/3600).toFixed(s < 36000 ? 1 : 0)}h`;
+  return `${(s/86400).toFixed(s < 864000 ? 1 : 0)}d`;
+}
+
+function RecipeCard({recipe, act}) {
+  const out = recipe.output_preview || recipe.output || {};
+  const blockers = recipe.blockers || [];
+  const success = Math.round((recipe.success_odds || 0) * 100);
+  const owned = !!recipe.owned_recipe;
+  const unlimited = !!recipe.recipe_unlimited;
+  const charges = recipe.recipe_uses_remaining;
+  const locked = !owned;
+  return <section className={`recipeCard ${recipe.can_craft ? 'readyRecipe' : 'blockedRecipe'} ${locked ? 'lockedRecipe' : ''}`}>
+    <div className="recipeHead">
+      <div><b>{recipe.name}</b><span>{recipe.category} <TierBadge item={{current_tier:recipe.recipe_tier, max_tier:7, tier_display:recipe.tier_display}} /></span></div>
+      <em>{success}%</em>
+    </div>
+    <p>{recipe.description}</p>
+    <div className="recipeMeta">
+      <span>Rank <b>{recipe.recipe_rank_name || 'Basic'}</b></span>
+      <span>Credits {fmt(recipe.effective_credits ?? recipe.credits)}</span>
+      <span>Energy {fmt(recipe.energy)}</span>
+      <span>Time {recipe.craft_time_label || secondsLabel(recipe.craft_time_seconds || recipe.craft_seconds || recipe.craft_minutes*60)}</span>
+      <span>XP {fmt(recipe.xp_reward)}</span>
+      {recipe.requires_refinery && <span>Refinery {recipe.refinery_available ? 'online' : 'required'}</span>}
+      {recipe.discount_pct > 0 && <span>Discount {recipe.discount_pct}%</span>}
+    </div>
+    <div className="recipeOwnershipRow">
+      <span className={`recipeLicenseChip ${unlimited ? 'unlimited' : owned ? 'owned' : 'missing'}`}>
+        {unlimited ? 'Unlimited recipe' : owned ? `Recipe copies: ${fmt(charges)}` : 'Recipe copy required'}
+      </span>
+      {recipe.set_name ? <span className="recipeSetChip">{recipe.set_name}{out.set_loop ? ` • ${out.set_loop}` : ""}</span> : null}
+    </div>
+    <div className="recipeReqs">
+      {(recipe.inputs || []).map(i=><div key={i.item_code} className={i.met?'met':'missing'}>
+        <span>{i.name}{i.required_tier ? ` • T${i.required_tier}+` : ''}</span><b>{fmt(i.available)} / {fmt(i.required)}{i.tier !== undefined ? ` • T${i.tier}` : ''}</b>
+      </div>)}
+    </div>
+    <div className="outputPreview visualOutput">
+      <ItemVisual item={out} />
+      <div>
+        <span>Output</span>
+        <b>{out.name || out.item_code || out.module_code}</b>
+        <small>{out.kind === 'module' ? `${label(out.slot_type || 'module')} module` : `${fmt(out.qty)}x • ${out.legal === 0 ? 'Illegal' : 'Legal'} • ${label(out.rarity || out.category || '')}`} <TierBadge item={out}/></small>
+        {recipe.set_name ? <small className="recipeSetText">Set bonus eligible: {recipe.set_name}{out.set_loop ? ` • ${out.set_loop}` : ""}</small> : null}
+      </div>
+    </div>
+    {blockers.length > 0 && <div className="blockerLine">{blockers.join(' • ')}</div>}
+    <button disabled={!recipe.can_craft} onClick={()=>act('craft_recipe',{recipe_code:recipe.code})}>{recipe.can_craft ? `Start Craft (${recipe.craft_time_label || secondsLabel(recipe.craft_time_seconds)})` : locked ? 'Recipe Not Owned' : 'Blocked'}</button>
+  </section>
+}
+
+function ProgressIcon({name, size=18}) {
+  const map = {
+    pickaxe: Factory, hammer: Hammer, coins: Coins, store: Store, package: Package, swords: Swords,
+    crosshair: Crosshair, wrench: Hammer, globe: Globe2, radar: Info, factory: Factory, shield: Shield,
+    mask: AlertTriangle, unlock: Shield, rocket: Rocket, building: Building2, heart: HeartPulse, mail: Mail,
+    briefcase: Briefcase
+  };
+  const Icon = map[name] || Brain;
+  return <Icon size={size}/>;
+}
+
+function Jobs({state,act}) {
+  const [selected,setSelected] = useState((state.jobs.find(j=>j.active) || state.jobs[0] || {}).code);
+  const active = state.jobs.find(j=>j.active);
+  const selectedJob = state.jobs.find(j=>j.code===selected) || active || state.jobs[0] || {};
+  const req = selectedJob.next_requirement || jsonSafe(selectedJob.next_req_json,{});
+  const metrics = jsonSafe(selectedJob.metrics_json,{});
+  const tasks = (selectedJob.tasks_json ? jsonSafe(selectedJob.tasks_json,[]) : []).slice(0,4);
+  const careerTasks = state.career_tasks || [];
+  return <Page title="Jobs / Careers" sub="Careers do not lock gameplay. Anyone can mine, craft, trade, fight, smuggle, salvage, explore, or jailbreak. The active career gives stronger bonuses and career XP only for matching action types.">
+    <div className="cards3">
+      <Panel title="Active Career">
+        {active ? <div className={`careerSpotlight ${active.style || ''}`}>
+          <div className="careerIcon"><ProgressIcon name={active.icon}/></div>
+          <div>
+            <b>{active.name}</b>
+            <span>{active.rank_title || `Rank ${active.rank}`} • Rank {active.rank} • XP {fmt(active.xp)}</span>
+            <p>{active.recommended_loop}</p>
+          </div>
+        </div> : <p>No active career selected.</p>}
+      </Panel>
+      <Panel title="Next Rank">
+        {active ? <Stats pairs={{
+          Next:req.next_rank || '—',
+          XPNeeded:req.xp_needed ?? '—',
+          [label(req.primary_metric || 'Primary')]:req.primary_needed ?? '—',
+          [label(req.value_metric || 'Value')]:req.value_needed ?? '—'
+        }} /> : <p>Select a career.</p>}
+        {active && <Bar label="Career Rank Progress" value={active.progress_pct || 0} max={100}/>}
+      </Panel>
+      <Panel title="Career Rule">
+        <div className="infoStack">
+          <div><b>Open actions</b><span>Non-career actions stay available.</span></div>
+          <div><b>Career bonus</b><span>Matching actions get better rewards, odds, ranks, and career XP.</span></div>
+          <div><b>Skills stay separate</b><span>Skills level from action use even outside the matching career.</span></div>
+        </div>
+      </Panel>
+    </div>
+
+    <Panel title="Career-Specific Actions">
+      <div className="opList detailed">{careerTasks.length ? careerTasks.map(task=><OperationRow key={task.key} item={task} actionLabel="Run Career Job" onRun={()=>act('career_task',{task_key:task.key})} />) : <p>No active career jobs. Set an active career below.</p>}</div>
+    </Panel>
+
+    <div className="jobsLayout">
+      <Panel title="Available Careers">
+        <div className="careerGrid">{state.jobs.map(j=><button key={j.code} className={`careerTile ${j.active?'activeCareerCard':''} ${selected===j.code?'selected':''}`} onClick={()=>setSelected(j.code)}>
+          <ProgressIcon name={j.icon}/>
+          <b>{j.name}</b>
+          <span>{j.rank_title || `Rank ${j.rank}`} • {j.risk_profile || j.side}</span>
+          <Bar label="XP" value={j.progress_pct || 0} max={100}/>
+        </button>)}</div>
+      </Panel>
+
+      <Panel title={`${selectedJob.name || 'Career'} Details`}>
+        <div className="careerDetailHeader">
+          <div className="careerIcon large"><ProgressIcon name={selectedJob.icon} size={26}/></div>
+          <div><b>{selectedJob.name}</b><span>{selectedJob.rank_title || `Rank ${selectedJob.rank || 1}`} • {selectedJob.risk_profile}</span><p>{selectedJob.description}</p></div>
+        </div>
+        <div className="tagCloud">
+          {(selectedJob.preferred_skills || []).map(x=><span key={x}>Skill: {label(x)}</span>)}
+          {(selectedJob.preferred_ships || []).map(x=><span key={x}>Ship: {x}</span>)}
+          {(selectedJob.career_actions || []).map(x=><span key={x}>Action: {label(x)}</span>)}
+        </div>
+        <div className="bonusGrid">
+          <div><b>Current Job Bonuses</b>{(selectedJob.current_bonuses || []).map((b,i)=><span key={i}>{b}</span>)}</div>
+          <div><b>Next Rank Bonuses</b>{(selectedJob.next_rank_bonuses || []).map((b,i)=><span key={i}>{b}</span>)}</div>
+          <div><b>Metrics</b>{Object.entries(metrics).map(([k,v])=><span key={k}>{label(k)}: {fmt(v)}</span>)}{Object.keys(metrics).length===0 && <span>No metrics yet.</span>}</div>
+        </div>
+        <Panel title="Career Task Preview">
+          <div className="miniStack">{tasks.map(t=><button key={t.key} onClick={()=>selectedJob.active ? act('career_task',{task_key:t.key}) : null} disabled={!selectedJob.active}><b>{t.name}</b><small>{t.desc || t.description} • Energy {t.energy}</small></button>)}</div>
+        </Panel>
+        <button disabled={selectedJob.active} onClick={()=>act('switch_job',{job_code:selectedJob.code})}>{selectedJob.active ? 'Current Career' : 'Set Active Career'}</button>
+      </Panel>
+    </div>
+  </Page>
+}
+
+function Skills({state,act}) {
+  const [cat,setCat] = useState('All');
+  const [q,setQ] = useState('');
+  const skills = state.skills || [];
+  const cats = ['All', ...Array.from(new Set(skills.map(s=>s.category).filter(Boolean)))];
+  const filtered = skills.filter(s => (cat==='All' || s.category===cat) && (`${s.name} ${s.description} ${(s.affects||[]).join(' ')} ${(s.trained_by||[]).join(' ')}`.toLowerCase().includes(q.toLowerCase())));
+  const strongest = [...skills].sort((a,b)=>(b.level||0)-(a.level||0)).slice(0,5);
+  const selected = filtered[0] || skills[0] || {};
+  return <Page title="Skills" sub="Skills level by doing related actions. Progress is intentionally grindy. Careers add focused bonuses, but skills keep improving regardless of active career.">
+    <div className="cards3">
+      <Panel title="Strongest Skills">
+        <div className="skillTopList">{strongest.map(s=><div key={s.key}><ProgressIcon name={s.icon}/><b>{s.name}</b><span>Lv {s.level} • {s.progress_pct}%</span></div>)}</div>
+      </Panel>
+      <Panel title="Skill Search">
+        <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search skills, bonuses, trained by..." />
+        <div className="tabs">{cats.map(c=><button key={c} className={cat===c?'active':''} onClick={()=>setCat(c)}>{c}</button>)}</div>
+      </Panel>
+      <Panel title="Progression Caps">
+        <div className="infoStack">
+          <div><b>Breakout cap</b><span>Final chance can never exceed 80%.</span></div>
+          <div><b>Illicit risk floor</b><span>Smuggling skill reduces risk but does not erase it.</span></div>
+          <div><b>Market cap</b><span>Trading bonuses cannot create infinite buy/sell loops.</span></div>
+        </div>
+      </Panel>
+    </div>
+
+    <div className="skillsLayout">
+      <Panel title="Skill Cards">
+        <div className="skillGrid">{filtered.map(s=><div key={s.key} className={`skillCard ${s.category?.toLowerCase() || ''}`}>
+          <div className="skillCardHead"><ProgressIcon name={s.icon}/><div><b>{s.name}</b><span>{s.category} • Level {s.level}/{s.max_level}</span></div></div>
+          <p>{s.summary}</p>
+          <Bar label={`${fmt(s.xp)} XP`} value={s.progress_pct || 0} max={100}/>
+          <small>Next level: {s.xp_needed ? fmt(s.xp_needed) + ' XP needed' : 'Maxed'}</small>
+          <details>
+            <summary>What it does</summary>
+            <p>{s.description}</p>
+            <b>Current effects</b>{(s.current_effects || []).map((x,i)=><span className="detailPill" key={i}>{x}</span>)}
+          </details>
+        </div>)}</div>
+      </Panel>
+
+      <Panel title={`${selected.name || 'Skill'} Detail`}>
+        <div className="careerDetailHeader">
+          <div className="careerIcon large"><ProgressIcon name={selected.icon} size={26}/></div>
+          <div><b>{selected.name}</b><span>{selected.category} • Level {selected.level}</span><p>{selected.description}</p></div>
+        </div>
+        <Bar label="Current Level Progress" value={selected.progress_pct || 0} max={100}/>
+        <div className="bonusGrid">
+          <div><b>Trained By</b>{(selected.trained_by || []).map((x,i)=><span key={i}>{x}</span>)}</div>
+          <div><b>Affects</b>{(selected.affects || []).map((x,i)=><span key={i}>{x}</span>)}</div>
+          <div><b>Passive Bonuses</b>{(selected.passive_bonuses || []).map((x,i)=><span key={i}>{x}</span>)}</div>
+          <div><b>Current Effects</b>{(selected.current_effects || []).map((x,i)=><span key={i}>{x}</span>)}</div>
+        </div>
+      </Panel>
+    </div>
+  </Page>
+}
+
+function Properties({state,act}) {
+  return <Page title="Properties & Holdings" sub="Small passive bonuses and income. Homes, warehouses, hangars, shops, refineries, and stalls are long-term investments.">
+    <Panel title="My Properties"><button onClick={()=>act('collect_property_income')}>Collect Income</button>{state.properties.map(p=><div className="itemLine" key={p.id}><b>{p.name}</b><span>{p.planet_name} • Lv {p.level} • +{fmt(p.income*p.level)}/hr</span><button onClick={()=>act('upgrade_property',{property_id:p.id})}>Upgrade</button></div>)}</Panel>
+    <Panel title="Property Marketplace">{state.property_templates.map(p=><div className="itemLine" key={p.code}><b>{p.name}</b><span>{p.type} • {fmt(p.base_price)} Cr • Storage {p.storage}</span><button onClick={()=>act('buy_property',{code:p.code})}>Buy</button></div>)}</Panel>
+    <Panel title="Local Establishments">{state.establishments.map(e=><div className="itemLine" key={e.id}><b>{e.name}</b><span>{e.service_type} • Price {fmt(e.price)}</span></div>)}</Panel>
+  </Page>
+}
+
+function Medical({state,act}) {
+  return <Page title="Medical Bay" sub="No permanent death. Serious defeat causes hospital time; ship can be lost. Payments speed surgery but minimum hospital time is 10 minutes.">
+    <div className="cards3"><Panel title="Current Injury Status"><div className="hugeTimer">{state.player.hospital_until ? timeLeft(state.player.hospital_until) : 'No Injury'}</div><p>Minimum hospital time: 10 minutes.</p></Panel><Panel title="Expedite Surgery"><button onClick={()=>act('hospital_expedite',{minutes:10})}>-10 Minutes</button><button onClick={()=>act('hospital_expedite',{minutes:30})}>-30 Minutes</button><button onClick={()=>act('hospital_expedite',{minutes:60})}>-1 Hour</button></Panel><Panel title="Money Sinks"><div className="opList">{['Ship part repairs','Module durability repairs','Fuel refills','Insurance premiums','Hospital surgery acceleration','Property upgrades','Crafting fees','Guild war costs'].map(x=><div key={x}>{x}<span>Economy sink</span></div>)}</div></Panel></div>
+    <Panel title="Recent Money Sinks">{(state.money_sinks || []).map(s=><div className="itemLine" key={s.id}><b>{label(s.sink_type)}</b><span>{fmt(s.amount)} Cr • {s.description}</span></div>)}</Panel>
+  </Page>
+}
+
+
+
+function Fight({state, act, loading}) {
+  const fight = state.fight || {};
+  const targets = fight.targets || [];
+  const [selectedId, setSelectedId] = useState(targets[0]?.id || null);
+  const [kindFilter, setKindFilter] = useState('all');
+  const [battle, setBattle] = useState(fight.latestBattle || null);
+  const [showBattleModal, setShowBattleModal] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [escapeResult, setEscapeResult] = useState(null);
+  const selected = targets.find(t => t.id === selectedId) || targets[0] || null;
+  const selectedEnergyCost = Number(selected?.energyCost || selected?.rewardProfile?.energyCost || 0);
+  const battleBlockedReason = fight.blockedReason || (!selected?.attackable ? (selected?.blockedReason || 'Target unavailable') : null) || (!state.user?.god_mode && selectedEnergyCost > Number(state.player?.energy || 0) ? `Need ${selectedEnergyCost} energy` : null);
+  const filtered = targets.filter(t => kindFilter === 'all' || t.kind === kindFilter || String(t.role || '').toLowerCase().includes(kindFilter));
+  const log = battle?.log || [];
+  const visibleLog = log.slice(0, activeIndex + 1);
+  const current = log[Math.min(activeIndex, Math.max(0, log.length - 1))] || {};
+  const your = battle?.yourShip || fight.activeShip || {};
+  const enemy = battle?.enemyShip || selected?.ship || {};
+  const playerHull = current.playerHull ?? your.hull;
+  const playerShield = current.playerShield ?? your.shield;
+  const enemyHull = current.enemyHull ?? enemy.hull;
+  const enemyShield = current.enemyShield ?? enemy.shield;
+
+  useEffect(() => {
+    setSelectedId(prev => prev || targets[0]?.id || null);
+  }, [targets.length]);
+
+  useEffect(() => {
+    if (!battle?.log?.length) return;
+    setActiveIndex(0);
+    setEscapeResult(null);
+  }, [battle?.id]);
+
+  useEffect(() => {
+    if (!battle?.log?.length) return;
+    if (activeIndex >= battle.log.length - 1) return;
+    const delay = Number(battle.actionDelayMs || battle.balance?.round_ms || 3000);
+    const id = setTimeout(() => setActiveIndex(i => Math.min(i + 1, battle.log.length - 1)), delay);
+    return () => clearTimeout(id);
+  }, [battle, activeIndex]);
+
+  async function launchCombat(mode='attack') {
+    if (!selected) return;
+    const res = await act('start_combat', { target_ref: selected.id, mode });
+    if (res?.result?.battle) {
+      setBattle(res.result.battle);
+      setActiveIndex(0);
+      setEscapeResult(null);
+      setShowBattleModal(true);
+    }
+  }
+
+  async function attemptEscape() {
+    if (!battle || activeIndex >= Math.max(0, log.length - 1)) return;
+    const res = await act('attempt_combat_escape', { battle_id: battle.id });
+    const escaped = !!res?.result?.escaped;
+    setEscapeResult(res?.result || { escaped:false, message:'Escape failed.' });
+    if (escaped) {
+      setShowBattleModal(false);
+    }
+  }
+
+  return <Page title="Fight" sub="Same-location PvE/PvP combat. Ship loadout, combat skills, career, legality, heat, and rewards all matter.">
+    <div className="fightTop">
+      <Panel title="Current Combat Zone" help="Combat targets are limited to your current planet or station. Travel and jail block combat.">
+        <Stats pairs={{
+          Location: state.location?.name,
+          Security: fight.locationRules?.security ?? state.location?.security_level,
+          Lawfulness: fight.locationRules?.lawfulness ?? state.location?.lawfulness,
+          Targets: targets.length,
+          Status: fight.blockedReason || 'Combat ready'
+        }} />
+        <p className="muted">{fight.locationRules?.summary}</p>
+        {fight.blockedReason && <div className="jailBanner"><AlertTriangle size={16}/>{fight.blockedReason}</div>}
+      </Panel>
+      <Panel title="Active Ship" help="Your fitted weapons, shields, armor, scanners, engines, and skills affect battle outcome.">
+        <div className="combatShipMini">
+          <GameImage src="" assetType="ship" category={fight.activeShip?.role || state.active_ship?.role || state.active_ship?.class_name || state.active_ship?.name} alt="Active ship" />
+          <div>
+            <h3>{fight.activeShip?.name || state.active_ship?.name}</h3>
+            <p>{label(fight.activeShip?.role || state.active_ship?.role || 'ship')} • Combat {fmt(fight.activeShip?.combatRating || state.ship_power)}</p>
+            <div className="tagCloud">{(fight.activeShip?.weapons || []).slice(0,4).map(w=><span key={w.name}>{w.name}</span>)}</div>
+          </div>
+        </div>
+      </Panel>
+    </div>
+
+    <div className="fightLayout">
+      <Panel title="Nearby Targets" help="NPCs and players shown here are at your current location only. Legal targets are safer; unlawful attacks can raise heat and cause jail.">
+        <div className="chipRow">
+          {['all','npc','player','pirate','mercenary','trader','security','smuggler'].map(x=><button key={x} className={kindFilter===x?'active':''} onClick={()=>setKindFilter(x)}>{label(x)}</button>)}
+        </div>
+        <div className="targetGrid">
+          {filtered.length ? filtered.map(t => <button key={t.id} className={`targetCard ${selected?.id===t.id ? 'selected' : ''} ${t.legal?.criminal ? 'criminal' : ''}`} onClick={()=>setSelectedId(t.id)}>
+            <GameImage src="" assetType="ship" category={t.role || t.kind || t.name} alt={t.name} />
+            <b>{t.name}</b>
+            <span>{label(t.kind)} • {label(t.role)} • Lv {t.level || '—'}</span>
+            <small>Power {fmt(t.power || t.ship?.combatRating)} • {t.danger}</small>
+            <em className={t.legal?.criminal ? 'dangerTag' : 'okTag'}>{t.legal?.label || 'Legal target'}</em>
+          </button>) : <div className="emptyState">No combat targets currently registered at this location.</div>}
+        </div>
+      </Panel>
+
+      <Panel title="Selected Target / Combat Preview" help="Preview explains legality, danger, rewards, and ship-vs-ship context before battle.">
+        {selected ? <div className="targetDetail">
+          <div className="combatVersus compact">
+            <CombatShipSide title="Your Ship" ship={fight.activeShip} hull={fight.activeShip?.hull} shield={fight.activeShip?.shield} />
+            <div className="versusCore"><Swords/><b>VS</b><span>{selected.legal?.state?.toUpperCase()}</span></div>
+            <CombatShipSide title="Target" ship={selected.ship} hull={selected.ship?.hull} shield={selected.ship?.shield} />
+          </div>
+          {selected.legal?.criminal && <div className="jailBanner"><AlertTriangle size={16}/>Unlawful attack. Heat gain {selected.legal?.heatGain || 0}. Jail risk applies if caught or defeated.</div>}
+          <Stats pairs={{
+            Target:selected.name,
+            Role:label(selected.role),
+            Danger:selected.danger,
+            Reward:fmt(selected.rewardEstimate),
+            Energy:selectedEnergyCost || '—',
+            Tier:`T${selected.rewardProfile?.tier || selected.ship?.tier || 1}`,
+            Difficulty:selected.rewardProfile?.difficulty || '—',
+            LootChance:selected.rewardProfile?.lootChance ? `${Math.round(selected.rewardProfile.lootChance*100)}%` : '—',
+            Legality:selected.legal?.label,
+            EnemyCombat:fmt(selected.ship?.combatRating),
+            YourCombat:fmt(fight.activeShip?.combatRating)
+          }} />
+          {battleBlockedReason && <div className="jailBanner"><AlertTriangle size={16}/>{battleBlockedReason}</div>}
+          <div className="fightActions">
+            <button className="primary" disabled={loading || !!battleBlockedReason} onClick={()=>launchCombat('attack')}>{battleBlockedReason || 'Start Battle'}</button>
+            {selected.kind === 'player' && <button disabled={loading || !!battleBlockedReason} onClick={()=>launchCombat('duel')}>Challenge Duel</button>}
+          </div>
+        </div> : <div className="emptyState">Select a target.</div>}
+      </Panel>
+    </div>
+
+    <Panel title="Battle Screen" help="Battles open in a modal overlay. Server resolves the battle; the modal replays it at a readable pace.">
+      {battle ? <div className="battleLaunchPanel">
+        <div><b>{battle.summary || 'Latest battle ready'}</b><span>{label(battle.outcome)} • {fmt(battle.rounds)} rounds • Rewards {fmt(battle.rewards?.credits || 0)} Cr</span></div>
+        <button className="primary" onClick={()=>setShowBattleModal(true)}>Open Battle Screen</button>
+      </div> : <div className="emptyState">Select a target and start a fight. The battle replay opens in a modal.</div>}
+    </Panel>
+
+    {battle && showBattleModal && <div className="modalBackdrop battleModalBackdrop">
+      <div className="battleModal" role="dialog" aria-modal="true">
+        {activeIndex >= Math.max(0, log.length - 1) && <button className="modalClose" onClick={()=>setShowBattleModal(false)}>Close</button>}
+        <div className="battleScreen">
+          <div className="battleHeader">
+            <div><b>{battle.summary}</b><span>{label(battle.outcome)} • Round {current.round || battle.rounds || 0} / {battle.rounds || 0}</span></div>
+            <div className="chipRow battlePaceRow">
+              <span>Locked battle replay • one action every {fmt((Number(battle.actionDelayMs || battle.balance?.round_ms || 3000) / 1000))}s</span>
+              {activeIndex < Math.max(0, log.length - 1) && <button className="escapeBtn" onClick={attemptEscape}>ATTEMPT ESCAPE</button>}
+              {activeIndex >= Math.max(0, log.length - 1) && <button onClick={()=>{setActiveIndex(0); setEscapeResult(null);}}>Replay</button>}
+            </div>
+          </div>
+          {escapeResult && <div className={`escapeResult ${escapeResult.escaped ? 'success' : 'fail'}`}><b>{escapeResult.escaped ? 'Escaped' : 'Escape Failed'}</b><span>{escapeResult.message || ''} Odds {fmt(Math.round((escapeResult.chance || battle.escapeChance || 0) * 100))}% • Post-battle immunity {fmt(escapeResult.immunitySeconds || battle.postBattleImmunitySeconds || 5)}s</span></div>}
+          <div className={`battleStage ${current.actor || ''} ${current.weaponType || ''} ${current.hit ? 'hit' : 'miss'}`}>
+            <CombatShipSide title="Your Ship" ship={your} hull={playerHull} shield={playerShield} />
+            <div className="battleLane">
+              <div className={`projectile ${current.actor === 'enemy' ? 'reverse' : ''} ${current.weaponType || 'laser'} ${current.hit ? 'hit' : 'miss'}`}></div>
+              <div className="damageFloater">{current.hit ? `${current.shieldDamage || 0} shield / ${current.hullDamage || 0} hull` : current.action ? 'MISS' : 'READY'}</div>
+            </div>
+            <CombatShipSide title={battle.target?.name || 'Enemy'} ship={enemy} hull={enemyHull} shield={enemyShield} />
+          </div>
+          <div className="battleFooter">
+            <div className="battleLog">{visibleLog.slice(-8).map((e,i)=><div key={`${e.round}-${i}`} className={e.actor === 'player' ? 'playerLog' : 'enemyLog'}><b>R{e.round}</b><span>{e.text}</span></div>)}</div>
+            <div className="battleRewards">
+              <h3>Battle Report</h3>
+              <Stats pairs={{
+                Outcome:label(battle.outcome),
+                Winner:label(battle.winner),
+                Credits:fmt(battle.rewards?.credits || 0),
+                XP:fmt(battle.rewards?.xp || 0),
+                Energy:fmt(battle.rewards?.energySpent || battle.rewards?.rewardProfile?.energyCost || 0),
+                Salvage: battle.rewards?.salvageSite ? `Wreck #${battle.rewards.salvageSite.id}` : 'None',
+                Heat:battle.penalties?.heat || 0,
+                ShipDamage:fmt(battle.penalties?.shipDamage || 0)
+              }} />
+              {battle.rewards?.salvageSite && <div className="salvageCallout"><b>Wreck Generated</b><span>This open-space wreck is now visible as a salvage icon on the System Map and in Industry. Energy cost {fmt(battle.rewards.salvageSite.energyCost)}.</span></div>}
+              {battle.rewards?.salvageNote && <div className="salvageCallout mutedCallout"><b>No Salvage Site</b><span>{battle.rewards.salvageNote}</span></div>}
+              <div className="tagCloud">{(battle.rewards?.items || []).map(it=><span key={it.code}>{it.name} x{it.qty}</span>)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>}
+
+    <Panel title="Recent Battle History">
+      <div className="historyList">{(fight.recentBattles || []).map(b=><div key={b.id} className="itemLine"><b>{b.target_name}</b><span>{label(b.outcome)} • {label(b.legal_state)} • {b.summary}</span></div>)}</div>
+    </Panel>
+  </Page>
+}
+
+function CombatShipSide({title, ship, hull, shield}) {
+  const hMax = Math.max(1, Number(ship?.hull || hull || 1));
+  const sMax = Math.max(1, Number(ship?.shield || shield || 1));
+  return <div className="combatShipSide">
+    <h3>{title}</h3>
+    <GameImage src="" assetType="ship" category={ship?.role || ship?.class || ship?.class_name || ship?.template_name || ship?.name} alt={ship?.name || title} />
+    <b>{ship?.name || 'Unknown Ship'}</b>
+    <small>{label(ship?.role || ship?.class || 'ship')} • Combat {fmt(ship?.combatRating || 0)}</small>
+    <MiniMeter label="Shield" value={shield ?? ship?.shield} max={sMax} />
+    <MiniMeter label="Hull" value={hull ?? ship?.hull} max={hMax} danger={(hull ?? ship?.hull ?? hMax) < hMax * 0.35} />
+  </div>
+}
+
+
+function Ships({state, act, loading}) {
+  const h = state.hangar || {};
+  const [selectedShipId, setSelectedShipId] = useState(h.activeShipId || h.activeShip?.id || null);
+  const [shipFilter, setShipFilter] = useState('all');
+  const [moduleFilter, setModuleFilter] = useState('compatible');
+  const [selectedSlotId, setSelectedSlotId] = useState(null);
+  const active = h.activeShip || state.active_ship || {};
+  const owned = h.ownedShips || state.ships || [];
+  const selected = owned.find(x => x.id === selectedShipId) || active || owned[0] || {};
+  const availableShips = h.availableShips || state.ship_templates || [];
+  const modules = h.availableModules || (state.modules || []).filter(m => !m.equipped);
+  const equipped = h.equippedModules || (state.modules || []).filter(m => m.equipped);
+  const activeSlots = active.slots || [];
+  const selectedSlot = activeSlots.find(x => x.slotId === selectedSlotId) || null;
+  const slotTypes = h.compatibilityInfo?.slotTypes || ['weapon','mining','shield','armor','engine','cargo','scanner','stealth','utility','repair','fuel','energy'];
+  const selectedStats = selected.derived_stats || h.derivedStats || {};
+  const activeStats = active.derived_stats || h.derivedStats || {};
+  const filteredShips = owned.filter(ship => shipFilter === 'all' || String(ship.role || ship.class_name || '').toLowerCase().includes(shipFilter));
+  const filteredModules = modules.filter(m => {
+    const slotMatch = selectedSlot ? (m.compatibleSlotIds || []).includes(selectedSlot.slotId) : true;
+    if (!slotMatch) return false;
+    if (moduleFilter === 'all') return true;
+    if (moduleFilter === 'compatible') return !!m.compatible;
+    const compat = (m.compatibleSlotTypes || [m.slot_type || 'utility']).map(x=>String(x).toLowerCase());
+    return compat.includes(moduleFilter) || String(m.slot_type || '').toLowerCase() === moduleFilter;
+  });
+  const compareRows = ['hull','shield','armor','cargo_capacity','fuel_capacity','drive_speed','combat_rating','mining_efficiency','scan_strength','stealth'];
+  const statHelp = h.statHelp || {};
+  return <Page title="Ships & Hangar" sub="Active ship, owned ships, ship market, modules, slots, compatibility, stats, repairs, and gameplay impact.">
+    <div className="hangarHero">
+      <div className="hangarHeroImage"><GameImage src="" assetType="ship" category={active.role || active.class_name || active.template_name || active.name} alt={active.name || 'Active ship'} /></div>
+      <div>
+        <div className="eyebrow">Active Ship</div>
+        <h2>{active.name || 'No Active Ship'}</h2>
+        <p>{active.class_name || active.template_name || 'Unknown class'} • {label(active.role || 'general')} • Size {active.speed_profile?.size_class || active.size_class || 'M'} • Mass {fmt(active.speed_profile?.mass || active.mass || 0)} • Map speed {fmt(active.speed_profile?.effective_map_speed || active.drive_speed || 0)} • <TierBadge item={active} /></p>
+        <div className="tagCloud">{(activeStats.best_for || []).map(x=><span key={x}>Best: {x}</span>)}{(activeStats.weaknesses || []).map(x=><span className="dangerTag" key={x}>Weak: {x}</span>)}</div>
+        <div className="hangarActions">
+          <button onClick={()=>act('repair_refuel')} disabled={loading || !active.id}>Repair / Refuel / Recharge</button>
+          <button onClick={()=>act('launch_starter_ship')} disabled={loading}>Launch Starter</button>
+        </div>
+      </div>
+      <div className="hangarMeters">
+        <MiniMeter label="Hull" value={active.hull} max={active.max_hull} />
+        <MiniMeter label="Shield" value={active.shield} max={active.max_shield} />
+        <MiniMeter label="Cargo" value={h.cargoSummary?.total} max={h.cargoSummary?.max} danger={h.cargoSummary?.pct >= 80} />
+        <MiniMeter label="Fuel" value={h.fuelSummary?.value ?? state.player.fuel} max={h.fuelSummary?.max ?? state.player.max_fuel} />
+        <MiniMeter label="Energy" value={h.energySummary?.value ?? state.player.energy} max={h.energySummary?.max ?? state.player.max_energy} />
+      </div>
+    </div>
+
+    {!!(h.warnings || []).length && <div className="warningStack hangarWarnings">{h.warnings.map(w=><span key={w}><AlertTriangle size={14}/>{w}</span>)}</div>}
+
+    <div className="hangarLayout">
+      <Panel title="Owned Ships / Hangar Bay" help="Activating a lower-cargo ship is blocked if your cargo will not fit. Active ship controls travel, cargo, PvE, mining, combat, exploration, and smuggling modifiers.">
+        <div className="chipRow">
+          {['all','combat','cargo','trade','mining','exploration','salvage'].map(x=><button key={x} className={shipFilter===x?'active':''} onClick={()=>setShipFilter(x)}>{label(x)}</button>)}
+        </div>
+        <div className="hangarShipGrid">
+          {filteredShips.map(ship => <button key={ship.id} className={`hangarShipCard ${ship.active ? 'active' : ''} ${selected.id===ship.id ? 'selected' : ''}`} onClick={()=>setSelectedShipId(ship.id)}>
+            <GameImage src="" assetType="ship" category={ship.role || ship.class_name || ship.template_name || ship.name} alt={ship.name} />
+            <b>{ship.name}</b>
+            <span>{ship.class_name || ship.template_name} • {label(ship.role || 'ship')} • Size {ship.speed_profile?.size_class || ship.size_class || 'M'}</span>
+            <small><TierBadge item={ship} /> Hull {fmt(ship.max_hull)} • Cargo {fmt(ship.derived_stats?.cargo_capacity ?? ship.cargo_capacity)} • Speed {fmt(ship.speed_profile?.effective_map_speed || ship.drive_speed)}</small>
+            {ship.active ? <em>ACTIVE</em> : <em>{ship.activation_blocked_reason || 'READY'}</em>}
+          </button>)}
+        </div>
+      </Panel>
+
+      <Panel title="Selected Ship Details" help="Stat comparison shows selected ship vs active ship. Deltas help decide whether to activate or buy upgrades.">
+        <div className="selectedShipDetail">
+          <div className="shipDetailImage"><GameImage src="" assetType="ship" category={selected.role || selected.class_name || selected.template_name || selected.name} alt={selected.name || 'Ship'} /></div>
+          <div>
+            <h3>{selected.name || 'No ship selected'}</h3>
+            <p>{selected.class_name || selected.template_name} • {label(selected.role || 'general')} • Size {selected.speed_profile?.size_class || selected.size_class || 'M'} • Mass {fmt(selected.speed_profile?.mass || selected.mass || 0)} • Map speed {fmt(selected.speed_profile?.effective_map_speed || selected.drive_speed || 0)} • <TierBadge item={selected} /></p>
+            <div className="tagCloud">{(selectedStats.best_for || []).map(x=><span key={x}>{x}</span>)}</div>
+          </div>
+        </div>
+        <div className="statCompare">
+          {compareRows.map(k=><div key={k} title={statHelp[k] || ''}>
+            <span>{label(k)}</span>
+            <b>{fmt(selectedStats[k] ?? selected[k])}</b>
+            <em className={deltaClass((selectedStats[k] ?? selected[k]) - (activeStats[k] ?? active[k]))}>{signedNumber((selectedStats[k] ?? selected[k]) - (activeStats[k] ?? active[k]))}</em>
+          </div>)}
+        </div>
+        <div className="slotGrid">
+          {(selected.slots || []).map(slot=><div key={slot.slotId} className={slot.installedItem ? 'occupied' : ''}>
+            <b>{slot.slotLabel}</b><span>{label(slot.slotType)} • {label(slot.sizeLimit)}</span>
+          </div>)}
+          <div><b>Power</b><span>{fmt(selectedStats.module_power_used || 0)} / {fmt(selectedStats.module_power_capacity || 0)}</span></div>
+        </div>
+        <button onClick={()=>act('set_active_ship',{ship_id:selected.id})} disabled={loading || !selected.id || selected.active || !!selected.activation_blocked_reason}>
+          {selected.active ? 'Already Active' : selected.activation_blocked_reason || 'Set Active Ship'}
+        </button>
+      </Panel>
+    </div>
+
+    <Panel title="Active Ship Loadout" help="Click a slot to filter storage to equipment that can fit there. Empty slots are valid; different ships have different fitting identities.">
+      <div className="loadoutSummary">
+        <div><b>Slots</b><span>{active.slot_summary?.occupied || activeSlots.filter(x=>x.installedItem).length} / {active.slot_summary?.total || activeSlots.length}</span></div>
+        <div><b>Power</b><span>{fmt(activeStats.module_power_used || 0)} / {fmt(activeStats.module_power_capacity || 0)}</span></div>
+        <div><b>Selected</b><span>{selectedSlot ? selectedSlot.slotLabel : 'None'}</span></div>
+      </div>
+      <div className="shipSlotGrid">
+        {activeSlots.length ? activeSlots.map(slot => <button key={slot.slotId} className={`shipSlotCard ${slot.installedItem ? 'occupied' : 'empty'} ${selectedSlotId === slot.slotId ? 'selected' : ''}`} onClick={()=>setSelectedSlotId(selectedSlotId === slot.slotId ? null : slot.slotId)}>
+          <div className="slotIcon">{slotIcon(slot.slotType)}</div>
+          <div>
+            <b>{slot.slotLabel}</b>
+            <span>{label(slot.slotType)} • {label(slot.sizeLimit)}</span>
+            <small>Accepts {(slot.acceptedCategories || []).map(label).join(', ')}</small>
+          </div>
+          {slot.installedItem ? <div className="slotInstalled"><ItemVisual item={slot.installedItem} size="sm"/><em>{slot.installedItem.name}</em></div> : <em className="slotEmpty">Empty</em>}
+        </button>) : <div className="emptyState">No loadout slots found for this ship. Backend fallback should provide at least one utility slot.</div>}
+      </div>
+    </Panel>
+
+    <Panel title="Installed Equipment" help="Equipped modules affect derived stats. Equipped items cannot be sold/listed/crafted until removed.">
+      <div className="equipmentGrid">
+        {equipped.length ? equipped.map(m=><EquipmentCard key={m.id} item={m} actionLabel="Remove" onAction={()=>act('unequip_module',{module_id:m.id})} />) : <div className="emptyState">No equipment installed on the active ship.</div>}
+      </div>
+    </Panel>
+
+    <Panel title="Module Storage / Install" help={h.compatibilityInfo?.powerRule || 'Compatibility is enforced by slot, tier, power, and ownership rules.'}>
+      <div className="chipRow">
+        {['compatible','all',...slotTypes].map(x=><button key={x} className={moduleFilter===x?'active':''} onClick={()=>setModuleFilter(x)}>{label(x)}</button>)}
+      </div>
+      <div className="equipmentGrid">
+        {filteredModules.length ? filteredModules.map(m=><EquipmentCard key={m.id} item={m} actionLabel="Install" blocked={(m.blocked_reasons || []).join('; ')} onAction={()=>act('equip_module',{module_id:m.id, ship_id:active.id, slot_id:selectedSlotId || (m.compatibleSlotIds || [])[0]})} />) : <div className="emptyState">No stored modules match this filter.</div>}
+      </div>
+    </Panel>
+
+    <Panel title="Ship Market" help="Available ships show requirements, role, tier, price, and purchase availability. Duplicate classes are blocked for normal players.">
+      <div className="shipMarketGrid">
+        {availableShips.map(ship=><div className={`marketShipCard ${ship.owned ? 'owned' : ''}`} key={ship.code}>
+          <GameImage src="" assetType="ship" category={ship.role || ship.class_name || ship.template_name || ship.name} alt={ship.name} />
+          <div>
+            <h3>{ship.name}</h3>
+            <p>{ship.class_name} • {label(ship.role)} • <TierBadge item={ship} /></p>
+            <Stats pairs={{Price:ship.price, Hull:ship.hull, Shield:ship.shield, Armor:ship.armor, Cargo:ship.cargo_capacity, Fuel:ship.fuel_capacity, Drive:ship.drive_speed}} />
+            <button onClick={()=>act('buy_ship',{code:ship.code})} disabled={loading || ship.owned || !ship.can_buy}>{ship.owned ? 'Owned' : ship.blocked_reason || 'Buy Ship'}</button>
+          </div>
+        </div>)}
+      </div>
+    </Panel>
+  </Page>;
+}
+
+function slotIcon(type) {
+  const map = {weapon:'✦', mining:'⛏', shield:'⬡', armor:'▣', engine:'➤', cargo:'▤', scanner:'⌖', stealth:'◈', utility:'◇', repair:'✚', fuel:'◌', energy:'ϟ', special:'◆'};
+  return map[type] || '◇';
+}
+
+function MiniMeter({label,value,max,danger}) {
+  const pct = Math.max(0, Math.min(100, (Number(value || 0) / Math.max(1, Number(max || 1))) * 100));
+  return <div className={`miniMeter ${danger ? 'danger' : ''}`}><span>{label}</span><Progress value={pct} danger={danger}/><b>{fmt(value)} / {fmt(max)}</b></div>
+}
+
+function EquipmentCard({item, actionLabel, onAction, blocked}) {
+  const stats = item.stats || item.stat_preview || {};
+  return <div className={`equipmentCard ${blocked ? 'blocked' : ''}`}>
+    <ItemVisual item={item} size="lg" />
+    <div>
+      <h3>{item.name}</h3>
+      <p>{label(item.equipmentType || item.slot_type || item.category)} • <TierBadge item={item} /> <span className="rarityBadge">{label(item.rarity || 'common')}</span></p>
+      <div className="moduleStats">{Object.entries(stats).slice(0,5).map(([k,v])=><span key={k}>{label(k)} {signedNumber(v)}</span>)}</div>
+      <small>Power {fmt(item.power_usage || 0)} • Size {label(item.sizeClass || 'light')} • Fits {(item.compatibleSlotTypes || [item.slot_type]).map(label).join(', ')} • Durability {fmt(item.durability ?? 100)}%</small>
+      {blocked && <em className="blockedReason">{blocked}</em>}
+    </div>
+    <button onClick={onAction} disabled={!!blocked}>{blocked || actionLabel}</button>
+  </div>
+}
+
+function signedNumber(n) {
+  const x = Number(n || 0);
+  if (!Number.isFinite(x) || x === 0) return '0';
+  return `${x > 0 ? '+' : ''}${Number.isInteger(x) ? x : x.toFixed(2)}`;
+}
+
+function deltaClass(n) {
+  const x = Number(n || 0);
+  return x > 0 ? 'positive' : x < 0 ? 'negative' : '';
+}
+
+function Messages({state,setPage}) { return <Page title="Messages"><Panel title="System Events">{state.events.map(e=><div className="event" key={e.id}><b>{e.category}</b> {e.message}<small>{new Date(e.created_at).toLocaleString()}</small></div>)}<button onClick={()=>setPage('Chat')}>Open Chat</button></Panel></Page> }
+function Leaderboards({state}) { return <Page title="Leaderboards"><Panel title="Guilds">{state.guilds.map((g,i)=><div className="itemLine" key={g.id}><b>#{i+1} {g.name}</b><span>Respect {fmt(g.respect)} • Treasury {fmt(g.treasury)}</span></div>)}</Panel><Panel title="Planet Control">{state.planets.map(p=><div className="itemLine" key={p.id}><b>{p.name}</b><span>{label(p.controller_type)} • Influence {fmt(p.player_influence || 0)} • Conflict {fmt(p.conflict_level || 0)} • {label(p.economy_type || 'balanced')}</span></div>)}</Panel></Page> }
+function Admin({state,act}) {
+  const tuning = state.game_tuning || {};
+  const groups = tuning.groups || [];
+  const [selectedKey,setSelectedKey] = useState(groups[0]?.key || 'NPC_OBJECTIVE_BALANCE');
+  const selected = groups.find(g => g.key === selectedKey) || groups[0];
+  const [draft,setDraft] = useState('');
+  const [jsonError,setJsonError] = useState('');
+
+  useEffect(() => {
+    if (selected) {
+      setDraft(JSON.stringify(selected.value || {}, null, 2));
+      setJsonError('');
+    }
+  }, [selected?.key, selected?.updated_at, selected?.changed]);
+
+  const saveConfig = async () => {
+    try {
+      const value = JSON.parse(draft || '{}');
+      if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('Top-level JSON must be an object.');
+      setJsonError('');
+      await act('admin_save_game_config', {key:selected.key, value});
+    } catch (ex) {
+      setJsonError(ex.message);
+    }
+  };
+
+  const resetConfig = async () => {
+    setJsonError('');
+    await act('admin_reset_game_config', {key:selected.key});
+  };
+
+  const resetAll = async () => {
+    setJsonError('');
+    await act('admin_reset_all_game_configs', {});
+  };
+
+  return <Page title="Admin Game Tuning">
+    <Panel title="Runtime Balance Controls" help="Godmode/dev admin only. Values persist in SQLite game_settings and apply immediately without rebuilding. Edit JSON carefully.">
+      <div className="adminHeroGrid">
+        <div><b>Live tuning</b><span>NPC life, radar, traffic, ticks, economy, combat, crafting, travel, cargo, and progression variables.</span></div>
+        <div><b>Refresh</b><span>{fmt(tuning.client_runtime?.state_refresh_seconds || 10)}s client state polling</span></div>
+        <div><b>Groups</b><span>{fmt(groups.length)} editable config groups</span></div>
+      </div>
+      <div className="buttonRow">
+        <button onClick={()=>act('admin_godmode')}>Refresh God Mode</button>
+        <button onClick={()=>act('spawn_npcs')}>Spawn NPC Bounties + Tick</button>
+        <button onClick={()=>act('simulate_npc_tick')}>Force NPC Human-Sim Tick</button>
+        <button onClick={()=>act('repair_refuel')}>Repair/Refuel</button>
+        <button onClick={()=>act('launch_starter_ship')}>Launch Starter</button>
+        <button className="dangerBtn" onClick={resetAll}>Reset All Tuning Overrides</button>
+      </div>
+    </Panel>
+
+    <div className="adminTuningLayout">
+      <Panel title="Config Groups" help="Changed groups have a LIVE OVERRIDE badge. Defaults stay in code; overrides live in DB.">
+        <div className="adminConfigList">
+          {groups.map(g => <button key={g.key} className={selected?.key===g.key ? 'active' : ''} onClick={()=>setSelectedKey(g.key)}>
+            <b>{g.key}</b>
+            <span>{g.description}</span>
+            <small>{g.changed ? `LIVE OVERRIDE • ${g.updated_by || ''}` : 'default'}</small>
+          </button>)}
+        </div>
+      </Panel>
+
+      <Panel title={selected?.key || 'Game Config'} help={selected?.description || 'Select a group.'}>
+        {selected ? <div className="adminJsonEditor">
+          <div className="adminConfigMeta">
+            <span>Status <b>{selected.changed ? 'Live Override' : 'Default'}</b></span>
+            <span>Updated <b>{selected.updated_at ? new Date(selected.updated_at).toLocaleString() : 'Never'}</b></span>
+            <span>By <b>{selected.updated_by || 'System'}</b></span>
+          </div>
+          <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
+          {jsonError && <div className="error">{jsonError}</div>}
+          <div className="buttonRow">
+            <button className="primary" onClick={saveConfig}>Save JSON Override</button>
+            <button onClick={()=>setDraft(JSON.stringify(selected.default || {}, null, 2))}>Load Defaults Into Editor</button>
+            <button onClick={()=>setDraft(JSON.stringify(selected.value || {}, null, 2))}>Reload Current</button>
+            <button className="dangerBtn" onClick={resetConfig}>Delete Override / Reset Group</button>
+          </div>
+          <details className="defaultConfigPreview">
+            <summary>Default JSON</summary>
+            <pre>{JSON.stringify(selected.default || {}, null, 2)}</pre>
+          </details>
+        </div> : <p>No game tuning config loaded.</p>}
+      </Panel>
+    </div>
+
+    <Panel title="NPC Life Quick Targets">
+      <div className="adminHintGrid">
+        <div><b>NPC objective behavior</b><code>NPC_OBJECTIVE_BALANCE</code><span>Adjust role weights, bad/good thresholds, radar contact bonuses, and search behavior.</span></div>
+        <div><b>Radar ranges</b><code>RADAR_BALANCE</code><span>Adjust base/final radar ranges, tier scaling, NPC role radar ranges.</span></div>
+        <div><b>Map traffic / ore / sites</b><code>OPEN_WORLD_BALANCE</code><span>Adjust NPC traffic count, ore/site counts, map timers, open-world behavior.</span></div>
+        <div><b>Server/NPC ticks</b><code>SIMULATION_BALANCE / NPC_MARKET_BALANCE</code><span>Adjust simulation cadence, market restock, NPC economy and arbitrage behavior.</span></div>
+      </div>
+    </Panel>
+
+    <Panel title="Recent NPC Actions">{(state.npc_activity || []).slice(0,20).map(a=><div className="itemLine" key={a.id}><b>{label(a.action_type)}</b><span>{a.message}</span></div>)}</Panel>
+    <Panel title="Local NPC Roster">{(state.npc_agents||[]).slice(0,35).map(n=><div className="itemLine" key={n.id}><b>{n.name}</b><span>{label(n.career_code || n.role)} • Rank {n.job_rank} • Lvl {n.level} • {n.ship_class} • {n.disposition}</span></div>)}</Panel>
+    <Panel title="Accounts"><code>godmode / godmode123</code><code>pilot / pilot123</code></Panel>
+  </Page>
+}
+
+function CargoOperationPanel({state}) {
+  const c = state.cargo_operation || {};
+  if (!c.active) return null;
+  return <Panel title="Cargo Handling In Progress" help="Market cargo loading/offloading is not instant. You cannot travel, change ships, fight, or start another cargo operation until it completes. During loading/offloading you are protected from attacks.">
+    <div className="cargoOperationPanel">
+      <div><b>{label(c.operationLabel || c.operationType || 'handling')}</b><span>{fmt(c.qty)}x {c.summary} • mass {fmt(c.mass)}</span><small>{c.message}</small></div>
+      <div><b>{clockTimeLeft(c.completeAt)}</b><span>{fmt(c.progress)}% complete</span><Progress value={c.progress || 0}/></div>
+      <div className="protectionBadge"><Shield size={16}/> Protected while dock crews handle cargo</div>
+    </div>
+  </Panel>;
+}
+
+function TravelStatus({state, clock}) {
+  const t = state.travel_state || {};
+  if (!t.active && t.open_space) return <Panel title="Open Space Status"><div className="travelIdle openSpaceIdle"><b>Holding in open space</b><span>{state.location?.galaxy_name} • ship is on the map at {fmt(t.open_space_x_pct)} / {fmt(t.open_space_y_pct)} and is not docked.</span></div></Panel>;
+  if (!t.active) return <Panel title="Docking Status"><div className="travelIdle"><b>Docked at {state.location?.name}</b><span>{state.location?.galaxy_name} • market, crafting, repairs, hangar, jobs, and local services are available only while docked.</span></div></Panel>;
+  return <Panel title="Active Travel">
+    <div className="travelStatusGrid">
+      <div><b>{label(t.mode)} Route</b><span>{t.origin_planet_name || t.origin_galaxy_name} → {t.destination_planet_name || t.destination_galaxy_name}</span></div>
+      <div><b>{Math.max(0, Math.round(travelProgress(t, clock) * 100))}%</b><span>{clockTimeLeft(t.arrival_at)} remaining</span></div>
+      <div><b>{fmt(Math.ceil((t.elapsed_seconds || 0) / 60))}m / {fmt(Math.ceil((t.total_seconds || 0) / 60))}m</b><span>Backend timestamp timer</span></div>
+    </div>
+    <Progress value={travelProgress(t, clock) * 100} />
+  </Panel>;
+}
+
+
+function PirateStation({state,act,clock,setPage}) {
+  const ps = state.active_pirate_station;
+  if (!ps) {
+    return <Page title="Pirate Station" sub="No active station assault. Enter one from the System Map.">
+      <Panel title="No Active Assault">
+        <p className="muted">Pirate stations are scarce open-world combat locations on the system map. Capacity is limited, but more than one pilot can be inside.</p>
+        <button onClick={()=>setPage('Map')}>Return to System Map</button>
+      </Panel>
+    </Page>;
+  }
+
+  const battle = ps.battle || {};
+  const target = battle.target || {};
+  const report = battle.report || {};
+  const enemies = ps.enemies || [];
+  const activeEnemies = enemies.filter(e => e.status === 'active' && Number(e.hull || 0) > 0);
+  const players = ps.players || [];
+  const player = ps.player || {};
+  const balance = ps.balance || {};
+  const edge = Number(balance.escape_edge_pct || 4);
+  const move = (dx,dy)=>act('pirate_station_move',{dx,dy});
+  const startBattle = (enemy)=>act('pirate_station_start_battle',{enemy_id:enemy.id});
+  const nearest = [...activeEnemies].sort((a,b)=>(a.distancePct||99)-(b.distancePct||99))[0];
+
+  return <Page title={ps.station?.name || 'Pirate Station'} sub="Open-world pirate station. Pirates slowly move toward the closest pilot. Movement does not pause during battle panels.">
+    <div className="pirateStationLayout">
+      <Panel title="Station Assault Status" help="The station resource is the shared defender pool. Defeated enemies stay defeated. Damaged enemies keep their damage for everyone in the station.">
+        <div className="stationStatusHead">
+          <GameImage src={ps.station?.image_url} assetType="station" category="pirate station" alt={ps.station?.name || 'Pirate station'} />
+          <div>
+            <b>{ps.station?.name}</b>
+            <span>Tier T{fmt(ps.station?.tier)} • Difficulty {fmt(ps.station?.difficulty)} • {fmt(ps.remaining)} / {fmt(ps.total)} defenders • pilots {fmt(ps.activePlayerCount)} / {fmt(ps.maxPlayers)}</span>
+            <Progress value={ps.resourcePct || 0} danger={(ps.resourcePct || 0) > 60}/>
+          </div>
+        </div>
+        <div className="mapMetaGrid">
+          <span>Station Resource <b>{fmt(ps.resourcePct)}%</b></span>
+          <span>Your X/Y <b>{fmt(player.x_pct)} / {fmt(player.y_pct)}</b></span>
+          <span>Nearest Pirate <b>{nearest ? `${fmt(nearest.distancePct)}%` : 'clear'}</b></span>
+          <span>Escape Edge <b>{player.escapeReady ? 'ready' : `${fmt(edge)}% border`}</b></span>
+          <span>Capacity <b>{fmt(ps.activePlayerCount)} / {fmt(ps.maxPlayers)}</b></span>
+        </div>
+        <div className="buttonRow">
+          <button onClick={()=>move(0,-1)}>Move Up</button>
+          <button onClick={()=>move(-1,0)}>Move Left</button>
+          <button onClick={()=>move(1,0)}>Move Right</button>
+          <button onClick={()=>move(0,1)}>Move Down</button>
+          <button className="dangerBtn" disabled={!player.escapeReady} onClick={()=>act('pirate_station_retreat')}>Retreat At Edge</button>
+        </div>
+        <div className="mapWarningLine">Open-world mode: pirates keep moving on server ticks and target the closest pilot. Battle panels no longer pause station movement.</div>
+      </Panel>
+
+      <Panel title="Open-World Station Map" help="Pirates spawn spaced out and slowly converge on the closest pilot. Reach the outer border to retreat.">
+        <div className="pirateArena">
+          <div className="escapeBand top"/><div className="escapeBand bottom"/><div className="escapeBand left"/><div className="escapeBand right"/>
+          {players.map(p=><button key={p.player_id} className={`arenaPlayer ${p.self ? 'self' : 'ally'}`} style={{left:`${p.x_pct}%`, top:`${p.y_pct}%`}} title={p.self ? 'Your ship' : p.name}>{p.self ? 'YOU' : 'P'}</button>)}
+          {enemies.map(e=><button key={e.id} className={`arenaEnemy ${e.status !== 'active' ? 'defeated' : ''} ${battle.target?.id === e.id ? 'engaged' : ''} ${e.targetingSelf ? 'targetingSelf' : ''}`} style={{left:`${e.x_pct}%`, top:`${e.y_pct}%`}} title={`${e.name} • ${e.status} • target ${e.targetPlayerName || 'none'}`}>
+            <GameImage src={e.image_url} assetType="ship" category="pirate combat" alt={e.name}/>
+            <em>{e.status === 'active' ? `T${e.tier}` : 'X'}</em>
+          </button>)}
+        </div>
+      </Panel>
+
+      <Panel title="Pilots Inside">
+        <div className="stationPilotList">
+          {players.map(p=><div key={p.player_id} className={`stationPilot ${p.self ? 'self' : ''}`}><b>{p.self ? 'You' : p.name}</b><span>{fmt(p.x_pct)} / {fmt(p.y_pct)}</span></div>)}
+        </div>
+      </Panel>
+
+      <Panel title="Pirate Defenders">
+        <div className="stationEnemyList">
+          {enemies.map(e=><div key={e.id} className={`stationEnemy ${e.status !== 'active' ? 'defeated' : ''} ${e.targetingSelf ? 'targetingSelf' : ''}`}>
+            <GameImage src={e.image_url} assetType="ship" category="pirate combat" alt={e.name}/>
+            <div>
+              <b>{e.name}</b>
+              <span>{label(e.status)} • T{fmt(e.tier)} • Power {fmt(e.power)} • Distance {fmt(e.distancePct)}%</span>
+              <small>Hull {fmt(e.hull)} / {fmt(e.max_hull)} • Shield {fmt(e.shield)} / {fmt(e.max_shield)} • Target {e.targetPlayerName || 'none'}</small>
+              <Progress value={e.hullPct || 0} danger={e.status === 'active'}/>
+            </div>
+            {e.status === 'active' && <button onClick={()=>startBattle(e)}>Engage</button>}
+          </div>)}
+        </div>
+      </Panel>
+    </div>
+
+    {battle.open && <div className="stationBattleOverlay nonBlocking">
+      <div className="stationBattleModal">
+        <div className="battleHeader">
+          <GameImage src={target.image_url} assetType="ship" category="pirate combat" alt={target.name || 'Pirate'} />
+          <div>
+            <h2>{target.name || 'Pirate Attack'}</h2>
+            <p>Battle panel is non-blocking. Pirates continue moving slowly toward the closest pilot.</p>
+          </div>
+        </div>
+        {!report.message ? <div className="battleActions">
+          <Stats pairs={{EnemyPower:target.power, EnemyTier:target.tier, EnemyHull:target.hull, EnemyShield:target.shield}} />
+          <button className="dangerBtn" onClick={()=>act('pirate_station_resolve_battle')}>Resolve Battle</button>
+        </div> : <div className="battleReport">
+          <h3>{report.message}</h3>
+          <Stats pairs={{Outcome:label(report.outcome), Remaining:report.remaining, Credits:report.rewards?.credits || 0, XP:report.rewards?.xp || 0, Hull:report.playerHull, Shield:report.playerShield}} />
+          <div className="combatLog">{(report.log || []).map((l,i)=><div key={i}><b>R{l.round} {label(l.actor)}</b><span>{l.text}</span></div>)}</div>
+          <button onClick={()=>act('pirate_station_close_battle')}>{Number(report.remaining || 0) <= 0 ? 'Close: Station Cleared' : 'Close Battle Panel'}</button>
+        </div>}
+      </div>
+    </div>}
+  </Page>;
+}
+
+function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanSite, onInvestigate, onEnterPirateStation, currentId, clock, mapMode, onMapModeChange, publicProfiles=[]}) {
+  const MAP_W = 12000;
+  const MAP_H = 7800;
+  const nodes = map.nodes || [];
+  const lanes = map.lanes || [];
+  const traffic = map.traffic || [];
+  const oreSites = map.ore_sites || [];
+  const salvageIcons = map.salvage_icons || [];
+  const explorationSites = map.exploration_sites || [];
+  const pirateStations = map.pirate_stations || [];
+  const warZones = map.war_zones || [];
+  const summary = map.summary || {};
+  const [zoom,setZoom] = useState(0.32);
+  const [pan,setPan] = useState({x:20,y:18});
+  const [selectedObject,setSelectedObject] = useState(null);
+  const [profileModal,setProfileModal] = useState(null);
+  const [context,setContext] = useState(null);
+  const [layers,setLayers] = useState({ships:true, hostiles:true, patrols:true, ore:true, wrecks:true, exploration:true, pirates:true, routes:true, danger:true, market:true});
+  const viewportRef = useRef(null);
+  const dragRef = useRef(null);
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const activeLane = lanes.find(l => l.active);
+  const progress = travelProgress(travel || {}, clock);
+  const zoomClass = zoom < .9 ? 'zoomFar' : zoom > 1.72 ? 'zoomNear' : 'zoomMid';
+  const travelBlocked = !!travel?.active;
+  const activeOriginKey = type === 'galaxy' ? travel?.origin_galaxy_id : travel?.origin_planet_id;
+  const activeCoordinateOrigin = travel?.active && travel?.origin_x_pct != null && travel?.origin_y_pct != null
+    ? {x_pct:Number(travel.origin_x_pct), y_pct:Number(travel.origin_y_pct)}
+    : null;
+  const activeCoordinateDest = travel?.active && travel?.destination_x_pct != null && travel?.destination_y_pct != null
+    ? {x_pct:Number(travel.destination_x_pct), y_pct:Number(travel.destination_y_pct)}
+    : null;
+  const activeWaypointOrigin = activeCoordinateOrigin || byId[activeOriginKey];
+  const activeWaypointPoint = activeCoordinateOrigin && activeCoordinateDest
+    ? lerpPoint(activeCoordinateOrigin, activeCoordinateDest, progress)
+    : null;
+  const openSpacePoint = !travel?.active && travel?.open_space && (!travel.open_space_map_type || travel.open_space_map_type === type)
+    ? {x:Number(travel.open_space_x_pct || 50), y:Number(travel.open_space_y_pct || 50)}
+    : null;
+  const shipPoint = activeWaypointPoint || (activeLane && byId[activeLane.from] && byId[activeLane.to]
+    ? lerpPoint(byId[activeLane.from], byId[activeLane.to], progress)
+    : openSpacePoint);
+  const hasCoordinateTravelLine = !!(activeCoordinateOrigin && activeCoordinateDest);
+  const radarCenter = {
+    x: Number(summary.radar_center_x_pct ?? shipPoint?.x ?? 50),
+    y: Number(summary.radar_center_y_pct ?? shipPoint?.y ?? 50),
+  };
+  const radarRange = Number(summary.radar_range_pct || 0);
+  const radarDiameterPx = Math.max(0, (radarRange / 100) * MAP_W * 2);
+  const markerScale = Math.max(1.0, Math.min(3.4, 1 / Math.max(zoom, 0.1)));
+  const nodeScale = Math.max(0.95, Math.min(2.35, 1 / Math.max(zoom, 0.1)));
+  const iconTransform = `translate(-50%,-50%) scale(${markerScale})`;
+  const nodeTransform = `translate(-50%,-50%) scale(${nodeScale})`;
+
+  const objectKey = (obj) => obj?.objectKey || obj?.id || obj?.siteId || obj?.salvageSiteId || obj?.explorationSiteId || `${obj?.kind || 'object'}:${obj?.name || obj?.label || 'unknown'}`;
+
+  const objectDisplayName = (obj) => obj?.realName || obj?.name || obj?.label || obj?.ship_name || 'Map target';
+  const targetPayload = (obj) => ({x_pct:obj.x_pct, y_pct:obj.y_pct, label:objectDisplayName(obj), map_type:type});
+  const needsApproach = (obj) => !!obj && obj.inActionRange === false;
+  const isSystemDockTarget = (obj) => type === 'system' && ['node','planet','station'].includes(String(obj?.kind || '').toLowerCase());
+  const trafficForView = traffic
+    .filter(t => t?.id !== 'player:self' && t?.kind !== 'self' && !t?.self)
+    .map(t => {
+      const moving = t.npcActionStateRaw === 'moving' && t.npcStartedAt && t.npcArrivalAt;
+      if (!moving) return t;
+      const start = new Date(t.npcStartedAt).getTime();
+      const end = new Date(t.npcArrivalAt).getTime();
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return t;
+      const pct = Math.max(0, Math.min(1, (Number(clock || Date.now()) - start) / (end - start)));
+      const origin = {x_pct:Number(t.routeOriginX ?? t.x_pct ?? 50), y_pct:Number(t.routeOriginY ?? t.y_pct ?? 50)};
+      const dest = {x_pct:Number(t.routeDestinationX ?? t.x_pct ?? 50), y_pct:Number(t.routeDestinationY ?? t.y_pct ?? 50)};
+      const pt = lerpPoint(origin, dest, pct);
+      return {...t, x_pct:pt.x, y_pct:pt.y, progress:Math.round(pct * 1000) / 10, label:t.npcObjectiveLabel ? `${t.npcObjectiveLabel}: moving smoothly to objective.` : t.label};
+    });
+  const allObjects = [...nodes.map(n => ({...n, kind:n.kind || 'node'})), ...trafficForView, ...oreSites, ...salvageIcons, ...explorationSites, ...pirateStations, ...warZones];
+  const selectedLiveObject = selectedObject && selectedObject.kind !== 'blank' ? allObjects.find(o => objectKey(o) === objectKey(selectedObject)) : selectedObject;
+
+  useEffect(() => {
+    if (!selectedObject || selectedObject.kind === 'blank') return;
+    if (!allObjects.some(o => objectKey(o) === objectKey(selectedObject))) {
+      setSelectedObject(null);
+      setContext(null);
+    }
+  }, [map, type]);
+
+  const autoInterceptRef = useRef(null);
+  useEffect(() => {
+    if (travel?.mode !== 'intercept' || !travel?.active || !travel?.intercept_target_ref || !shipPoint || !onResolveIntercept) return;
+    const target = trafficForView.find(t => t.combatTargetRef === travel.intercept_target_ref || t.id === travel.intercept_target_ref);
+    if (!target) return;
+    const dx = Number(shipPoint.x || 0) - Number(target.x_pct || 0);
+    const dy = Number(shipPoint.y || 0) - Number(target.y_pct || 0);
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const key = `${travel.intercept_target_ref}:${travel.started_at || ''}`;
+    const contactRange = type === 'galaxy' ? 1.55 : 2.05;
+    if (distance <= contactRange && autoInterceptRef.current !== key) {
+      autoInterceptRef.current = key;
+      onResolveIntercept();
+    }
+  }, [clock, travel?.mode, travel?.active, travel?.intercept_target_ref, travel?.started_at, progress, shipPoint?.x, shipPoint?.y, traffic]);
+
+  const clampNum = (v,min,max) => Math.max(min, Math.min(max, Number.isFinite(v) ? v : min));
+  const worldFromEvent = (e) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) return {x_pct:50,y_pct:50};
+    const x = (e.clientX - rect.left - pan.x) / zoom;
+    const y = (e.clientY - rect.top - pan.y) / zoom;
+    return {x_pct:clampNum((x / MAP_W) * 100, 1, 99), y_pct:clampNum((y / MAP_H) * 100, 1, 99)};
+  };
+  const openContext = (e, obj) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = null;
+    const next = {...obj, objectKey:objectKey(obj), screenX:e.clientX, screenY:e.clientY};
+    setContext(next);
+  };
+  const openBlankContext = (e) => {
+    if (dragRef.current?.moved) return;
+    const pos = worldFromEvent(e);
+    const blank = {kind:'blank', objectKey:`blank:${pos.x_pct.toFixed(1)}:${pos.y_pct.toFixed(1)}`, name:'Open Space', label:`Map point ${pos.x_pct.toFixed(1)} / ${pos.y_pct.toFixed(1)}`, ...pos, screenX:e.clientX, screenY:e.clientY};
+    setContext(blank);
+  };
+  const closeContext = () => setContext(null);
+  const run = (fn, arg) => { closeContext(); if (fn) fn(arg); };
+  const resetView = () => { setZoom(0.32); setPan({x:20,y:18}); };
+  const centerOnPct = (pt, nextZoom = 1.0) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    const vw = rect?.width || 1200;
+    const vh = rect?.height || 760;
+    const x = (Number(pt?.x_pct ?? pt?.x ?? 50) / 100) * MAP_W;
+    const y = (Number(pt?.y_pct ?? pt?.y ?? 50) / 100) * MAP_H;
+    setZoom(nextZoom);
+    setPan({
+      x: clampNum(vw / 2 - x * nextZoom, -(MAP_W * nextZoom) + 340, 260),
+      y: clampNum(vh / 2 - y * nextZoom, -(MAP_H * nextZoom) + 260, 220)
+    });
+  };
+  const centerMyShip = (select = false) => {
+    if (shipPoint) {
+      centerOnPct({x_pct: shipPoint.x, y_pct: shipPoint.y}, 1.05);
+      if (select) setSelectedObject({kind:'self', name: travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label: travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : 'In open space', x_pct: shipPoint.x, y_pct: shipPoint.y});
+      return;
+    }
+    const current = nodes.find(n => n.current || n.id === currentId) || nodes[0];
+    if (current) {
+      centerOnPct(current, 0.95);
+      if (select) setSelectedObject({...current, kind:'node', selectedSummary:'You are docked here. Your ship is inside the planet/station and is not visible as a separate map object until launch/travel.'});
+    }
+  };
+  const findMyShip = () => centerMyShip(true);
+  // The map never auto-centers after travel/clicks. Only Find My Ship or Reset changes viewport intentionally.
+
+  const toggleLayer = (key) => setLayers(v => ({...v, [key]:!v[key]}));
+
+  const onMouseDown = (e) => { if (e.button !== 0) return; dragRef.current = {x:e.clientX, y:e.clientY, panX:pan.x, panY:pan.y, moved:false}; };
+  const onMouseMove = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.x;
+    const dy = e.clientY - d.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) d.moved = true;
+    if (d.moved) setPan({x:clampNum(d.panX + dx, -(MAP_W * zoom) + 340, 260), y:clampNum(d.panY + dy, -(MAP_H * zoom) + 260, 220)});
+  };
+  const onMouseUp = (e) => { const d = dragRef.current; dragRef.current = null; if (!d?.moved) openBlankContext(e); };
+  const onWheel = (e) => { e.preventDefault(); e.stopPropagation(); const delta = e.deltaY < 0 ? 0.05 : -0.05; setZoom(z => clampNum(+(z + delta).toFixed(2), .10, 1.75)); };
+
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const stopWheel = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    el.addEventListener('wheel', stopWheel, {passive:false});
+    return () => el.removeEventListener('wheel', stopWheel);
+  }, []);
+
+  const isPatrol = (t) => ['patrol','security_pilot','marshal'].includes(String(t.role || '').toLowerCase());
+  const visibleTraffic = trafficForView.filter(t => layers.ships && (layers.hostiles || !t.hostile) && (layers.patrols || !isPatrol(t)));
+  const layerButton = (key,name) => <button className={layers[key] ? 'active' : ''} onClick={()=>toggleLayer(key)}>{name}</button>;
+  const popupX = context ? clampNum(context.screenX + 14, 8, window.innerWidth - 276) : 0;
+  const popupY = context ? clampNum(context.screenY, 8, window.innerHeight - 340) : 0;
+  const selected = selectedLiveObject && selectedLiveObject.kind !== 'blank' ? {...selectedObject, ...selectedLiveObject} : selectedLiveObject;
+  const blockedReason = travelBlocked ? `Blocked while ${label(travel.mode || 'traveling')} is active.` : '';
+  const regionSummary = summary.readable_hint || `${summary.risk_band || 'Unknown'} route risk. Watch hostile traffic, salvage depletion, ore depletion, and ancient signals.`;
+
+  return <div className="mapShell phase23bMapShell">
+    <div className="mapToolbar enhancedMapToolbar">
+      <button className={type==='system' ? 'active' : ''} onClick={()=>onMapModeChange && onMapModeChange('system')}>System</button>
+      <button className={type==='galaxy' ? 'active' : ''} onClick={()=>onMapModeChange && onMapModeChange('galaxy')}>Galaxy</button>
+      <button onClick={()=>setZoom(z=>clampNum(+(z-0.05).toFixed(2),.10,1.75))}>Zoom -</button>
+      <button onClick={resetView}>Reset</button>
+      <button className="findShipBtn" onClick={findMyShip}>Find My Ship</button>
+      <button onClick={()=>setZoom(z=>clampNum(+(z+0.05).toFixed(2),.10,1.75))}>Zoom +</button>
+      <span>{summary.ships_in_transit ?? traffic.length} ships • {summary.ore_signatures ?? oreSites.length} ore • {summary.wrecks ?? salvageIcons.length} wrecks • {summary.ancient_sites ?? explorationSites.length} ancient • {summary.pirate_stations ?? pirateStations.length} pirate stations • {summary.hostile_contacts ?? traffic.filter(t=>t.hostile).length} hostile</span>
+      <span>Activity: {label(travel?.active ? travel.mode : 'idle')} {travel?.active ? `• ${clockTimeLeft(travel.arrival_at)}` : ''}</span>{travel?.route_final_galaxy_name && <span>Route: segment {fmt((travel.route_segment_index || 0) + 1)} / {fmt((travel.route_segments || []).length || 1)} → {travel.route_final_galaxy_name}</span>}
+      <span>Risk: {summary.risk_band || label(summary.route_risk || 'unknown')} • Security {fmt(summary.security_level ?? 0)}</span>
+      <span>Radar: {fmt(summary.radar_range_pct || 0)}% radius • Hidden {fmt(summary.hidden_by_radar || 0)}</span>
+      <span>NPCs: weighted objectives, radar-limited awareness</span>
+    </div>
+    <div className="mapInsightStrip"><b>{type === 'galaxy' ? 'Galaxy Overview' : 'System Opportunities'}</b><span>{regionSummary}</span>{(summary.nearby_opportunities || []).slice(0,4).map(x=><em key={x}>{x}</em>)}</div>
+    <div className="mapLayerToggles phase23bLayers">{layerButton('ships','Ships')}{layerButton('hostiles','Hostiles')}{layerButton('patrols','Patrols')}{layerButton('ore','Ore')}{layerButton('wrecks','Wrecks')}{layerButton('exploration','Ancient Sites')}{layerButton('pirates','Pirate Stations')}{layerButton('routes','Routes')}{layerButton('danger','Danger')}{layerButton('market','Market')}</div>
+    <div className={`mapViewport ${zoomClass}`} ref={viewportRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={()=>{dragRef.current=null}} onWheel={onWheel} onWheelCapture={onWheel} onClick={()=>{}}>
+      <div className={`infoMap ${type}Map openWorldMap mapWorld`} style={{width:MAP_W, height:MAP_H, minWidth:MAP_W, minHeight:MAP_H, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`}}>
+        {type === 'system' && layers.danger && nodes.map(n => Number(n.risk_level || 0) >= 45 ? <span key={`danger-${n.id}`} className={`dangerZone ${Number(n.risk_level || 0) >= 70 ? 'extreme' : 'high'}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} /> : null)}
+        {type === 'system' && layers.market && nodes.map(n => <span key={`market-${n.id}`} className="marketPulse" style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} title={`Legal ${n.legal_market_strength || 0} / Illicit ${n.illicit_market_strength || 0}`} />)}
+        {radarRange > 0 && <span className="playerRadarRing" style={{left:`${radarCenter.x}%`, top:`${radarCenter.y}%`, width:`${radarDiameterPx}px`, height:`${radarDiameterPx}px`}} title={`Your radar range: ${radarRange}% map radius`} />}
+        {warZones.map(w => <span key={w.id} className="galaxyWarRing planetWarRing" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, width:`${w.radius_pct*2}%`, height:`${w.radius_pct*2}%`}} title={`${w.name} capture ring`} />)}
+        {warZones.map(w => <button key={`${w.id}:station`} className="captureStationMarker" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} title={w.name}>⚔</button>)}
+        {layers.routes && <svg className="mapLines" viewBox="0 0 100 100" preserveAspectRatio="none">{lanes.map(l => { const a = byId[l.from], b = byId[l.to]; if (!a || !b) return null; return <line key={l.key} x1={a.x_pct} y1={a.y_pct} x2={b.x_pct} y2={b.y_pct} className={l.active && !hasCoordinateTravelLine ? 'lane active' : l.visited ? 'lane visited' : 'lane planned'} />; })}{hasCoordinateTravelLine && <line x1={activeCoordinateOrigin.x_pct} y1={activeCoordinateOrigin.y_pct} x2={activeCoordinateDest.x_pct} y2={activeCoordinateDest.y_pct} className="lane active mapCoordinateTravelLine" />}</svg>}
+        {nodes.map(n => <button key={n.id} className={`mapNode ${n.kind === 'gate' ? 'gateNode' : ''} ${n.current || n.id===currentId ? 'current' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} title={`${n.name} • ${type === 'galaxy' ? `${n.faction_name || 'Neutral'} control` : n.kind === 'gate' ? 'Galaxy gate' : `Risk ${n.risk_level}`}`}><GameImage src={n.image_url} assetType={n.kind === 'gate' ? 'item' : type === 'galaxy' ? 'galaxy' : (n.type === 'station' ? 'station' : 'planet')} category={n.economy_type || n.type || n.kind} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : n.kind === 'gate' ? <span>Jump lane • adjacent galaxy</span> : <span>SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>)}
+        {shipPoint && <button className={`shipMarker selfShip ${travel?.mode === 'intercept' ? 'intercepting' : ''} ${!travel?.active && travel?.open_space ? 'parkedOpenSpace' : ''}`} style={{left:`${shipPoint.x}%`, top:`${shipPoint.y}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,{kind:'self', name:travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label:travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : (travel?.open_space ? 'Holding position in open space.' : 'You are traveling in open space.'), progress:Math.round(progress*100)})}><GameImage className="selfShipImg" src="" assetType="ship" category={travel?.mode === 'intercept' ? 'interceptor combat' : 'player explorer'} alt="Your ship" /><span>{travel?.active ? `${Math.round(progress*100)}%` : 'YOU'}</span></button>}
+        {visibleTraffic.map(t => <button key={t.id} className={`trafficShip ${t.kind || 'npc'} ${t.hostile ? 'hostile' : ''} ${isPatrol(t) ? 'patrol' : ''}`} style={{left:`${t.x_pct}%`, top:`${t.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,t)} title={t.label}><GameImage src="" assetType="ship" category={t.role || t.kind || t.name || (t.hostile ? 'combat' : 'exploration')} alt={t.name || t.label || 'Transit ship'} /><em>{t.npcObjective ? label(t.npcObjective).slice(0,7) : `${Math.round(t.progress || 0)}%`}</em></button>)}
+        {layers.ore && oreSites.map(o => <button key={o.id} className="resourceNode oreNode" style={{left:`${o.x_pct}%`, top:`${o.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,o)} title={o.label}><GameImage src={o.image_url} assetType="material" category={o.kind || o.resource_type || 'ore'} alt={o.name || 'Ore signature'} /><em>T{o.tier}</em></button>)}
+        {layers.wrecks && salvageIcons.map(w => <button key={w.id} className="resourceNode salvageNode" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} title={w.label}><GameImage src={w.image_url} assetType="material" category={w.kind || 'salvage wreck'} alt={w.ship_name || 'Wreck'} /><em>T{w.ship_tier}</em></button>)}
+        {layers.exploration && explorationSites.map(site => <button key={site.id} className={`resourceNode explorationNode ${site.signalState || 'unknown'} ${Number(site.signalQuality || 0) >= 70 ? 'highQuality' : ''}`} style={{left:`${site.x_pct}%`, top:`${site.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,site)} title={site.label}><GameImage src={site.image_url} assetType="material" category={site.kind || 'ancient exploration'} alt={site.realName || site.name || 'Ancient site'} /><em>Q{fmt(site.signalQuality ?? site.rewardTier)}</em></button>)}
+        {layers.pirates && pirateStations.map(st => <button key={st.id} className={`resourceNode pirateStationNode ${st.locked ? 'locked' : ''}`} style={{left:`${st.x_pct}%`, top:`${st.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,st)} title={st.label}><GameImage src={st.image_url} assetType="station" category="pirate station" alt={st.name || 'Pirate station'} /><em>{fmt(st.resourcePct ?? st.resource_pct)}%</em></button>)}
+      </div>
+    </div>
+    {context && <div className="mapContextPopup phase23bPopup" style={{left:popupX, top:popupY}} onMouseDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}><b>{context.name || context.label || context.ship_name}</b><small>{context.selectedSummary || context.label || context.statusText || label(context.kind || context.role || 'object')}</small>{blockedReason && <small className="blockedReason">{blockedReason}</small>}{context.inActionRange === false && <small className="blockedReason">{context.rangeLabel || 'Out of range. Approach first.'}</small>}<div className="buttonRow verticalButtons">
+      {context.kind === 'blank' && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:'Open-space waypoint',map_type:type})}>Go Here</button>}
+      {context.kind === 'blank' && travel?.active && <button className="dangerBtn" disabled={!onCancelTravel} onClick={()=>run(onCancelTravel,{})}>Cancel Current Travel</button>}
+      {context.kind === 'blank' && <button disabled={travelBlocked || !onScanArea} onClick={()=>run(onScanArea,{x_pct:context.x_pct,y_pct:context.y_pct,map_type:type})}>Scan Area</button>}
+      {isSystemDockTarget(context) && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect</button>}
+      {type === 'galaxy' && context.kind === 'node' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect</button>}
+      {isSystemDockTarget(context) && (context.current || context.id===currentId) && travel?.open_space && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:context.kind || 'planet'})}>Dock Here</button>}
+      {isSystemDockTarget(context) && !(context.current || context.id===currentId) && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:context.kind || 'planet'})}>Dock Here</button>}
+      {type === 'galaxy' && context.kind === 'node' && !(context.current || context.id===currentId) && <button disabled={travelBlocked} onClick={()=>run(onTravel,context)}>Jump Here</button>}
+      {type === 'system' && context.kind === 'gate' && (context.current || context.id===currentId) && travel?.open_space && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:'planet'})}>Dock Here</button>}
+      {context.kind === 'gate' && <button disabled={travelBlocked} onClick={()=>run(onTravel,context)}>Jump Gate</button>}
+      {(context.kind === 'npc' || context.kind === 'player' || context.attackable) && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Ship</button>}
+      {context.attackable && context.canAttack !== false && <button className="dangerBtn" onClick={()=>run(onIntercept,context)}>Intercept / Attack</button>}
+      {context.kind === 'ore' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Ore</button>}
+      {context.kind === 'ore' && <button disabled={travelBlocked} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.name || 'Ore signature'})}>{needsApproach(context) ? 'Approach Ore' : 'Plot Course to Node'}</button>}
+      {context.kind === 'ore' && context.canMine !== false && <button disabled={travelBlocked} onClick={()=>run(onMine,context)}>Mine</button>}
+      {context.kind === 'salvage' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Wreck</button>}
+      {context.kind === 'salvage' && <button disabled={travelBlocked} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.ship_name || 'Wreck'})}>{needsApproach(context) ? 'Approach Wreck' : 'Plot Course to Wreck'}</button>}
+      {context.kind === 'salvage' && context.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>run(onSalvage,context)}>Salvage</button>}
+      {context.kind === 'exploration' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Signal</button>}
+      {context.kind === 'exploration' && <button disabled={travelBlocked} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.realName || context.name || 'Ancient site'})}>{needsApproach(context) ? 'Approach Site' : 'Plot Course to Site'}</button>}
+      {context.kind === 'exploration' && context.canScan !== false && <button disabled={travelBlocked} onClick={()=>run(onScanSite,context)}>Scan Site</button>}
+      {context.kind === 'exploration' && context.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>run(onInvestigate,context)}>Investigate</button>}
+      {context.kind === 'pirate_station' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Station</button>}
+      {context.kind === 'pirate_station' && needsApproach(context) && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,targetPayload(context))}>Approach Station</button>}
+      {context.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || context.locked || !onEnterPirateStation || needsApproach(context)} onClick={()=>run(onEnterPirateStation,context)}>{context.locked ? 'Station At Capacity' : 'Enter Station'}</button>}
+      {context.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.name,map_type:'galaxy'})}>{needsApproach(context) ? 'Approach Capture Ring' : 'Enter Capture Ring'}</button>}
+      <button onClick={closeContext}>Cancel</button></div></div>}
+    {selected && selected.kind !== 'blank' && <div className="mapInspectOverlay" onMouseDown={()=>setSelectedObject(null)}><div className="mapObjectPanel phase23bObjectPanel mapInspectModal" style={{left:Math.min((selected.screenX || 420)+18, window.innerWidth-520), top:Math.min((selected.screenY || 180)+18, window.innerHeight-520)}} onMouseDown={e=>e.stopPropagation()}><button className="modalX mapInspectX" onClick={()=>setSelectedObject(null)}>×</button><div className="mapObjectHeader mapObjectHeaderVisual">{selected.kind === 'player' ? <ProfileAvatar profile={findPublicProfile(publicProfiles, selected) || {displayName:selected.name, selectedBadgeCode:selected.selectedBadgeCode}} src={findPublicProfile(publicProfiles, selected)?.avatarUrl} size="md" onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }} /> : <GameImage src={selected.kind === 'npc' || selected.attackable ? '' : selected.image_url} assetType={selected.kind === 'npc' || selected.attackable ? 'ship' : selected.kind === 'node' ? (type === 'galaxy' ? 'galaxy' : (selected.type === 'station' ? 'station' : 'planet')) : selected.kind === 'ore' || selected.kind === 'salvage' || selected.kind === 'exploration' ? 'material' : 'item'} category={selected.role || selected.kind || selected.type || selected.economy_type} alt={selected.name || selected.realName || selected.label || selected.ship_name} />}<div><b>{selected.name || selected.realName || selected.label || selected.ship_name}</b><span>{label(selected.kind || selected.role || 'object')} • {selected.statusText || selected.label || ''}</span></div></div><div className="mapMetaGrid"><span>Risk <b>{selected.riskBand || fmt(selected.riskLevel ?? selected.risk_level ?? selected.route_danger ?? 0)}</b></span><span>Reward <b>{selected.rewardHint || `T${fmt(selected.rewardTier ?? selected.tier ?? selected.ship_tier ?? 0)}`}</b></span><span>State <b>{label(selected.signalState || selected.kind || selected.role || 'known')}</b></span><span>ETA <b>{travel?.active ? clockTimeLeft(travel.arrival_at) : 'Idle'}</b></span><span>Radar <b>{selected.radarDistancePct !== undefined ? `${fmt(selected.radarDistancePct)} / ${fmt(selected.radarRangePct || summary.radar_range_pct)}%` : `${fmt(summary.radar_range_pct || 0)}%`}</b></span><span>Range <b>{selected.rangeLabel || (selected.inActionRange === false ? 'Out of Range' : selected.inActionRange === true ? 'In Range' : '—')}</b></span></div><div className="selectedSummary">{selected.selectedSummary || selected.outcomeFactors || 'No extra intel yet. Scan, inspect, or approach for better data.'}</div>{selected.dangerHint && <div className="mapWarningLine">{selected.dangerHint}</div>}{selected.npcObjectiveLabel && <div className="npcObjectiveBox"><b>NPC Objective</b><span>{selected.npcObjectiveLabel}</span><small>{selected.npcObjectiveState || selected.npcRadarBehavior}</small>{selected.npcObjectiveTargetName && <small>Target: {selected.npcObjectiveTargetName}</small>}</div>}{selected.kind === 'npc' && <div className="npcLifeBox"><span>Level <b>{fmt(selected.npcLevel || 1)}</b></span><span>XP <b>{fmt(selected.npcXp || 0)}</b></span><span>Gen <b>{fmt(selected.npcGeneration || 1)}</b></span><span>Deaths <b>{fmt(selected.npcDeathCount || 0)}</b></span>{selected.npcSkills && Object.entries(selected.npcSkills).slice(0,5).map(([k,v])=><em key={k}>{label(k)} {fmt(v)}</em>)}</div>}{selected.npcVisibleCounts && <div className="npcRadarCounts"><span>Radar sees ships <b>{fmt(selected.npcVisibleCounts.ship || 0)}</b></span><span>ore <b>{fmt(selected.npcVisibleCounts.ore || 0)}</b></span><span>wrecks <b>{fmt(selected.npcVisibleCounts.salvage || 0)}</b></span><span>ancient <b>{fmt(selected.npcVisibleCounts.exploration || 0)}</b></span></div>}{selected.disabledReason && <div className="mapWarningLine">{selected.disabledReason}</div>}{selected.outcomeFactors && <small>Factors: {selected.outcomeFactors}</small>}<div className="buttonRow">{selected.inActionRange === false && ['ore','salvage','exploration','pirate_station','war_zone'].includes(selected.kind) && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere(targetPayload(selected))}>Approach</button>}{isSystemDockTarget(selected) && !(selected.current && !travel?.open_space) && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel({...selected, kind:selected.kind || 'planet'})}>Dock</button>}{selected.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel(selected)}>Jump Gate</button>}{selected.attackable && selected.canAttack !== false && selected.inActionRange !== false && <button className="dangerBtn" onClick={()=>onIntercept && onIntercept(selected)}>Intercept / Attack</button>}{selected.kind === 'ore' && selected.canMine !== false && <button disabled={travelBlocked} onClick={()=>onMine && onMine(selected)}>Mine • Energy {fmt(selected.energyCost)}</button>}{selected.kind === 'salvage' && selected.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>onSalvage && onSalvage(selected)}>Salvage • Energy {fmt(selected.energy_cost)}</button>}{selected.kind === 'exploration' && selected.canScan !== false && <button disabled={travelBlocked} onClick={()=>onScanSite && onScanSite(selected)}>Scan • Energy {fmt(selected.scanEnergy)}</button>}{selected.kind === 'exploration' && selected.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>onInvestigate && onInvestigate(selected)}>Investigate • Energy {fmt(selected.investigateEnergy)}</button>}{selected.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || selected.locked || !onEnterPirateStation || selected.inActionRange === false} onClick={()=>onEnterPirateStation && onEnterPirateStation(selected)}>{selected.locked ? 'Occupied' : 'Enter Station'}</button>}{selected.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere({x_pct:selected.x_pct,y_pct:selected.y_pct,label:selected.name,map_type:'galaxy'})}>Enter Capture Ring</button>}{selected.kind === 'player' && findPublicProfile(publicProfiles, selected) && <button onClick={()=>setProfileModal(findPublicProfile(publicProfiles, selected))}>View Profile</button>}<button onClick={()=>setSelectedObject(null)}>Close</button></div><small>{selected.kind === 'exploration' ? 'Exploration is uncertain by design: scanning improves quality, modules improve analysis, hazard gear lowers trap damage, and bad sites can still produce nothing.' : selected.kind === 'npc' || selected.attackable ? 'Interceptions occur in open space. Planetary defense does not respond once ships are away from the planet.' : ''}</small></div></div>}
+    <PublicProfileModal profile={profileModal} onClose={()=>setProfileModal(null)} />
+  </div>;
+}
+
+function ShipStatusPanel({state}) {
+  const ss = state.ship_status || {systems:[], warnings:[]};
+  return <Panel title="Ship Systems" help="Real ship, module, cargo, fuel, energy, hull, shield, and role-derived status.">
+    <div className="shipStatusHead"><div className="shipArt smallShip"><GameImage src="" assetType="ship" category={state.active_ship?.role || state.active_ship?.class_name || state.active_ship?.template_name || state.active_ship?.name} alt={state.active_ship?.name || 'Ship'} /></div><div><b>{state.active_ship?.name || 'No Ship'}</b><span>Combat {fmt(ss.combat_rating)} • Mining {fmt(ss.mining_efficiency)} • Stealth {fmt(ss.stealth_rating)} • Scan {fmt(ss.scan_strength)} • Modules {fmt(ss.active_modules)}</span></div></div>
+    <div className="systemBars">{(ss.systems || []).map(x=><div key={x.key}><span>{x.label}</span><Progress value={x.pct} danger={x.danger}/><small>{fmt(x.value)} / {fmt(x.max)}</small></div>)}</div>
+    {!!(ss.warnings || []).length && <div className="warningStack">{ss.warnings.map(w=><span key={w}><AlertTriangle size={14}/>{w}</span>)}</div>}
+  </Panel>;
+}
+
+function MarketPressure({state}) {
+  const market = state.market || [];
+  const highDemand = [...market].sort((a,b)=>(b.demand||0)-(a.demand||0)).slice(0,4);
+  const scarce = [...market].sort((a,b)=>(a.supply||0)-(b.supply||0)).slice(0,4);
+  const illegalPressure = market.filter(x=>!x.legal).sort((a,b)=>(b.pressureScore||0)-(a.pressureScore||0)).slice(0,4);
+  return <Panel title="Economy Pressure" help="Demand, scarcity, trend, pressure, and illicit risk calculated from local market and planet conditions.">
+    <div className="pressureColumns">
+      <MiniMarketStack title="High Demand" items={highDemand} field="demand" />
+      <MiniMarketStack title="Scarce Stock" items={scarce} field="supply" invert />
+      <MiniMarketStack title="Illicit Pressure" items={illegalPressure} field="riskRating" />
+    </div>
+  </Panel>;
+}
+
+function MiniMarketStack({title, items, field, invert}) {
+  return <div className="miniMarketStack"><h3>{title}</h3>{items.map(i=><div key={`${title}-${i.code}`}><ItemVisual item={i} size="xs"/><span>{i.name}</span><b>{fmt(i[field])}</b><em>{label(i.priceTrend || i.scarcityLevel || 'flat')}</em></div>)}</div>;
+}
+
+function PlanetControlVisual({state}) {
+  const pc = state.planet_control || {effects:{}};
+  const p = pc.planet || state.location || {};
+  const effects = pc.effects || {};
+  return <Panel title="Control Layer" help="Planet control effects are live modifiers, not flavor text.">
+    <div className="nodeHeader"><ItemVisual item={p} size="ship"/><div><b>{effects.controller_label || label(p.controller_type || 'npc')}</b><span>{label(p.economy_type || 'balanced')} economy • Tax {effects.tax_rate_pct ?? 0}% • Production {fmt(p.production_bonus || 0)}</span></div></div>
+    <div className="influenceStack">
+      <InfluenceBar label="Influence" value={p.player_influence || 0} />
+      <InfluenceBar label="Security" value={p.security_level || 0} />
+      <InfluenceBar label="Stability" value={p.stability_level || 0} />
+      <InfluenceBar label="Conflict" value={p.conflict_level || 0} danger />
+    </div>
+    <div className="effectNotes"><span>High security lowers smuggling profit but reduces piracy.</span><span>Low stability increases illicit activity and travel risk.</span><span>{label(p.economy_type || 'balanced')} economy changes market and crafting pressure.</span></div>
+  </Panel>;
+}
+
+function EnhancedEventFeed({events}) {
+  const [filter,setFilter] = useState('all');
+  const groups = ['all', ...Array.from(new Set((events || []).map(e=>e.group || e.action_type))).slice(0,8)];
+  const shown = (events || []).filter(e=>filter==='all' || (e.group || e.action_type) === filter).slice(0,28);
+  return <>
+    <div className="chipRow eventFilters">{groups.map(g=><button key={g} className={filter===g?'active':''} onClick={()=>setFilter(g)}>{label(g)}</button>)}</div>
+    <div className="feedList enhancedFeed">{shown.map(e=><div key={e.id} className={`eventCard ${e.severity || 'info'}`}><b><span>{e.icon || '•'}</span>{label(e.group || e.action_type)}</b><span>{e.message}</span><small>{e.affected_location || e.planet_name || 'Unknown'}{e.affected_good ? ` • ${e.affected_good}` : ''} • {new Date(e.created_at).toLocaleTimeString()}</small></div>)}</div>
+  </>;
+}
+
+
+function GameImage({ src, assetType = 'item', category = '', className = '', alt = '', hint = '' }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [src, assetType, category, hint]);
+  const mergedHint = `${category || ''} ${hint || ''}`.trim();
+  const fallback = imageFallbackFor(assetType, mergedHint, src);
+  const resolved = failed ? fallback : resolveAsset(assetType, src, category, hint);
+  return <img className={className} src={resolved || fallback} alt={alt || assetType} onError={() => setFailed(true)} />;
+}
+
+function assetTypeForItem(item) {
+  const category = String(item?.category || item?.inventory_category || '').toLowerCase();
+  const type = String(item?.item_type || item?.type || item?.slot_type || '').toLowerCase();
+  if (category.includes('weapon') || type.includes('weapon') || type.includes('laser') || type.includes('railgun') || type.includes('missile')) return 'weapon';
+  if (category.includes('armor') || type.includes('armor') || type.includes('shield')) return 'armor';
+  if (category.includes('module') || category.includes('ship_part') || type.includes('module') || type.includes('engine') || type.includes('scanner')) return 'module';
+  if (category.includes('material') || category.includes('salvage') || category.includes('ore')) return 'material';
+  if (type.includes('station')) return 'station';
+  if (type.includes('planet') || item?.galaxy_id) return 'planet';
+  return 'item';
+}
+
+function Progress({value, danger}) {
+  const pct = Math.max(0, Math.min(100, Number(value || 0)));
+  return <i className="progress"><b className={danger ? 'danger' : ''} style={{width:`${pct}%`}} /></i>;
+}
+
+
+function ItemVisual({item, size='md'}) {
+  const src = item?.image_url || item?.visual?.image_url;
+  const hint = [item?.item_code, item?.module_code, item?.ship_code, item?.code, item?.name, item?.item_name, item?.slot_type, item?.subcategory].filter(Boolean).join(' ');
+  return <div className={`itemVisual ${size}`}><GameImage src={src} assetType={assetTypeForItem(item)} category={item?.category || item?.inventory_category || item?.item_type || item?.type || item?.economy_type} hint={hint} alt={item?.name || item?.item_name || 'Item'} /></div>;
+}
+
+
+function AchievementBadge({badge, size='md', locked=false, onClick=null}) {
+  const code = typeof badge === 'string' ? badge : (badge?.url || badge?.code || badge?.badgeUrl || '');
+  const tier = typeof badge === 'object' ? (badge?.tier || '') : '';
+  const labelText = typeof badge === 'object' ? (badge?.name || badge?.code || 'Achievement') : 'Achievement';
+  const body = <span className={`achievementBadge ${size} ${locked ? 'locked' : ''}`} title={labelText}>
+    <GameImage src={code} assetType="item" category={`achievement ${code}`} hint={code} alt={labelText} />
+    {tier ? <em>T{tier}</em> : null}
+  </span>;
+  return onClick ? <button className="badgeButton" disabled={locked} onClick={onClick}>{body}</button> : body;
+}
+
+function ProfileAvatar({profile, src, alt='Pilot avatar', size='md', onClick=null}) {
+  const badge = profile?.selectedBadgeUrl || profile?.selectedBadgeCode;
+  const inner = <span className={`profileAvatarWithBadge ${size}`}>
+    <GameImage src={src || profile?.avatarUrl} assetType="avatar" alt={alt || profile?.displayName || 'Pilot'} />
+    {badge ? <AchievementBadge badge={badge} size="tiny" /> : null}
+  </span>;
+  return onClick ? <button className="profileAvatarButton" onClick={onClick}>{inner}</button> : inner;
+}
+
+function PublicProfileModal({profile, onClose}) {
+  if (!profile) return null;
+  const stats = profile.stats || {};
+  const top = profile.topAchievements || [];
+  return <div className="modalBackdrop profileModalBackdrop" onMouseDown={onClose}>
+    <div className="publicProfileModal" onMouseDown={e=>e.stopPropagation()}>
+      <button className="modalX" onClick={onClose}>×</button>
+      <div className="publicProfileHeader">
+        <ProfileAvatar profile={profile} size="lg" />
+        <div>
+          <h2>{profile.displayName || 'Pilot'}</h2>
+          <span>@{profile.username || 'unknown'} • Level {fmt(stats.level || 1)}</span>
+          <p>{profile.bio || 'No public status.'}</p>
+        </div>
+      </div>
+      <Stats pairs={{Galaxy:profile.homeGalaxy || '—', Location:profile.currentLocation || '—', Ship:profile.currentShip?.name || profile.currentShip?.template_name || '—', Travel:stats.travelEvents || 0, Combat:stats.combatEvents || 0, Mining:stats.miningEvents || 0, Salvage:stats.salvageEvents || 0, Exploration:stats.explorationEvents || 0}} />
+      <h3>Top Achievements</h3>
+      <div className="publicAchievementGrid">{top.map(a=><div key={a.loopKey} className="publicAchievementCard"><AchievementBadge badge={a.badgeUrl} size="sm"/><b>{a.name}</b><span>Tier {a.tierUnlocked || 0}</span><Progress value={a.percentToNext || 0}/></div>)}</div>
+      <small className="muted">Public profile hides wealth, cargo, exact ship strength, and private resource stats.</small>
+    </div>
+  </div>;
+}
+
+function findPublicProfile(profiles, thing) {
+  if (!thing) return null;
+  const userId = Number(thing.userId || thing.profileUserId || thing.user_id || 0);
+  const playerId = Number(thing.playerId || thing.player_id || 0);
+  return (profiles || []).find(p => (userId && Number(p.userId) === userId) || (playerId && Number(p.playerId) === playerId)) || null;
+}
+
+function TierBadge({item}) {
+  const tier = item?.current_tier ?? item?.tier ?? item?.ship_tier ?? item?.recipe_tier ?? item?.tier_display?.tier;
+  if (tier === undefined || tier === null) return null;
+  const style = item?.tier_display?.style || ['scrap','basic','improved','advanced','military','prototype','exotic','relic'][Number(tier)] || 'basic';
+  const name = item?.tier_display?.name || `Tier ${tier}`;
+  return <span className={`tierBadge tier-${style}`} title={name}>T{tier}</span>;
+}
+
+function OperationRow({item, actionLabel, onRun}) {
+  const creditsMin = item.preview_reward_min ?? item.reward_min ?? item.base;
+  const creditsMax = item.preview_reward_max ?? item.reward_max ?? item.base;
+  const energy = item.energy_cost ?? item.energy;
+  const fuel = item.fuel_cost ?? 0;
+  const xp = item.xp_reward ?? item.xp;
+  const success = item.success_odds !== undefined ? `${Math.round(item.success_odds * 100)}%` : '—';
+  const tier = item.operation_tier || item.kind || 'operation';
+  return <div className={`operationCard ${item.recommended ? 'recommendedOp' : ''} ${item.legal === 0 || item.op_type === 'smuggling' ? 'illegalOp' : ''}`}>
+    <div className="opIcon">{opIcon(item.op_type || item.job_code || item.kind)}</div>
+    <div className="operationMain">
+      <div className="operationTitle"><b>{item.name}</b><em>{label(tier)}</em><em>{item.risk_profile ? label(item.risk_profile) : 'Risk Rated'}</em></div>
+      <p>{item.description || item.desc}</p>
+      <span>Energy {fmt(energy)} • Fuel {fmt(fuel)} • XP {fmt(xp)} • Credits {fmt(creditsMin)}{creditsMax !== creditsMin ? `-${fmt(creditsMax)}` : ''} • Success {success}</span>
+      <div className="factorLine"><small>Job {factorPct(item.job_bonus)} </small><small>Ship {factorPct(item.ship_bonus)} </small><small>Skill {factorPct(item.skill_bonus)} </small><small>Planet {factorPct(item.planet_bonus)} </small></div>
+      <small>{item.recommendation_reason || 'Success chance is calculated from real ship, job, skill, and location state.'}</small>
+    </div>
+    <button onClick={onRun}>{actionLabel}</button>
+  </div>
+}
+
+function Panel({title, help, children}) { return <section className="panel"><h2>{title}{help && <span className="help"><Info size={14}/><em>{help}</em></span>}</h2>{children}</section> }
+function Page({title,sub,children}) { return <><div className="pageHead"><h1>{title}</h1>{sub && <p>{sub}</p>}</div>{children}</> }
+function Grid({children}) { return <div className="dashboardGrid">{children}</div> }
+function Bar({label,value,max,danger}) { const pct = Math.max(0,Math.min(100,(value/(max||1))*100)); return <div className="bar"><span>{label}</span><i><b style={{width:`${pct}%`}} className={danger?'danger':''}/></i><small>{fmt(value)} / {fmt(max)}</small></div> }
+function Stats({pairs}) { return <div className="stats">{Object.entries(pairs).map(([k,v])=><div key={k}><span>{label(k)}</span><b>{fmt(v)}</b></div>)}</div> }
+function ShipCard({ship}) { if(!ship) return null; return <div className="shipCard"><div className="shipArt"><GameImage src={ship.image_url} assetType="ship" category={ship.role || ship.class_name} alt={ship.name || 'Ship'} /></div><div><h3>{ship.name}</h3><p>{ship.class_name || ship.template_name}</p><Stats pairs={{Tier:`T${ship.current_tier ?? ship.ship_tier ?? 1}/${ship.max_tier ?? '—'}`, Hull:`${fmt(ship.hull)}/${fmt(ship.max_hull)}`, Shield:`${fmt(ship.shield)}/${fmt(ship.max_shield)}`, Armor:ship.armor, Cargo:ship.cargo_capacity, Drive:ship.drive_speed}}/></div></div> }
+function TwoCols({leftTitle,rightTitle,left,right}) { return <div className="twoCols"><div><h3>{leftTitle}</h3>{left.map(x=><div className="miniItem" key={x.code}><ItemVisual item={x} size="xs"/><span>{x.name}</span><b>{fmt(x.sell_price)}</b></div>)}</div><div><h3>{rightTitle}</h3>{right.map(x=><div className="miniItem" key={x.code}><ItemVisual item={x} size="xs"/><span>{x.name}</span><b>{fmt(x.sell_price)}</b></div>)}</div></div> }
+function ActionLog({log}) { return <div className="actionLog">{log.map((l,i)=><div key={i}>{l}</div>)}</div> }
+function fmt(n) { if (n===null || n===undefined) return '—'; if (typeof n === 'string') return n; return Number(n).toLocaleString(); }
+function label(s) { return String(s).replaceAll('_',' ').replace(/\b\w/g, m=>m.toUpperCase()); }
+function groupBy(arr,k) { return arr.reduce((a,x)=>((a[x[k]] ||= []).push(x),a),{}); }
+function jsonSafe(v, fallback) { try { return typeof v === 'string' ? JSON.parse(v) : (v || fallback); } catch { return fallback; } }
+function signed(n) { const x = Number(n || 0); return `${x >= 0 ? '+' : ''}${fmt(x)}`; }
+function timeLeft(date) { const ms = new Date(date)-new Date(); if (ms<=0) return 'Ready'; const m=Math.ceil(ms/60000); return `${Math.floor(m/60)}h ${m%60}m`; }
+
+function travelProgress(t, clock=Date.now()) { if (!t?.active || !t.started_at || !t.arrival_at) return t?.active ? Number(t.progress || 0) : 1; const start=new Date(t.started_at).getTime(); const end=new Date(t.arrival_at).getTime(); if (!end || end<=start) return 1; return Math.max(0, Math.min(1, (clock-start)/(end-start))); }
+function clockTimeLeft(date) { if (!date) return '—'; const ms = new Date(date).getTime() - Date.now(); if (ms<=0) return 'Arriving'; const s=Math.ceil(ms/1000), m=Math.floor(s/60), sec=s%60, h=Math.floor(m/60); return h>0 ? `${h}h ${m%60}m` : `${m}m ${sec}s`; }
+function lerpPoint(a,b,t) { return {x:(a.x_pct || 0)+((b.x_pct || 0)-(a.x_pct || 0))*t, y:(a.y_pct || 0)+((b.y_pct || 0)-(a.y_pct || 0))*t}; }
+function trendIcon(t) { return t === 'up' ? '▲' : t === 'down' ? '▼' : '▬'; }
+function opIcon(type) { const k=String(type||'').toLowerCase(); if(k.includes('mine')) return '⛏'; if(k.includes('haul')||k.includes('trade')||k.includes('cargo')) return '⇄'; if(k.includes('combat')||k.includes('bounty')||k.includes('security')||k.includes('merc')) return '✦'; if(k.includes('salv')) return '⚙'; if(k.includes('smug')) return '☣'; if(k.includes('explor')||k.includes('scan')) return '◎'; if(k.includes('engineer')||k.includes('craft')) return '⚒'; return '◈'; }
+function factorPct(v) { if (v===undefined || v===null) return '—'; const n = Number(v); if (!Number.isFinite(n)) return '—'; return `${Math.round(n*100)}%`; }
+
+createRoot(document.getElementById('root')).render(<App/>);

@@ -1,0 +1,20 @@
+# Map Living World Rework V4 - /api/state Crash Fix
+
+## Root cause
+`build_persistent_npc_traffic` reloaded an NPC route row after `apply_npc_map_action`.
+When NPC combat caused the acting NPC to lose, `respawn_npc_agent` deleted that NPC's `npc_map_state` row.
+The code then ran `dict(row(...))` against a missing row, causing `/api/state` to return 500.
+
+## Files changed
+- `backend/app/main.py`
+
+## Backend changes
+- Added a defensive guard after first NPC map-state insert/reload.
+- Replaced unsafe `dict(row(...))` after NPC action resolution with a checked `refreshed_state`.
+- If an NPC's map-state row was removed by death/respawn, the stale state is skipped for that tick.
+- The respawned NPC will receive a clean route on the next map tick instead of crashing `/api/state`.
+
+## Validation
+- `ast.parse` syntax validation passed for `backend/app/main.py`.
+- `python -m py_compile backend/app/main.py` could not complete in this container; it timed out again, same as prior attempts on this large file/environment.
+- Frontend build was not rerun because this patch only changes backend crash handling.

@@ -1,0 +1,43 @@
+# CHANGELOG — Authoritative DB Map / NPC FK / Smart Server Position Fix
+
+Root error fixed:
+- Existing SQLite databases may already contain npc_map_state with a bad foreign key referencing a non-existent `npcs` table.
+- CREATE TABLE IF NOT EXISTS does not alter existing foreign keys, so simply correcting the schema text was not enough.
+- Migration now detects bad npc_map_state foreign keys and rebuilds the table to reference npc_agents(id).
+
+DB-smart authoritative map fixes:
+- Added route_derived_position().
+- NPC live positions are now derived server-side from persisted route state:
+  - origin_x_pct / origin_y_pct
+  - destination_x_pct / destination_y_pct
+  - started_at
+  - arrival_at
+  - action_state
+- Removed per-state UPDATE of npc_map_state.x_pct/y_pct while NPCs are merely moving.
+- DB writes now happen on state transitions only:
+  - create NPC state
+  - arrive at objective
+  - finish objective work
+  - choose next objective
+- Existing map object scopes no longer run a cleanup UPDATE on every /api/state poll.
+- map_objects remains durable truth for ore/exploration object identity, position, quantity, state, and depletion.
+- player/NPC locations are server-authoritative; client remains renderer-only.
+
+Lock/error hardening retained:
+- SQLite WAL mode.
+- busy_timeout 30000ms.
+- regenerate_energy() lock tolerance.
+
+Changed files:
+- backend/app/main.py
+- ASSET_MANIFEST.json
+- CHANGELOG_AUTHORITATIVE_DB_MAP_FIX.txt
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- npc_map_state foreign keys verified: npc_agents, galaxies, planets.
+- Existing bad FK table migration repair tested.
+- build_state after bad-FK repair passed.
+- Repeated /api/state-style build_state call produced 0 moving-position UPDATEs for npc_map_state/map_objects.

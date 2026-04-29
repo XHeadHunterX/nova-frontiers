@@ -1,0 +1,16 @@
+CHANGELOG_BATTLE_LAYOUT_FLOW_V13
+
+Files changed:
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Frontend changes:
+- Active battles no longer render the large bottom-left combat stream.
+- Active battle action stream now renders in the center Live Battle panel under the battle lane.
+- Completed battles hide the top battle header, attack-energy bars, escape button, action result banner, player action buttons, and enemy AI panel.
+- Completed battles now match the cleaner final-state layout: ship/lane result row at top, combat log below left, battle results below right.
+- Battle log rendering was extracted into a reusable BattleEventLog component so active and completed layouts use the same stable markup.
+
+Validation:
+- Zip integrity should be checked after packaging.
+- Frontend build was not run here because frontend dependencies/vite are not installed in this container.

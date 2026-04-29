@@ -1,0 +1,21 @@
+# Force Generated Assets Fix
+
+Problem:
+- The backend already sends non-empty placeholder image paths/SVGs.
+- The frontend treated any non-empty `image_url` as valid.
+- Result: placeholder initials/cards stayed visible and the generated asset catalog was never used.
+
+Fix:
+- Updated `frontend/src/assets/gameAssets.js`.
+- Added `isPlaceholderAsset()` and `shouldUseProvidedAsset()`.
+- Placeholder/default/local SVG image paths are now treated as missing.
+- Real external/uploaded image URLs may still render.
+- Ship render points now force local generated ship art by category/name.
+- Map traffic ships, selected ship panels, hangar cards, fight targets, and ship details now use bundled generated assets.
+- CSS adjusted so generated ships render as contained artwork instead of cropped placeholder-style cards.
+
+Run:
+- Stop Vite.
+- Restart `npm run dev`.
+- Hard refresh browser.
+- If needed, clear Vite cache: delete `frontend/node_modules/.vite`.

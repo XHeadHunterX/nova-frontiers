@@ -1,0 +1,28 @@
+Nova Frontiers - Map/Battle Stability Final Pass
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- start-nova-frontiers.bat
+
+Backend fixes:
+- Combat defeats now always create a salvage_sites row for the losing ship.
+- Victory salvage and player-defeat salvage both use stored map coordinates so wrecks appear on the map instead of silently disappearing.
+- Cargo salvage recovery now rolls 15%-50%.
+- Ship build-material recovery now rolls 25%-40%.
+- The old salvage-site RNG gate was removed from wreck creation; RNG remains only for how much cargo/material is recovered.
+- Battle IDs are backfilled onto generated salvage rows.
+
+Frontend fixes:
+- Active battles reopen automatically outside the Fight page so combat cannot silently stall behind a closed/missing modal.
+- Battle advancement now follows server nextActionAt with a guarded timeout loop instead of a brittle setInterval.
+- Fight-page combat avoids duplicate global/local modals.
+- Map first render centers on the player's ship/current location.
+- Reset now recenters on the player instead of jumping back to the top-left default.
+- Battle visuals use fixed geometry so ships do not jump when attacks fire.
+- Wreck markers and the map shell received a clearer visual polish pass.
+
+Validation done in this environment:
+- backend/app/main.py tokenized successfully after patching.
+- Full Python compile/backend run and Vite build were blocked by the uploaded package's removed/incomplete dependency folders in this Linux container; the returned package includes source plus a start script that restores dependencies on Windows.

@@ -1,0 +1,71 @@
+# CHANGELOG — DB-Backed Map Objects, Persistent Open Space, NPC Work States
+
+Backend:
+- Added DB-backed map object tables:
+  - map_objects
+  - player_map_operations
+  - npc_map_state
+- Ore and ancient/exploration map objects are now inserted/read/updated from the database.
+- Ore deposits now persist quantity/state in DB instead of being regenerated only from client/session map calculations.
+- Exploration sites now persist signal state, quality, reward tier, quantity/state, and position in DB.
+- Mining updates the map object quantity and marks depleted nodes.
+- Scanning updates the exploration object metadata/state.
+- Investigating depletes the exploration object.
+- Added player active map-operation state.
+- Mining/salvage/scanning/investigation now create an active map operation visible to the UI.
+- Added server-side tool capability checks:
+  - no equipped weapon = cannot attack
+  - no mining laser/drill = cannot mine
+  - no salvage module = cannot salvage
+  - no scanner/probe/relic/radar module = cannot scan/investigate
+- Added tool capability payload to state and map objects.
+- Added persistent NPC map state:
+  - NPC position is stored in npc_map_state
+  - NPC destination is stored in npc_map_state
+  - NPC action state is stored in npc_map_state
+  - NPCs move to an objective, work there, update the DB object if applicable, then choose a new objective
+- NPCs no longer snap back to their origin using modulo animation loops.
+- NPCs can now work at objectives such as mining/exploring instead of only moving visually.
+- Fixed open-space waypoint travel:
+  - active waypoint movement uses stored origin_x_pct/origin_y_pct
+  - logging out and back in keeps the same DB-backed origin/progress/destination
+  - after waypoint completion, open-space position persists in app_state
+  - next Go Here starts from actual open-space position, not last docked planet
+
+Frontend:
+- Map ship marker now uses active waypoint origin coordinates instead of last planet.
+- Added active map operation banner.
+- Mining/salvage/scanning/investigation status is visible while the operation is active.
+- Hidden unavailable action buttons:
+  - attack button hidden without weapon
+  - mine button hidden without mining tool
+  - salvage button hidden without salvage tool
+  - scan/investigate hidden without scanner tool
+- Shows missing-tool reason on inspect popup.
+- Reworked inspect details into a fixed modal overlay above the map.
+- Inspect modal can be closed with X, Close, or clicking outside.
+- Modal is positioned near the cursor instead of rendering below the map.
+
+Assets:
+- Folded in latest v2 standalone achievement badge patch so this full project includes the corrected individual badge files.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- frontend/src/assets/generated/achievements/*
+- frontend/src/assets/generated/asset_manifest.json
+- ASSET_MANIFEST.json
+- CHANGELOG_DB_MAP_OPERATIONS.txt
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Backend import passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- Verified map_objects table.
+- Verified player_map_operations table.
+- Verified npc_map_state table.
+- Verified DB map object generation.
+- Verified NPC state generation.
+- Verified open-space Go Here now starts from persisted open-space position.

@@ -1,0 +1,36 @@
+Nova Frontiers - Intercept/Battle/NPC Death Fix V7
+
+Files changed:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Backend changes:
+- Added moving-target intercept prediction for player attacks against traveling NPCs.
+- Intercept routes now aim at a predicted intersection point using target velocity, target route destination, player map speed, and current player position.
+- Intercept metadata now stores predicted contact point, target starting point, target destination point, and target velocity.
+- resolve_intercept_now now returns the battle payload so the frontend can open the battle replay modal.
+- Intercept completion now leaves the player in open space at the battle/intercept coordinate instead of snapping back to the planet anchor.
+- Defeated NPCs are now retired with alive=0 instead of continuing as the same active NPC.
+- A replacement NPC is inserted as a new row with 10-20% weaker XP/power/skills and respawned_from_id pointing at the defeated NPC.
+- NPC listing, combat targets, summaries, and population replenishment now ignore dead NPC rows.
+- Player victory against an NPC now calls the NPC replacement flow and reports the replacement in battle rewards.
+
+Frontend changes:
+- Added a global locked battle replay modal for battles returned from map/intercept actions, not just the Fight page.
+- Auto-resolved intercept battles now open in the center-screen battle modal.
+- The global modal replays one action every 3 seconds and keeps ATTEMPT ESCAPE available until battle completion.
+- Added display for NPC replacement after a defeated NPC is removed.
+- Added global battle overlay styling.
+
+Validation:
+- Zip integrity checked for changed-files and full-project outputs.
+- Python py_compile/compile could not complete in this container; the unmodified V6 backend file also timed out during compile, so this is an environment/file-size validation limitation rather than a new V7-specific failure.
+- Frontend build was not run because this container still lacks installed frontend dependencies/vite.
+
+Manual checks to run locally:
+- Start intercept against a moving NPC: route should aim ahead toward predicted intersection, not current target point.
+- Battle should open in a modal when intercept resolves.
+- Battle replay should not complete visually instantly; actions should advance every 3 seconds.
+- After battle, player ship should remain at battle/open-space position.
+- On NPC defeat, old NPC should disappear and replacement NPC should exist with respawned_from_id set and 10-20% lower XP/power/skills.

@@ -1,0 +1,16 @@
+Achievement icon replacement pass v2
+
+What changed:
+- Replaced all 144 achievement badge images as standalone PNG files.
+- Removed reliance on image sheets.
+- Filenames are preserved, so existing game code uses these icons automatically.
+- Higher tiers now use stronger frame, glow, ornament, and legendary treatment.
+- Each game loop keeps a consistent visual identity across tiers.
+
+Changed files:
+- frontend/src/assets/generated/achievements/*.png
+- frontend/src/assets/generated/asset_manifest.json
+- ASSET_MANIFEST.json
+- CHANGELOG_ACHIEVEMENT_ICON_REPLACEMENT_V2.txt
+
+Badge files replaced: 144

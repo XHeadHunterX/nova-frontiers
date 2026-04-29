@@ -1,0 +1,28 @@
+# CHANGELOG — Intercept / Waypoint / Wheel / Dock Wording Fix
+
+Backend:
+- Added true open-space waypoint travel. Clicking blank space + Go Here no longer routes to the nearest planet.
+- Waypoint travel stores target x/y percent and renders the ship toward that exact point.
+- When waypoint travel completes, the player remains in open space at that coordinate.
+- Docked services now also block while holding open-space position, not only while actively traveling.
+- Normal planet/galaxy travel clears open-space state when completed/docked.
+- Intercept now resolves when the player gets close enough to the target, not only when the full timer ends.
+- Added `resolve_intercept_now` action for frontend proximity-triggered intercept resolution.
+- Intercept combat bypasses the temporary travel block safely by clearing transient travel fields at engagement time.
+- Open-space intercept salvage still gets map coordinates and 24-hour decay.
+
+Frontend:
+- Auto-resolves intercept when the player ship circle intersects / gets close to the target circle.
+- Scroll wheel over the map no longer scrolls the page.
+- Clicking blank space + Go Here plots an exact waypoint to that x/y.
+- Your ship remains visible if holding open-space position.
+- Your ship marker now uses generated ship art instead of a triangle.
+- Your ship marker is larger and more visually distinct.
+- Added better self-ship visual state for intercepting and open-space holding.
+- Planet/system node action wording changed from Travel Here to Dock Here.
+- Resource/site travel wording changed to Plot Course.
+
+CSS:
+- Added overscroll containment for map viewport.
+- Increased self-ship marker size and glow.
+- Increased traffic/resource minimum icon sizes again.

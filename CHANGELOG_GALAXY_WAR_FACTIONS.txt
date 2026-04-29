@@ -1,0 +1,100 @@
+# CHANGELOG — Galaxy-Scale Faction War / Gates / Star Map
+
+Backend:
+- Expanded the universe to 12 galaxies and 54 planets/stations/gates.
+- Added 3 galaxy-control factions:
+  - Solar Accord
+  - Iron Meridian
+  - Umbral Veil
+- Added faction tables and player faction assignment.
+- Added galaxy metadata:
+  - map coordinates
+  - controlling faction
+  - home/safe depth
+  - capturable flag
+  - center value
+  - control bonus percent
+  - war cooldown
+- Home galaxies and one-hop shield galaxies are not capturable.
+- Added galaxy gates and adjacency routes.
+- Galaxy travel now requires being docked at a Jump Gate and can only move one adjacent galaxy at a time.
+- System/planet view now includes gate nodes that jump to adjacent galaxies.
+- Added galaxy war tables:
+  - galaxy_wars
+  - galaxy_war_presence
+- Added galaxy war declaration:
+  - must be adjacent to owned faction territory
+  - opens after 24 hours
+  - capture station is at galaxy center
+  - active wars show a red king-of-the-hill capture ring
+  - one faction alone in the ring starts a 5-minute countdown
+  - capture resets if contested or empty
+  - winner captures the galaxy and applies a 1-day cooldown
+- Added weak-faction capture assistance:
+  - faction behind by 1+ galaxy gets a small capture bonus
+  - faction behind by 3+ galaxies gets a larger capture bonus
+  - bonus is capture-only, not general economy/stat power
+- Added center galaxy control bonuses:
+  - strongest in the center
+  - weaker toward faction home galaxies
+- Added center-gradient content:
+  - higher-tier ore is more likely near center galaxies
+  - higher-tier ancient scan sites are more likely near center galaxies
+  - higher-tier pirate bases are more likely near center galaxies
+- Increased map activity/object density:
+  - galaxy NPC traffic: 36
+  - system NPC traffic: 42
+  - galaxy ore sites: 18
+  - system ore sites: 16
+  - galaxy exploration sites: 16
+  - system exploration sites: 14
+  - pirate station global soft cap: 24
+- NPCs are more aggressive in galaxies not owned by the player faction.
+- Pirates/raiders/outlaws are even more aggressive in unowned galaxies.
+
+Frontend:
+- Added unified Star Map page with:
+  - Galaxy View
+  - Planet View
+- Removed separate visible nav entries for Galaxies/System Map while keeping old routes for compatibility.
+- Galaxy View shows faction control, capturable/home-safe status, center value, and control bonus.
+- Planet View shows gate nodes to adjacent galaxies.
+- Added Galaxy War page:
+  - current faction summary
+  - faction balance
+  - ongoing/upcoming wars
+  - war timers
+  - capture hold timer
+  - navigate-to button
+  - capturable galaxy list
+  - resolved war history
+- Galaxy map renders red capture rings and capture station markers for active wars.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- CHANGELOG_GALAXY_WAR_FACTIONS.txt
+- ASSET_MANIFEST.json
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Backend module import passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- Verified 3 factions.
+- Verified 12 galaxies.
+- Verified 54 planets/stations/gates.
+- Verified 46 directional gate links.
+- Verified 6 capturable galaxies and 6 home-safe galaxies.
+
+Image pass:
+- Added generated item art for 90 item/material/commodity codes.
+- Added generated module/weapon art for 198 module template codes.
+- Added exact image resolution by item code / module code / recipe output code.
+- Recipe outputs now resolve to unique art instead of repeating generic placeholders.
+- Materials, refined mats, commodities, consumables, and weapons now use distinct assets.
+- Fixed duplicate image reuse by routing through exact code-based generated art before generic fallbacks.
+- Added frontend asset manifest under frontend/src/assets/generated/asset_manifest.json.
+- Updated frontend/src/assets/gameAssets.js to auto-load generated art with import.meta.glob.
+- Updated frontend/src/main.jsx so ItemVisual passes item/module/recipe hints into image resolution.

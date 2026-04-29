@@ -1,0 +1,42 @@
+# CHANGELOG — Destroyed Ship Salvage Material / Cargo Drops
+
+Backend:
+- Destroyed NPC/player ships now add better contents to their salvage point.
+- Salvage sites now include:
+  - normal scrap/circuit salvage
+  - role-based parts like weapon parts, alloy fragments, sensor shards
+  - approximately 10% of an estimated ship-build material bill
+  - 5%-50% of recoverable cargo
+- Added COMBAT_BALANCE tuning:
+  - ship_material_recovery_pct
+  - cargo_drop_min_pct
+  - cargo_drop_max_pct
+  - npc_cargo_drop_base_units
+  - npc_cargo_drop_units_per_tier
+  - npc_cargo_drop_units_per_level
+- Player cargo drops pull from:
+  - cargo_hold commodities
+  - carried inventory categories that are cargo-like/material-like
+- NPC cargo drops are role-aware:
+  - traders/haulers drop trade cargo
+  - miners drop raw ore
+  - salvagers drop salvage parts
+  - explorers drop scan/rare materials
+  - smugglers/pirates drop illicit/weapon cargo
+  - security/mercenary roles drop ammo/parts/medical cargo
+- Player combat defeat that destroys the player ship now leaves a salvage point.
+- Pirate station defenders now leave salvage points instead of directly dropping instant salvage inventory.
+- Salvage collection now uses item profiles so recovered cargo/materials keep sensible:
+  - item names
+  - categories
+  - base values
+  - mass
+  - rarity
+  - legality
+
+Changed files:
+- backend/app/main.py
+- CHANGELOG_SALVAGE_DROPS.txt
+
+Validation:
+- backend/app/main.py Python compile passed.

@@ -1,0 +1,24 @@
+Phase 31 - Pirate Space Stations
+
+Backend
+- Added scarce pirate station map objectives with per-galaxy limits and a global soft cap.
+- Added respawn handling for depleted pirate stations.
+- Added station occupancy locking so only one player can be inside a station at a time.
+- Added persistent pirate station assault runs with interior player position, defender state, battle state, and battle reports.
+- Added pirate station enemies that spawn spaced out and converge toward the player on server ticks.
+- Added station resource percentage from defender count: 100% down to 0%.
+- Added battle actions where movement stops while the battle screen is open.
+- Added retreat-through-edge behavior. Defeated/damaged defenders persist on the assault record.
+- Added admin tuning group PIRATE_STATION_BALANCE.
+
+Frontend
+- Added Pirate Station nav/page.
+- Added pirate station icons to the System Map.
+- Added Enter Station actions from map context and selected object panel.
+- Added interior pirate station map with player marker, escape edge, defender icons, movement controls, defender list, and battle overlay.
+- Added CSS for pirate stations, interior station arena, enemy cards, and battle modal.
+
+Files changed
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css

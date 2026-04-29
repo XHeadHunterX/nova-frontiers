@@ -1,0 +1,25 @@
+Nova Frontiers Launcher Fix V10
+
+Files changed:
+- start-nova-frontiers.bat
+- run-dev.bat
+- run-nova-frontiers-phase22.bat
+- run-dev.sh
+
+Fixes:
+- Restored the missing Windows launcher files into the full project zip.
+- Replaced fragile nested START/cd quoting that could open backend/frontend folders instead of starting servers.
+- Uses START /D working directories for backend and frontend windows.
+- Verifies backend and frontend folders exist before launching.
+- Creates backend/.venv when missing.
+- Installs backend requirements.
+- Detects incomplete frontend installs by checking frontend/node_modules/.bin/vite.cmd, not just node_modules.
+- Runs npm install if Vite is missing.
+- Starts backend on http://127.0.0.1:8000.
+- Starts frontend on http://127.0.0.1:5173.
+- Opens the browser to http://127.0.0.1:5173.
+
+Validation:
+- Batch files were syntax-inspected for quote balance and launcher structure.
+- Full zip and changed-files zip integrity checks passed.
+- Windows execution could not be run inside this Linux container.

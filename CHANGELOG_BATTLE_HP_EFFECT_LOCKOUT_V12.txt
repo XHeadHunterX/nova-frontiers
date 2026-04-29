@@ -1,0 +1,33 @@
+Nova Frontiers - Battle HP / Effects / Utility Lockout V12
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- CHANGELOG_BATTLE_HP_EFFECT_LOCKOUT_V12.txt
+
+Backend:
+- Added reusable combat utility target-side helper.
+- Added active combat effect remaining-time helper.
+- Player utility actions now check active effect category before spending attack energy.
+- If the same non-stacking utility category is already active, the backend returns the current battle payload and remaining active seconds instead of consuming energy.
+
+Frontend:
+- Battle ship cards now show Shield and Hull HP for both ships.
+- Added active effect racks directly under each ship's Shield/Hull HP meters.
+- Buffs/repairs/debuffs are visually separated:
+  - green for normal buffs
+  - cyan/blue for shield/repair effects
+  - red for debuffs
+- Effect badges include compact icons and remaining seconds.
+- Utility buttons are disabled while their effect category is already active.
+- Utility buttons remain disabled until both conditions are true:
+  - active effect has expired
+  - enough attack energy is available
+- Defend is also disabled while its defensive posture category is active.
+- Increased fixed battle-card/stage height so HP and effect racks do not clip under the ship image.
+
+Validation:
+- backend/app/main.py ast.parse passed.
+- Zip integrity checks passed for both output files.
+- npm run build was not validated here because frontend/node_modules still does not contain vite in this container.

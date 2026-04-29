@@ -1,0 +1,32 @@
+# Download Retry Build
+
+This is the fixed Nova Frontiers project source package.
+
+Why this one is smaller:
+- Removed frontend/node_modules.
+- Removed backend/.venv.
+- Removed frontend/dist.
+- Removed generated sheet source images after cropping individual usable assets.
+
+Why:
+The previous full dependency-included zip was too large and failed upload status in ChatGPT.
+This package keeps the real project source, frontend/backend code, and all UI-wired image assets.
+
+White screen fix:
+- frontend/index.html now mounts React through /src/main.jsx.
+- The stale /app.js entry is no longer used by Vite.
+
+Run after extracting:
+1. Backend:
+   cd backend
+   py -3.12 -m venv .venv
+   .venv\Scripts\python.exe -m pip install -r requirements.txt
+   .venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+
+2. Frontend:
+   cd frontend
+   npm install
+   npm run dev
+
+Open:
+http://127.0.0.1:5173

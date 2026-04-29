@@ -1,0 +1,31 @@
+# Map Radar, Godmode, Docking, Ship Slots, and Battle Rework V6
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Backend changes:
+- Godmode no longer makes travel or docking instant. It removes resource costs and keeps energy effectively unlimited.
+- Local/galaxy travel and docking now use ship-derived travel speed instead of godmode teleport behavior.
+- Added ship weapon slot normalization: every ship gets at least one weapon slot; non-attack ships are capped at one; attack/combat ships are capped between 2 and 6 depending role/size/tier.
+- Existing ship_templates are normalized during startup migration/content checks.
+- Combat replay timing set to 3 seconds per action.
+- Added 5-second post-battle immunity keys for both combat actors.
+- Combat target lists and target lookup skip/reject ships under post-battle immunity.
+- Added attempt_combat_escape action with 20%-80% bounded escape chance based on ship speed, mass, role, piloting, stealth, and exploration skills.
+
+Frontend changes:
+- Radar ring now renders with equal pixel width/height so it is a true 360-degree circle instead of an ellipse caused by percentage width/height on a rectangular map.
+- Removed map auto-centering effect. The map no longer snaps back to the ship after travel/click actions. Only Find My Ship or Reset changes viewport intentionally.
+- Godmode no longer blocks combat actions due to energy checks.
+- Battle modal cannot be closed by backdrop or close button until replay concludes.
+- Removed slow/normal/fast/skip battle controls. Replay advances at one fixed 3-second action cadence.
+- Added highly visible ATTEMPT ESCAPE button during unresolved battle replay. Successful escape closes the modal and grants post-battle immunity.
+
+Validation commands attempted:
+- /usr/bin/python3 -m py_compile backend/app/main.py
+- npm run build, if frontend dependencies are available
+
+Post-validation adjustment:
+- Escape failure no longer grants post-battle immunity; immunity is granted only when escape succeeds or when battle resolves normally.

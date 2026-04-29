@@ -1,0 +1,21 @@
+Primary runtime asset folders:
+- frontend/src/assets/avatars (8 files)
+- frontend/src/assets/icons (16 files)
+- frontend/src/assets/materials (12 files)
+- frontend/src/assets/modules (16 files)
+- frontend/src/assets/planets (10 files)
+- frontend/src/assets/ships (10 files)
+- frontend/src/assets/stations (8 files)
+- frontend/src/assets/generated/items (90 files)
+- frontend/src/assets/generated/modules (198 files)
+- frontend/src/assets/generated/ships (10 files)
+- frontend/src/assets/generated/factions (3 files)
+
+Legacy/generated reference packs included:
+- bonus-assets/legacy-generated/futuristic_sci_fi_icon_set.png
+- bonus-assets/legacy-generated/futuristic_soldier_and_mercenary_avatars.png
+- bonus-assets/legacy-generated/futuristic_space_station_designs_collection.png
+- bonus-assets/legacy-generated/futuristic_spacecraft_collection_in_concept_art.png
+- bonus-assets/legacy-generated/sci_fi_asset_concept_sheet_grid.png
+- bonus-assets/legacy-generated/sci_fi_mechanical_module_concept_assets.png
+- bonus-assets/legacy-generated/stylized_celestial_objects_in_clean_grid.png

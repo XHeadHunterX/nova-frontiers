@@ -1,0 +1,51 @@
+# CHANGELOG — NPC Objective System Pass
+
+Backend:
+- Replaced aimless NPC route selection with weighted objective selection.
+- Added `NPC_OBJECTIVE_BALANCE` config in `backend/app/main.py`.
+- Every NPC can choose every objective:
+  - trade haul
+  - mine
+  - salvage
+  - explore / scan ancient sites
+  - pirate intercept
+  - bounty hunt
+  - patrol / scan
+  - smuggle
+  - escort
+  - dock / refuel
+  - search / sweep
+- Objective weights are adjusted by:
+  - career_code
+  - role
+  - aggression
+  - friendliness
+  - disposition
+  - good-guy / bad-guy alignment
+  - explorer / pirate / miner / salvager / trader / security tags
+  - radar-visible contacts
+  - map type
+- NPCs remain radar-limited:
+  - miners only prefer mining when ore is inside their radar
+  - salvagers only prefer salvage when wrecks are inside radar
+  - explorers only prefer ancient sites when signals are inside radar
+  - pirates/hostiles only prefer intercept when ships are inside radar
+  - otherwise they choose search/sweep routes toward likely regions
+- NPC routes now include objective data:
+  - npcObjective
+  - npcObjectiveLabel
+  - npcObjectiveState
+  - npcObjectiveTargetKind
+  - npcObjectiveTargetName
+  - npcVisibleCounts
+  - npcObjectiveWeights
+
+Frontend:
+- Selected NPC panels now show explicit objective info.
+- Selected NPC panels now show radar-visible contact counts.
+- NPC map badges show objective shorthand instead of only route percentage.
+- Toolbar notes that NPCs use weighted objectives and radar-limited awareness.
+
+Result:
+- NPC movement should now look intentional instead of random.
+- NPCs still vary due to RNG, but weighted by profession/alignment and what their radar can actually see.

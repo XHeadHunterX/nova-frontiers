@@ -1,0 +1,11 @@
+Nova Frontiers Phase 23B full project asset integration
+
+This zip is based on the uploaded Phase 21 full project zip, then updated with Phase 23B code and bundled generated assets.
+
+Important files:
+- frontend/src/assets/gameAssets.js: local asset resolver and fallback catalog.
+- frontend/src/main.jsx: updated GameImage, ItemVisual, map markers, and selected-object panel rendering.
+- frontend/src/styles.css: image styling for map markers and selected-object previews.
+- frontend/src/assets/**: generated in-game art assets.
+
+Backend image_url fields do not need to be populated for the UI to show art. Empty/broken paths are resolved in the frontend.

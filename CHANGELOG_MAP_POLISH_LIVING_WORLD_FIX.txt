@@ -1,0 +1,34 @@
+# CHANGELOG — Map polish / living-world fix
+
+Fixed:
+- Clicking a map object now opens only the compact action/context menu.
+- Inspect modal only opens after pressing Inspect/Inspect Ship/Inspect Ore/etc.
+- Removed the secondary player-following ping circle.
+- Kept the radar range ring, but removed the extra bright dot/circle that visually trailed the ship.
+- Reduced auto-centering jitter by only auto-centering on meaningful map context changes.
+- Find My Ship still centers and selects the ship manually.
+- Live ship/NPC markers now transition smoothly between server updates.
+- Intercept auto-resolution now uses contact range, not radar range and not travel progress.
+- Frontend intercept trigger is now ship-circle contact range only.
+- Backend intercept resolution is now strict contact range only.
+- Intercept routes started from open space now preserve origin_x_pct/origin_y_pct.
+- Intercept travel time now uses distance from actual current position to target position.
+- Context menu action buttons are hidden when the ship lacks the required tool.
+
+DB/server-authoritative behavior kept:
+- Server remains source of truth for travel origin/destination/timestamps.
+- Client only renders the computed state.
+- No client-owned position state was introduced.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- CHANGELOG_MAP_POLISH_LIVING_WORLD_FIX.txt
+
+Validation:
+- backend/app/main.py compile passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- System traffic generated successfully.
+- Intercept contact range constant verified.

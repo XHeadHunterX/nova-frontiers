@@ -1,0 +1,97 @@
+# CHANGELOG — Achievements, Badges, and Public Profiles
+
+Backend:
+- Added achievement loop definitions for 18 game loops:
+  - mining
+  - salvage
+  - trading
+  - smuggling
+  - exploration
+  - combat
+  - bounty
+  - crafting
+  - hauling
+  - repair
+  - security
+  - travel
+  - pirate_station
+  - faction_war
+  - property
+  - social
+  - medical
+  - wealth
+- Added 8 achievement tiers per loop.
+- Tier thresholds:
+  - T1: 10
+  - T2: 50
+  - T3: 200
+  - T4: 750
+  - T5: 2,000
+  - T6: 6,000
+  - T7: 15,000
+  - T8: 24,000
+- T7/T8 are intentionally long-term active-play goals.
+- Added small tier-8 passive buffs per loop.
+- Tier-8 ship-relevant passives are applied to ship derived stats:
+  - mining efficiency
+  - salvage
+  - scan strength
+  - combat rating
+  - cargo capacity
+  - drive speed
+- Added achievement progress table:
+  - player_achievement_progress
+- Added profile-view audit table:
+  - player_profile_views
+- Added selected profile achievement badge:
+  - user_profiles.selected_badge_code
+- Action progression now also grants achievement progress.
+- Chat/profile actions grant social achievement progress.
+- Public profile payload hides wealth and exact strength/private resource stats.
+- Public profile payload includes:
+  - avatar
+  - selected badge
+  - public stats
+  - top achievements
+  - current location/galaxy
+  - current ship name/class only
+- Chat messages now include user/player IDs and selected badge metadata.
+- Map player traffic now includes user/player/profile metadata for public profile inspection.
+
+Frontend:
+- Profile page expanded with tabs:
+  - Overview
+  - Achievements
+  - Badges
+  - Avatars
+- Added achievement grid showing all 8 tiers per loop.
+- Added badge picker.
+- Selected badge overlays bottom-right of profile image.
+- Sidebar avatar uses selected badge overlay.
+- Topbar avatar uses selected badge overlay.
+- Chat messages show profile image + badge overlay.
+- Clicking a chat avatar/name opens a public profile modal.
+- Inspecting a player ship on the map can open that player’s public profile modal.
+- Public profile modal hides private wealth/strength stats.
+- Added generated achievement badge images:
+  - 18 loops × 8 tiers = 144 badge assets.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- frontend/src/assets/generated/achievements/*
+- frontend/src/assets/generated/asset_manifest.json
+- CHANGELOG_ACHIEVEMENTS_PROFILE.txt
+- ASSET_MANIFEST.json
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Backend import passed.
+- Fresh SQLite migration passed.
+- build_state passed.
+- Verified 18 achievement loops.
+- Verified 144 generated achievement badges.
+- Verified public profile payloads.
+- Verified tier-8 passive buff state.
+- Verified badge selection action.

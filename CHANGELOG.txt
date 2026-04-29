@@ -1,0 +1,75 @@
+PHASE 21 — Cargo Handling, Security Response, Open-World Traffic, Map Intercepts, Mining, and Salvage Map Icons
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Market / cargo handling:
+- Market buy/sell cargo operations now create backend timestamp-backed cargo handling work instead of instantly loading/offloading.
+- Cargo handling duration uses quantity, cargo mass, tier, and operation type with a normal range of roughly 5–60 minutes.
+- God mode still completes cargo handling instantly.
+- Active cargo handling blocks travel, ship switching, fighting, and starting additional cargo operations.
+- Active cargo handling provides protected status; the player is not attackable during loading/offloading.
+- Cargo capacity now accounts for pending inbound cargo so players cannot queue more cargo than the ship can hold.
+- Cargo operation status is included in /api/state and displayed in Market, Galaxies, and System Map.
+
+Market balance / security stock:
+- Valuable/high-tier goods bias toward lower-security markets.
+- High-security markets soft-cap valuable stock lower.
+- Low-security markets can hold more valuable goods.
+- NPC arbitrage periodically buys oversupplied valuable goods and resupplies depleted markets to keep market pressure balanced without erasing player impact.
+
+Planetary defense:
+- Unlawful local attacks now preview a planetary defense response chance.
+- Planetary defense can join high-security/local unlawful battles, increasing enemy combat pressure and heat.
+- Open-space intercept fights explicitly do not get planetary defense response.
+
+Open-world travel maps:
+- Galaxy and System maps now return simulated traffic from the backend.
+- Maps show NPC/player-like ships traveling between nodes.
+- NPC traffic uses existing NPC agents and can be intercepted from the map.
+- Player travel marker remains visible while traveling.
+- Maps have larger spread, zoom controls, and scrollable map space.
+
+Map interception:
+- Clicking a traveling NPC/player ship opens a detail panel with an Intercept / Attack action.
+- Intercept fights resolve through the backend combat system and are treated as open-space combat.
+- Open-space combat creates salvageable wrecks on the map when the player wins.
+
+Salvage integration:
+- Wreck salvage is now map-visible through System Map salvage icons.
+- NPC-vs-NPC skirmishes can generate salvage sites over time.
+- Local planet battles no longer always leave player salvage; planetary forces auto-salvage those wrecks.
+- Open-space/intercept battles create salvage icons for the player to travel to and strip.
+
+Mining integration:
+- System Map now shows randomly spawned ore signatures.
+- Ore signatures can be clicked and mined.
+- Mining a map ore site starts a backend-timed mining/cargo handling operation.
+- Ore reward is granted when the timed mining operation completes.
+
+UI improvements:
+- Cargo handling status panel with countdown/progress/protection status.
+- Zoomable/scrollable Galaxy and System maps.
+- Traffic ship icons with hostile/player/NPC styling.
+- Ore and salvage resource icons on System Map.
+- Map object detail panel with contextual actions.
+- Battle result copy updated to distinguish open-space salvage from planet-side auto-salvage.
+
+Logic loopholes fixed:
+- Cargo operations cannot be bypassed by travel or ship changes through normal API actions.
+- Pending cargo counts against cargo capacity.
+- Planetary defense does not respond in open space.
+- Open-space intercept targets resolve as combat targets without requiring same-planet docked state.
+- Salvage sites are generated only for open-space player victories and NPC skirmishes, not every planet-local battle.
+- Market restock/arbitrage now responds better to high-value low/high security imbalances.
+
+Validation:
+- Backend py_compile passed.
+- Fresh SQLite migration tested.
+- /api/state tested for galaxy traffic, system traffic, ore sites, cargo operation state.
+- God-mode map ore mining action tested.
+- God-mode map intercept combat tested.
+- API-level cargo handling block tested against travel after buy.
+- Frontend source updated; full Vite build could not be run in this artifact workspace because package.json/node_modules are not part of the changed-file zip.

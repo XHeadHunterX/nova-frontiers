@@ -1,0 +1,66 @@
+Nova Frontiers - Interactive Attack Energy Combat V9
+
+Files changed:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Backend systems changed:
+- Reworked real-time combat from automatic timed attacks into an interactive attack-energy combat session.
+- Added attack energy max of 12.
+- Added per-ship attack energy rate from 1 stack every 2-5 seconds based on ship combat rating, role, evasion, tier, and pilot combat/piloting/bounty skills.
+- Normalized every combat weapon to a required attack energy cost from 1-5.
+- Preserved the rule that every ship has at least one defensive weapon.
+- Combat-oriented ships can field multiple weapons, up to 6 depending on available fitted weapons/profile.
+- Added player combat actions:
+  - weapon fire
+  - defend
+  - use all
+  - utility module activation
+  - escape using 2 attack energy
+- Added backend endpoint action type: combat_action.
+- Escape now requires 2 attack energy and still respects the 6-second failed escape retry cooldown.
+- Defend now costs 1 attack energy and applies a short non-stacking +15% defense/dodge posture.
+- Use All now spends available attack energy, selects the largest affordable weapons first, and queues follow-up shots so the salvo streams one action per combat beat instead of dumping every shot instantly.
+- Enemy AI now has its own attack energy bar and spends energy on attacks/defense/utility when ready.
+- Added non-stacking combat utility effects:
+  - self attack buff
+  - enemy defense debuff
+  - enemy dodge debuff
+  - hull repair
+  - shield surge
+  - evasion buff
+  - target painter / accuracy debuff
+  - armor hardener
+  - capacitor injector
+  - enemy attack debuff
+- Utility strength scales by rarity/tier when generated from equipped modules.
+- Active buffs/debuffs expire by timestamp and are included in battle payloads.
+- Combat damage/hit calculations now account for active buffs, debuffs, defense posture, dodge, attack modifiers, and accuracy modifiers.
+
+Frontend systems changed:
+- Battle modal now shows a true attack energy system instead of passive replay only.
+- Added player and enemy attack energy bars with 12 pips.
+- Added weapon buttons under Your Ship.
+- Each weapon button displays required attack energy inside the button.
+- Added Defend button with required energy and effect hint.
+- Added Use All button.
+- Added utility module buttons with required energy and effect category.
+- Escape button remains in the header and now shows Req 2 E under the text.
+- Buttons visually disable when:
+  - not enough attack energy
+  - action recovery is active
+  - battle is complete
+  - escape cooldown is active
+- Active combat effects are shown as chips under the battle stage.
+- Enemy AI panel shows enemy energy and recovery state.
+- Battle modal styling updated for the new interactive action deck.
+
+Validation:
+- backend/app/main.py ast.parse passed.
+- npm run build could not run because vite is not installed in frontend/node_modules.
+- npm install was attempted but timed out in this container, so frontend build was not validated here.
+
+Notes:
+- This changes the battle loop from pre-picked automatic player attacks into manual player action selection.
+- Existing completed battle history still loads through the old battle payload path; new active sessions include attack energy/action metadata.

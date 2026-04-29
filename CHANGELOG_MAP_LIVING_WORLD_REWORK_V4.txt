@@ -1,0 +1,45 @@
+Nova Frontiers Map / Living World Rework V4
+
+Files changed:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- CHANGELOG_MAP_LIVING_WORLD_REWORK_V4.txt
+
+Backend systems changed:
+- Removed the backend player:self traffic emission path that was feeding the second/orange player marker.
+- Added shared action-range helpers using current interpolated ship position, target coordinates, map type, and one-second travel distance.
+- Added backend range enforcement for ore mining, salvage, exploration scanning, exploration investigation, pirate-station entry, and docking.
+- Changed radar semantics so radar visibility does not imply action eligibility.
+- Added range metadata to map objects: inActionRange, actionRangePct, actionDistancePct, and rangeLabel.
+- Docking from open space now approaches the selected planet/station/gate first when outside action range, then completes docking on arrival.
+- Docked ships remain off the map and are not represented as traffic.
+- Added route metadata support for dock approaches and multi-galaxy routes.
+- Added multi-galaxy route pathing through gate-connected galaxies instead of requiring one manual jump at a time.
+- Added segment advancement for galaxy routes so a plotted route can auto-progress through intermediate gates.
+- Added cancel-travel action that stops the current route and parks the ship at its current interpolated open-space position.
+
+Frontend systems changed:
+- Hardened filtering so player:self/kind=self traffic cannot render as a second player marker.
+- Increased map clock resolution from 1000ms to 100ms for smoother route interpolation.
+- Added Cancel Current Travel to blank-space map popup while traveling.
+- Added route segment/final-destination display for multi-galaxy course plotting.
+- Added range display to the inspect modal.
+- Added Approach behavior for out-of-range ore, salvage, exploration, pirate stations, and war/capture zones.
+- Added Dock action from selected system nodes.
+- Added Jump Gate action from selected gates.
+- Disabled direct attack/enter behavior where backend reports the object is out of action range.
+- Reduced long CSS position transitions so timestamp-derived movement does not create ghost/follower behavior.
+
+Validation attempted:
+- Backend syntax compile was attempted with python -m py_compile backend/app/main.py, but the command timed out in this container. The previous unmodified backend file also timed out under compile, so this environment could not provide a reliable compile result.
+- Frontend build was attempted with npm run build. It failed because vite is not installed in frontend/node_modules in this extracted project.
+
+Manual acceptance coverage targeted by this patch:
+- Far relic investigation should be rejected by backend until within action range.
+- Far scan/investigate/mine/salvage/pirate entry now shows approach/range state and is backend blocked if forced.
+- Orange follower marker should be removed because player:self is no longer emitted and is still frontend-filtered.
+- Dock button exists for selected system nodes and context popup nodes.
+- Docking starts travel when far, then removes ship from map when complete.
+- Travel line uses stored route origin coordinates instead of nearest-planet fallback where coordinate route metadata exists.
+- Multi-galaxy route stores and exposes intermediate route segments.

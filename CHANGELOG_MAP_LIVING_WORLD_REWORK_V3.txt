@@ -1,0 +1,31 @@
+Nova Frontiers map / living-world rework V3
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Backend changes:
+- Removed duplicate player traffic exposure from returned map traffic by treating the player ship marker as frontend-canonical.
+- Added persisted player route metadata for real coordinate-based travel lines.
+- Fixed local travel from open space so the route begins at the ship's actual open-space position instead of the nearest/current planet.
+- Added same-location docking from open space. Docking clears open-space state and hides the ship from the map until another travel/open-space action launches it again.
+- Blocked galaxy jumps while floating in open space so the player must dock at the local jump gate first.
+- Expanded npc_agents with persistent lifecycle fields: skill_points, skills_json, alive, generation, death_count, respawned_from_id.
+- Added NPC progression helpers: XP, level calculation, career/personality weighted skill allocation, combat power, respawn with 0-15% XP/skill loss.
+- Upgraded persistent map NPC actions so NPCs mine ore, salvage wrecks, scan exploration sites, resolve NPC-vs-NPC combat, create salvage after kills, respawn losers, and then choose new routes.
+- Fed NPC map and simulated economy actions through the same progression system so NPCs keep leveling over time.
+- Added route timestamps and route origin/destination coordinates to traffic payloads for smooth client-side interpolation.
+
+Frontend changes:
+- Filters out the backend player:self traffic marker so the orange trailing duplicate no longer renders.
+- Uses active route coordinate metadata before lane interpolation, fixing travel lines and ship position during open-space-to-planet docking/travel.
+- Draws coordinate-true travel lines from the ship's current position to the destination point.
+- Smoothly interpolates NPC traffic locally using npcStartedAt/npcArrivalAt and route origin/destination coordinates, reducing DB-refresh snapping.
+- Adds Dock Here for current planet/station/gate when the player is in open space.
+- Adds NPC life stats to inspect: level, XP, generation, death count, and top skills.
+- Added CSS rules for hiding duplicate self traffic, smoothing NPC/player marker movement, and styling NPC lifecycle stats.
+
+Validation:
+- backend/app/main.py was compile-checked with Python compile().
+- Vite build could not be run in this container because frontend dependencies were not installed and npm install timed out; npm run build failed with vite: not found.

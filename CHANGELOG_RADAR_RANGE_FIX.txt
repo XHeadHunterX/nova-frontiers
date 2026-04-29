@@ -1,0 +1,44 @@
+# CHANGELOG — Radar Range / Sensor Visibility Pass
+
+Backend:
+- Added centralized `RADAR_BALANCE` config for easy tuning:
+  - base range
+  - tier bonus
+  - radar stat multiplier
+  - scanner stat multiplier
+  - role bonuses
+  - min/max range caps
+- Added base radar behavior for every ship.
+- Added radar upgrade modules:
+  - Basic Radar Array
+  - Civilian Radar Array
+  - Military Radar Array
+  - Deep-Space Radar Suite
+- Existing DeepScan Array now contributes limited radar strength.
+- Added radar stats to ship derived stats:
+  - radar_strength
+  - radar_range_system_pct
+  - radar_range_galaxy_pct
+- Planets, stations, and galaxies remain always visible.
+- Ships, ore, salvage, and ancient/exploration contacts are visible only inside the player ship radar range.
+- Map summaries now include:
+  - radar range
+  - radar center
+  - hidden_by_radar count
+- NPCs now have role-based radar ranges.
+- NPC mining/salvage/exploration/pirate behavior is radar-limited:
+  - miners only detect ore inside radar
+  - salvagers only detect wrecks inside radar
+  - explorers only detect ancient signals inside radar
+  - pirates/hostiles only detect ships inside radar
+  - otherwise they continue search/sweep behavior
+
+Frontend:
+- Added player radar range ring on galaxy/system map.
+- Added player radar center ping.
+- Added toolbar readout for radar range and hidden contacts.
+- Selected object details show radar distance versus radar range.
+- Other ships' radar rings are not shown.
+
+Tuning:
+- Edit `RADAR_BALANCE` in `backend/app/main.py` to adjust base/final radar ranges.

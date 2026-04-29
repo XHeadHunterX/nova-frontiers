@@ -1,0 +1,8 @@
+{
+  "name": "nova-frontiers-phase22-map-live-travel",
+  "created_at": "2026-04-26T22:04:35.376809Z",
+  "note": "Regenerated replacement package because the prior chat ZIP was unavailable.",
+  "entrypoint_windows": "run-nova-frontiers-phase22.bat",
+  "entrypoint_unix": "run-dev.sh",
+  "requires": "Python 3.10+ only"
+}

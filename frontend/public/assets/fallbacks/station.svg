@@ -1,0 +1,5 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'>
+<defs><radialGradient id='g' cx='35%' cy='25%' r='82%'><stop offset='0%' stop-color='#ffc247' stop-opacity='.85'/><stop offset='55%' stop-color='#02060b'/><stop offset='100%' stop-color='#02060b'/></radialGradient><filter id='glow'><feGaussianBlur stdDeviation='3' result='b'/><feMerge><feMergeNode in='b'/><feMergeNode in='SourceGraphic'/></feMerge></filter></defs>
+<rect width='180' height='180' rx='28' fill='#02060b'/><rect x='6' y='6' width='168' height='168' rx='24' fill='none' stroke='#ffc247' stroke-opacity='.28'/><path d='M90 18 L138 46 L138 102 L90 130 L42 102 L42 46 Z' fill='url(#g)' stroke='#ffc247' stroke-width='4'/><circle cx='90' cy='74' r='26' fill='#02060b' stroke='#ffc247' stroke-width='4'/><path d='M22 74 H158 M90 8 V140' stroke='#ffc247' stroke-opacity='.32' stroke-width='5'/>
+<text x='90' y='102' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='31' font-weight='900' fill='#ffc247' filter='url(#glow)'>ST</text>
+</svg>

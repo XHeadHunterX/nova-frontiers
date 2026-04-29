@@ -1,0 +1,55 @@
+# CHANGELOG — Admin Runtime Game Tuning
+
+Backend:
+- Added persistent SQLite table `game_settings`.
+- Added runtime config override engine:
+  - captures code defaults
+  - loads DB overrides
+  - deep-merges override JSON over defaults
+  - applies immediately without rebuild
+- Added admin actions:
+  - admin_save_game_config
+  - admin_reset_game_config
+  - admin_reset_all_game_configs
+- Added `CLIENT_RUNTIME_BALANCE` for frontend polling/clock settings.
+- Added `game_tuning` to `/api/state`.
+- Runtime settings apply before state build and before actions run.
+
+Editable config groups:
+- CLIENT_RUNTIME_BALANCE
+- NPC_OBJECTIVE_BALANCE
+- RADAR_BALANCE
+- OPEN_WORLD_BALANCE
+- SIMULATION_BALANCE
+- NPC_MARKET_BALANCE
+- TRAVEL_BALANCE
+- CARGO_HANDLING_BALANCE
+- MARKET_LAW_BALANCE
+- COMBAT_BALANCE
+- PVE_BALANCE
+- CRAFTING_BALANCE
+- PLAYER_MARKET_BALANCE
+- PLANET_CONTROL_BALANCE
+- PLANETARY_DEFENSE_BALANCE
+- INVENTORY_BALANCE
+- TIER_BALANCE
+- SKILL_XP_BALANCE
+- ECONOMY_BALANCE
+- ECONOMY_CONFIG
+
+Frontend:
+- Rebuilt Admin page as Admin Game Tuning.
+- Added config group selector.
+- Added JSON editor for each game tuning group.
+- Added save/reset group/reset all controls.
+- Added default JSON preview.
+- Added quick guidance cards for NPC life/radar/map/tick tuning.
+- Frontend polling interval now uses CLIENT_RUNTIME_BALANCE.state_refresh_seconds from backend state.
+
+Usage:
+- Login as godmode / godmode123.
+- Open Admin.
+- Select a config group.
+- Edit JSON.
+- Save JSON Override.
+- Changes persist in SQLite and apply immediately.

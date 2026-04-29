@@ -1,0 +1,21 @@
+# Battle Stage Render Stability V11
+
+Changed files:
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Frontend changes:
+- Replaced the fragile inline combat-stage grid with `BattleStageView`.
+- Split the visual battle arena into a fixed top row and separate control row so weapon/action buttons cannot move the ship cards.
+- Added fixed-size player/enemy ship anchors to stop the two fighting ships from jumping when logs, energy, buttons, or enemy intent text update.
+- Added a contained ship image frame so delayed image fallback/load events cannot resize the combat card.
+- Moved projectile, miss, utility, and impact animation into an isolated center-lane layer.
+- Removed dynamic actor/action classes from the outer battle stage so current combat events cannot accidentally affect layout.
+- Added stable event keys for projectile/impact animation restarts without remounting the ship cards.
+- Added guarded battle event labels so missing/partial server log rows show a safe combat state instead of producing weird UI output.
+- Kept the visual style close to the existing modal: left ship, center battle lane, right ship, action buttons under the player ship, enemy AI panel under the enemy ship.
+
+Validation:
+- Reviewed JSX insertion points and resulting modified sections.
+- `npm run build` could not complete because `vite` is not installed in `frontend/node_modules` in this container.
+- No backend files changed.

@@ -1,0 +1,58 @@
+# CHANGELOG — Ranked Crafting Balance + Recipe Drop Sources
+
+Backend:
+- Added `RANKED_CRAFTING_BALANCE` admin-tunable config group.
+- Added `RECIPE_DROP_BALANCE` admin-tunable config group.
+- Ranked recipe generation now reads live rank scaling from `RANKED_CRAFTING_BALANCE`.
+- Admin save/reset of ranked crafting configs reseeds generated ranked recipes immediately.
+- Legendary crafting is now intentionally grind-heavy:
+  - high material multiplier
+  - high credit multiplier
+  - high time multiplier
+  - lower success modifier
+  - stronger output stat multiplier
+- Crafting caps increased so Legendary modules/weapons/armor can take up to 7 days by default.
+- Ship craft cap increased to 14 days by default.
+- All these values are editable in Admin Game Tuning.
+
+Recipe drop behavior:
+- Normal open-world NPC/pirate combat can drop 0-2 recipe copies.
+- Normal combat drops are limited to Improved and Advanced.
+- Pirate/raider/outlaw/smuggler/mercenary/security-style targets get a better drop chance.
+- Pirate station defenders inside the base do NOT drop recipe copies.
+- Pirate base completion drops 2-4 recipe copy roll slots.
+- Pirate base completion can drop Improved, Advanced, and very rarely Elite.
+- Legendary recipe copies are excluded from normal and pirate-base drop tables.
+- Legendary recipe drops remain disabled and reserved for rare world events later.
+
+Admin tuning added:
+- RANKED_CRAFTING_BALANCE
+  - rank_configs
+  - material multipliers
+  - cost multipliers
+  - time multipliers
+  - stat multipliers
+  - success modifiers
+  - skill scaling
+  - energy scaling
+- RECIPE_DROP_BALANCE
+  - normal kill enabled/max recipes/slot chance
+  - pirate bonus
+  - allowed ranks
+  - rank weights
+  - pirate base completion min/max recipes
+  - pirate base completion slot chance
+  - pirate base completion allowed ranks
+  - legendary exclusion toggle
+
+Changed files:
+- backend/app/main.py
+- CHANGELOG_RECIPE_BALANCE_AND_DROPS.txt
+
+Validation:
+- backend/app/main.py Python compile passed.
+- Backend module import passed.
+- Fresh SQLite migration passed.
+- Verified 255 recipes.
+- Verified 51 Legendary recipes.
+- Verified admin tuning targets are registered.

@@ -1,0 +1,36 @@
+Nova Frontiers - Real-Time Combat Rewrite V8
+
+Files changed
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Backend changes
+- Replaced pre-resolved player combat with persistent active combat sessions.
+- New combat sessions start with status='active', outcome='pending', and no precomputed winner.
+- Server advances one combat action per 3-second battle tick through the advance_combat_battle action.
+- Added active battle actor locks so ships already fighting are not attackable.
+- Added post-battle actor immunity for both combatants after victory, defeat, or successful escape.
+- Added 6-second failed escape cooldown.
+- Escape chance remains clamped between 20% and 80%.
+- Successful escape finalizes the active combat session, preserves damage, grants immunity to both ships, and returns an escaped outcome.
+- Battle completion now appends a final system log entry so the modal clearly shows the end state.
+- Defeated NPCs are marked dead, removed from active map state, and replaced by a new weaker NPC generation.
+- Active and immune combat actors are exposed as non-attackable map targets.
+
+Frontend changes
+- Replaced combat replay behavior with a real-time battle modal that streams server-resolved actions.
+- Modal polls advance_combat_battle on the configured 3-second action cycle.
+- Removed battle skip/speedup semantics from the active battle flow.
+- Added red ATTEMPT ESCAPE control with failed-attempt cooldown display.
+- The modal cannot be closed while battle status is active.
+- Successful escape closes the modal immediately.
+- Battle result area now clearly shows pending/complete state instead of showing rewards before the outcome exists.
+- Battle stage keeps both ships fixed in position.
+- Losing ship receives a visible red slash overlay when the battle ends.
+- Final result stamp appears in the center lane when combat completes.
+
+Validation
+- backend/app/main.py ast.parse passed.
+- npm run build could not complete because frontend/node_modules is missing vite in this container.
+- python -m py_compile backend/app/main.py timed out in this container even though ast.parse completed successfully.

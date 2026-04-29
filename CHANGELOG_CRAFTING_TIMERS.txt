@@ -1,0 +1,56 @@
+# CHANGELOG — Timed Crafting / Fabrication Queue
+
+Backend:
+- Added persistent `crafting_queue` table.
+- Crafting now starts a backend-timestamped job instead of instantly outputting the item/module.
+- Materials, credits, and energy are consumed up front when the job starts.
+- Output, success/failure roll, XP, job progression, planet market effects, and history are applied when the timer completes.
+- Completed jobs auto-resolve during `/api/state` and `/api/action`.
+- Added `claim_crafting` action to manually resolve finished jobs.
+- Added `cancel_crafting` action with partial credit/energy refund.
+- Added queue payload to `/api/state` as `crafting_queue`.
+- Added recipe timing metadata:
+  - craft_seconds
+  - craft_time_seconds
+  - craft_time_label
+  - timed_crafting
+
+Crafting time model:
+- Ammo starts at 5 seconds per unit at low tier.
+- Consumables/materials/refined goods take short-to-medium timers.
+- Modules/weapons/armor take longer fabrication timers.
+- Ship outputs are supported by output kind `ship`.
+- Large high-tier capital/dreadnought builds are supported at multi-day durations.
+- Max ship craft time defaults to 7 days.
+- Capital-class high-tier builds default to 2+ days depending on tier/rarity.
+- Most rare/legendary outputs can run longer through rarity/tier multipliers.
+
+Admin tuning:
+- All timer values live in `CRAFTING_BALANCE`, already exposed in Admin Game Tuning.
+- Important knobs:
+  - timed_crafting_enabled
+  - god_instant_crafting
+  - max_active_jobs
+  - allow_parallel_jobs
+  - base_seconds_by_output
+  - per_unit_seconds_by_output
+  - tier_time_multiplier
+  - rarity_time_multiplier
+  - ship_class_seconds
+  - max_seconds_by_output
+  - min_seconds
+
+Frontend:
+- Crafting page now shows timed fabrication queue.
+- Active jobs show progress, remaining time, total duration, and success odds.
+- Completed/failed/cancelled jobs show in the same queue area.
+- Recipe cards now show timer labels instead of only craft_minutes.
+- Craft button now says `Start Craft (...)`.
+- Added Claim Completed button.
+- Added Cancel button for active jobs.
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- CHANGELOG_CRAFTING_TIMERS.txt
