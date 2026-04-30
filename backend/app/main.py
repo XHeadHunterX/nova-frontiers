@@ -4170,7 +4170,19 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_player_storage_scope ON player_storage_items(player_id, galaxy_id, planet_id, item_code);
     """)
     add_cols("galaxies", {"x_pct":"REAL NOT NULL DEFAULT 50", "y_pct":"REAL NOT NULL DEFAULT 50", "faction_id":"INTEGER", "home_depth":"INTEGER NOT NULL DEFAULT 99", "capturable":"INTEGER NOT NULL DEFAULT 1", "center_value":"INTEGER NOT NULL DEFAULT 1", "control_bonus_pct":"INTEGER NOT NULL DEFAULT 3", "war_cooldown_until":"TEXT"})
-    add_cols("planets", {"faction_id":"INTEGER", "war_cooldown_until":"TEXT"})
+    add_cols("planets", {
+        "stability_level":"INTEGER NOT NULL DEFAULT 60",
+        "population":"INTEGER NOT NULL DEFAULT 250000",
+        "npc_density":"INTEGER NOT NULL DEFAULT 50",
+        "npc_activity":"INTEGER NOT NULL DEFAULT 50",
+        "friendliness":"INTEGER NOT NULL DEFAULT 50",
+        "hostility":"INTEGER NOT NULL DEFAULT 50",
+        "lawfulness":"INTEGER NOT NULL DEFAULT 50",
+        "npc_economy_bias":"INTEGER NOT NULL DEFAULT 50",
+        "npc_criminal_bias":"INTEGER NOT NULL DEFAULT 50",
+        "faction_id":"INTEGER",
+        "war_cooldown_until":"TEXT"
+    })
     add_cols("market_prices", {"security_stock_bias":"INTEGER NOT NULL DEFAULT 0"})
     add_cols("commodities", {"tier":"INTEGER NOT NULL DEFAULT 1", "max_tier":"INTEGER NOT NULL DEFAULT 2", "tier_locked":"INTEGER NOT NULL DEFAULT 1"})
     add_cols("inventory", {"base_tier":"INTEGER NOT NULL DEFAULT 1", "current_tier":"INTEGER NOT NULL DEFAULT 1", "max_tier":"INTEGER NOT NULL DEFAULT 3", "tier_locked":"INTEGER NOT NULL DEFAULT 0", "tier_source":"TEXT NOT NULL DEFAULT 'system'", "item_stats_json":"TEXT NOT NULL DEFAULT '{}'"})
