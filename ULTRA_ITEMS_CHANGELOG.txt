@@ -1,0 +1,17 @@
+Nova Frontiers Ultra Items Patch
+
+Changed files:
+- backend/app/main.py
+  - Added 25 ultra vanity items with names, descriptions, colors, sell values, and drop pools.
+  - Added mission/pirate-base/mining/exploration ultra drop logic.
+  - Added ultra reward grant helpers and custom visuals for ultra item codes.
+  - Planet mission ultra drops scale from 0.25% at low mission level to 1.0% at max level.
+  - Pirate base ultra drops scale from 0.25% at lowest tier to 1.0% at highest tier.
+  - Mining and exploration-node ultra drops use flat 0.5% chances.
+  - Mission ultra items include special discovery text in mission logs.
+- frontend/src/styles.css
+  - Added ultra rarity badge and card styling.
+- frontend/public/assets/generated/ultra/*.svg
+  - Added 25 unique public ultra item images.
+- frontend/src/assets/generated/items/*.svg
+  - Added 25 generated asset copies so mission/event/item art can resolve by code.

@@ -1,0 +1,42 @@
+{
+  "baseline": {
+    "active_hours_per_day": 12,
+    "active_days_per_week": 7,
+    "target_days": 730,
+    "target_years": 2,
+    "note": "Procedural/per-planet infinite content is modeled as finite mastery tracks."
+  },
+  "runs": 1000,
+  "completion_days": {
+    "mean": 737.64,
+    "median": 732.0,
+    "min": 714,
+    "max": 834,
+    "p05": 719.0,
+    "p10": 721.0,
+    "p25": 724.0,
+    "p75": 747.25,
+    "p90": 762.0,
+    "p95": 773.0
+  },
+  "component_days_mean": {
+    "skills": 722.07,
+    "credits": 728.1,
+    "base_research_build": 625.74,
+    "crafting_recipes": 612.04,
+    "achievements_loops": 687.32
+  },
+  "component_days_p90": {
+    "skills": 726.0,
+    "credits": 760.0,
+    "base_research_build": 652.0,
+    "crafting_recipes": 667.0,
+    "achievements_loops": 734.0
+  },
+  "calibrated_constants": {
+    "SKILL_XP_BALANCE.base_curve": 620,
+    "SKILL_XP_BALANCE.curve_power": 1.95,
+    "ECOSYSTEM_BALANCE.reward_mult.pve_xp": 7.2,
+    "finite_credit_sink_target": 4300000000.0
+  }
+}

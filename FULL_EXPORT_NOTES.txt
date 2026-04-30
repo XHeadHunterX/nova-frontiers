@@ -1,0 +1,17 @@
+Nova Frontiers full current source export.
+
+Excluded from this zip:
+- node_modules
+- frontend/dist
+- Python caches / virtual environments
+- git metadata
+
+Rebuild frontend:
+cd frontend
+npm install
+npm run build
+
+Run backend:
+cd backend
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000

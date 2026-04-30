@@ -27,9 +27,27 @@ DB_PATH = Path(os.getenv("NOVA_DB", DATA_DIR / "nova_frontiers.db"))
 DEV_MODE = os.getenv("NOVA_DEV", "1") == "1"
 
 app = FastAPI(title="Nova Frontiers API", version="0.1.0")
+
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "https://novafrontiersgame.com",
+    "https://www.novafrontiersgame.com",
+    "https://nova-frontiers.pages.dev",
+    "https://nova-frontiers-site.pages.dev",
+]
+CORS_ORIGINS = [
+    origin.strip().rstrip("/")
+    for origin in os.getenv("NOVA_CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",")
+    if origin.strip()
+]
+CORS_ORIGIN_REGEX = os.getenv("NOVA_CORS_ORIGIN_REGEX", r"https://.*\.pages\.dev")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000"],
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -179,8 +197,8 @@ JOB_RANK_THRESHOLDS = [
 
 # Phase 16: action-trained skills + focused career bonuses. Skills are grindy; careers amplify matching actions without locking other actions.
 SKILL_XP_BALANCE = {
-    "base_curve": 220,
-    "curve_power": 1.82,
+    "base_curve": 620,
+    "curve_power": 1.95,
     "max_level": 100,
     "breakout_success_cap": 0.80,
     "illicit_risk_floor": 0.04,
@@ -237,6 +255,7 @@ ACTION_PROGRESSION: Dict[str, Dict[str, Any]] = {
     "hauling": {"skills":{"hauling":28,"piloting":10,"trading":8},"careers":{"hauler":120,"quartermaster":100,"trader":35}},
     "repair": {"skills":{"ship_repair":26,"engineering":18},"careers":{"engineer":85,"shipwright":65,"medic":35}},
     "security": {"skills":{"combat":20,"scanning":10,"piloting":6},"careers":{"security_pilot":125,"marshal":80}},
+    "planet_mission": {"skills":{"exploration":18,"scanning":12,"salvaging":8,"combat":6},"careers":{"explorer":55,"salvager":45,"security_pilot":35}},
 }
 
 
@@ -261,6 +280,7 @@ ACHIEVEMENT_LOOPS = {
     "social": {"name": "Sector Voice", "summary": "Use chat, profiles, guild presence, and social loops.", "buff": {"social_rep_pct": 0.005}},
     "medical": {"name": "Triage Veteran", "summary": "Use medical systems and recover from damage.", "buff": {"medical_recovery_pct": 0.005}},
     "wealth": {"name": "Credit Baron", "summary": "Accumulate credits and economic influence.", "buff": {"market_read_pct": 0.005}},
+    "planet_missions": {"name": "Ground Contractor", "summary": "Complete planet-side and station-side contracts.", "buff": {"mission_reward_pct": 0.005}},
 }
 
 ACHIEVEMENT_ACTION_MAP = {
@@ -276,6 +296,7 @@ ACHIEVEMENT_ACTION_MAP = {
     "repair": "repair",
     "security": "security",
     "travel": "travel",
+    "planet_mission": "planet_missions",
     "breakout": "smuggling",
 }
 
@@ -284,7 +305,7 @@ ACHIEVEMENT_BADGE_THEME = {
     "exploration": "#9dffdf", "combat": "#ff8b8b", "bounty": "#ffcf72", "crafting": "#8bdcff",
     "hauling": "#a1f0ff", "repair": "#8fffd6", "security": "#96c7ff", "travel": "#b4d6ff",
     "pirate_station": "#ff697e", "faction_war": "#ffdd79", "property": "#c8ff96", "social": "#e4b6ff",
-    "medical": "#9effd8", "wealth": "#ffe072",
+    "medical": "#9effd8", "wealth": "#ffe072", "planet_missions": "#b8ffea",
 }
 
 def achievement_badge_code(loop_key: str, tier: int) -> str:
@@ -307,16 +328,97 @@ ECONOMY_CONFIG = {
 
 # Phase 2 inventory/economy constants. These values keep spreads conservative and prevent buy/sell loops.
 ECONOMY_BALANCE = {
-    "max_supply": 130,
-    "max_demand": 160,
-    "minimum_trade_spread": 0.08,
-    "non_market_item_sell_mult": 0.62,
-    "raw_ore_sell_mult": 0.24,
-    "legal_sell_fee": ECONOMY_CONFIG["legal_trade_station_fee"],
-    "illegal_sell_fee": ECONOMY_CONFIG["illegal_laundering_fee"],
-    "illegal_security_price_mult": 0.006,
-    "instability_price_mult": 0.004,
-    "npc_stock_nudge_max": 9,
+    "max_supply": 150,
+    "max_demand": 180,
+    "minimum_trade_spread": 0.14,
+    "non_market_item_sell_mult": 0.46,
+    "raw_ore_sell_mult": 0.18,
+    "legal_sell_fee": 0.055,
+    "illegal_sell_fee": 0.135,
+    "illegal_security_price_mult": 0.0065,
+    "instability_price_mult": 0.0045,
+    "npc_stock_nudge_max": 7,
+}
+
+# High-level economy/progression balance. This is the admin-facing layer that keeps the whole
+# game in the target shape: easy starter loop, expensive mid-game, brutal long-term completion.
+ECOSYSTEM_BALANCE = {
+    "philosophy": {
+        "early_game": "Starter jobs, T1 crafting, local travel, and basic vendor sales should feel accessible.",
+        "mid_game": "Ships, bases, research, and upgraded modules should become deliberate credit/material sinks.",
+        "end_game": "Maxing everything should take 12-18+ months of steady play and massive material/credit investment.",
+    },
+    "commodity_price_mult_by_category": {
+        "civilian": 0.90,
+        "food": 0.86,
+        "industrial": 1.00,
+        "energy": 1.08,
+        "electronics": 1.20,
+        "medical": 1.12,
+        "luxury": 1.35,
+        "arms": 1.45,
+        "contraband": 1.75,
+        "material": 1.05,
+        "component": 1.22,
+    },
+    "direct_vendor_sell_mult_by_category": {
+        "goods": 0.60,
+        "illicit_goods": 0.42,
+        "raw_materials": 0.18,
+        "crafting_materials": 0.36,
+        "refined_materials": 0.48,
+        "ship_parts": 0.42,
+        "ship_modules": 0.34,
+        "weapons": 0.33,
+        "armor": 0.35,
+        "consumables": 0.52,
+        "rare_artifacts": 0.38,
+        "salvage": 0.28,
+        "fuel_supplies": 0.44,
+        "mission_materials": 0.24,
+    },
+    "rarity_vendor_mult": {
+        "common": 1.0,
+        "uncommon": 0.92,
+        "rare": 0.82,
+        "epic": 0.70,
+        "legendary": 0.55,
+        "black_market": 0.42,
+        "ultra": 1.85,
+    },
+    "progression_cost_mult": {
+        "ships": 2.85,
+        "modules": 2.25,
+        "crafting_recipes": 2.40,
+        "base_placement": 2.25,
+        "base_research": 2.05,
+        "base_building": 2.45,
+    },
+    "progression_time_mult": {
+        "crafting": 2.65,
+        "base_research": 1.22,
+        "base_building": 1.24,
+    },
+    "reward_mult": {
+        "pve_credits": 0.62,
+        "pve_xp": 7.20,
+        "mission_xp": 0.78,
+        "combat_pirate_credit": 0.36,
+        "market_profit": 1.0,
+    },
+    "xp_curve_mult": {
+        "skill_base_curve": 2.82,
+        "skill_curve_power": 1.07,
+        "npc_xp": 0.82,
+        "crafting_xp": 0.78,
+    },
+    "sink_targets": {
+        "vendor_sells_are_floor": True,
+        "player_market_should_pay_best": True,
+        "planet_market_is_mid": True,
+        "direct_vendor_is_lowest": True,
+        "ship_and_base_are_major_sinks": True,
+    }
 }
 
 INVENTORY_CATEGORY_LABELS = {
@@ -343,6 +445,7 @@ INVENTORY_RARITY_ORDER = {
     "epic": 4,
     "legendary": 5,
     "black_market": 6,
+    "ultra": 7,
 }
 
 INVENTORY_BALANCE = {
@@ -666,6 +769,93 @@ CLIENT_RUNTIME_BALANCE = {
     "clock_tick_seconds": 1,
 }
 
+
+BASE_ICON_SPACE_RADIUS_PCT = 2.4
+BASE_BUILD_CLEARANCE_SPACES = 2.0
+RESOURCE_NODE_CLEARANCE_SPACES = 1.0
+
+BASE_RESEARCH_BLUEPRINTS = [
+    ("survey_lab", "Survey Lab", "Exploration", "survey_data_core", "survey_data_core"),
+    ("ore_processor", "Ore Processor", "Industry", "ferrite_bars", "nickel_iron"),
+    ("hydroponics", "Hydroponics Ring", "Support", "nutrient_paste", "biotic_sample"),
+    ("salvage_yard", "Salvage Yard", "Salvage", "sealed_relic_plate", "mission_salvage_core"),
+    ("hazard_lab", "Hazard Lab", "Science", "hazard_catalyst", "containment_shard"),
+    ("drone_bay", "Drone Bay", "Automation", "circuit_bundle", "electronics"),
+    ("fuel_synth", "Fuel Synthesizer", "Logistics", "helium3_cells", "helium_3"),
+    ("medical_pod", "Medical Pod", "Medical", "trauma_gel", "bio_gel"),
+    ("relay_array", "Relay Array", "Navigation", "quantum_glass", "iridium_filament"),
+    ("warehouse_grid", "Warehouse Grid", "Storage", "polymer", "industrial"),
+    ("fabricator", "Micro Fabricator", "Manufacturing", "refined_alloy", "titanium_ingot"),
+    ("security_grid", "Security Grid", "Defense", "ammo_pack", "arms"),
+    ("archive_node", "Archive Node", "Research", "survey_data_core", "ancient_relic"),
+    ("black_box", "Black Box Lab", "Covert", "encrypted_manifest", "documents"),
+    ("trade_uplink", "Trade Uplink", "Commerce", "market_reports", "luxury"),
+    ("cryogenic_bank", "Cryogenic Bank", "Support", "cryo_cells", "medical"),
+    ("reactor_tap", "Reactor Tap", "Power", "reactor", "fuel_cell"),
+    ("shipwright_bench", "Shipwright Bench", "Engineering", "hull_patch", "reinforced_hull_patch"),
+]
+
+
+def build_base_research_defs() -> List[Dict[str, Any]]:
+    out = []
+    for i, (code, name, category, output_item, focus_item) in enumerate(BASE_RESEARCH_BLUEPRINTS):
+        for tier in range(1, 4):
+            hours = [36, 96, 168][tier-1] + (i % 6) * [4, 8, 12][tier-1]
+            cost = int([90000, 310000, 900000][tier-1] * (1 + (i % 5) * 0.08))
+            research_code = f"{code}_t{tier}"
+            building_code = research_code
+            out.append({
+                "code": research_code,
+                "name": f"{name} T{tier}",
+                "category": category,
+                "tier": tier,
+                "hours": hours,
+                "cost": cost,
+                "unlock_building_code": building_code,
+                "output_item": output_item,
+                "focus_item": focus_item,
+                "description": f"Unlocks {name} tier {tier} construction. Research costs credits and time only; building comes after research.",
+            })
+    return out
+
+
+def build_base_building_defs() -> List[Dict[str, Any]]:
+    out = []
+    bonuses = [
+        "Passive expedition material trickle", "Passive refinery material trickle", "Passive food and biology supplies", "Passive salvage component trickle",
+        "Passive hazard material trickle", "Passive electronics trickle", "Passive fuel cell trickle", "Passive medical supply trickle",
+        "Minor map scan cooldown support", "Passive polymer/packing supplies", "Passive alloy support", "Passive ammunition support",
+        "Passive research data trickle", "Passive encrypted document trickle", "Passive market intel trickle", "Passive cryo/medical component trickle",
+        "Passive reactor component trickle", "Passive ship repair component trickle",
+    ]
+    for i, (code, name, category, output_item, focus_item) in enumerate(BASE_RESEARCH_BLUEPRINTS):
+        for tier in range(1, 4):
+            hours = [72, 192, 336][tier-1] + (i % 6) * [5, 9, 14][tier-1]
+            cost = int([350000, 1200000, 3600000][tier-1] * (1 + (i % 5) * 0.10))
+            building_code = f"{code}_t{tier}"
+            out.append({
+                "code": building_code,
+                "name": f"{name} T{tier}",
+                "category": category,
+                "tier": tier,
+                "hours": hours,
+                "cost": cost,
+                "requires_research": building_code,
+                "passive_item_code": output_item,
+                "passive_item_name": label_for_api(output_item) if 'label_for_api' in globals() else output_item.replace('_',' ').title(),
+                "passive_qty_per_day": tier,
+                "bonus": bonuses[i % len(bonuses)],
+                "description": f"Constructs {name} tier {tier}. Adds small passive output and quality-of-life base value without direct combat power.",
+            })
+    return out
+
+
+BASE_RESEARCH_DEFS = build_base_research_defs()
+BASE_BUILDING_DEFS = build_base_building_defs()
+BASE_RESEARCH_BY_CODE = {r["code"]: r for r in BASE_RESEARCH_DEFS}
+BASE_BUILDING_BY_CODE = {b["code"]: b for b in BASE_BUILDING_DEFS}
+BASE_PLACEMENT_COST = 2_500_000
+
 NPC_OBJECTIVE_BALANCE = {
     # Every NPC can choose every objective. These are the neutral/default weights.
     # Career, disposition, aggression, friendliness, lawfulness, radar contacts, and map type adjust them per route bucket.
@@ -784,6 +974,140 @@ OPEN_WORLD_BALANCE = {
     "ore_mine_max_energy": 34,
 }
 
+WORLD_PROGRESSION_BALANCE = {
+    "target_planets_per_galaxy": 8,
+    "target_galaxy_multiplier": 1.5,
+    "extra_galaxies_per_faction": 2,
+    "maintain_equal_faction_galaxies": True,
+    "resource_tier_max": 5,
+    "bands": [
+        {
+            "key": "home_quarter",
+            "name": "Home to 1/4 Center",
+            "min_progress": 0.0,
+            "max_progress": 0.25,
+            "tier_weights": {"1": 60, "2": 25, "3": 10, "4": 5, "5": 0},
+            "npc_level_min": 1,
+            "npc_level_max": 10,
+        },
+        {
+            "key": "outer_mid",
+            "name": "1/4 to 1/2 Center",
+            "min_progress": 0.25,
+            "max_progress": 0.50,
+            "tier_weights": {"1": 20, "2": 40, "3": 20, "4": 15, "5": 5},
+            "npc_level_min": 10,
+            "npc_level_max": 20,
+        },
+        {
+            "key": "inner_mid",
+            "name": "1/2 to 3/4 Center",
+            "min_progress": 0.50,
+            "max_progress": 0.75,
+            "tier_weights": {"1": 5, "2": 20, "3": 40, "4": 25, "5": 10},
+            "npc_level_min": 20,
+            "npc_level_max": 35,
+        },
+        {
+            "key": "center_front",
+            "name": "3/4 to Center",
+            "min_progress": 0.75,
+            "max_progress": 1.01,
+            "tier_weights": {"1": 0, "2": 5, "3": 20, "4": 40, "5": 35},
+            "npc_level_min": 35,
+            "npc_level_max": 60,
+        },
+    ],
+}
+
+WORLD_SERVER_BALANCE = {
+    "enabled": True,
+    "server_controls_npcs": True,
+    "server_controls_resources": True,
+    "npc_check_min_seconds": 60,
+    "npc_check_max_seconds": 120,
+    "resource_check_min_seconds": 15 * 60,
+    "resource_check_max_seconds": 30 * 60,
+    "npcs_per_galaxy_min": 15,
+    "npcs_per_galaxy_max": 30,
+    "patrol_check_min_seconds": 60,
+    "patrol_check_max_seconds": 120,
+    "patrols_per_galaxy_min": 4,
+    "patrols_per_galaxy_max": 6,
+    "patrol_strength_mult": 2.0,
+    "patrol_min_spacing_pct": 14,
+    "patrol_avoid_grouping_range_pct": 18,
+    "patrol_trim_excess": False,
+    "mining_nodes_per_galaxy_min": 5,
+    "mining_nodes_per_galaxy_max": 15,
+    "exploration_nodes_per_galaxy_min": 5,
+    "exploration_nodes_per_galaxy_max": 15,
+    "pirate_bases_per_galaxy_min": 0,
+    "pirate_bases_per_galaxy_max": 2,
+    "spawn_one_per_type_per_check": True,
+    "trim_one_excess_per_type_per_check": True,
+    "pirate_base_strength_mult": 1.25,
+    "pirate_base_min_tier": 1,
+    "pirate_base_max_tier": 9,
+}
+
+
+WORLD_MISSION_BALANCE = {
+    "station_ratio_per_galaxy": 0.25,
+    "uninhabitable_ratio_per_galaxy": 0.40,
+    "mission_base_minutes_min": 30,
+    "mission_base_minutes_max": 60,
+    "mission_time_growth_pct_per_level": 0.10,
+    "mission_reward_growth_pct_per_level": 0.20,
+    "mission_xp_per_completion": 100,
+    "planet_mission_max_level": 50,
+    "center_reward_multiplier_max": 3.0,
+    "direct_credit_rewards_enabled": False,
+    "mission_material_qty_min": 1,
+    "mission_material_qty_max": 4,
+    "mission_material_level_bonus_every": 5,
+    "mission_material_center_bonus_max": 2,
+    "mission_cancel_cooldown_min_minutes": 10,
+    "mission_failure_cooldown_min_minutes": 3,
+    "mission_failure_cooldown_max_minutes": 9,
+    "mission_crit_failure_cooldown_min_minutes": 8,
+    "mission_crit_failure_cooldown_max_minutes": 18,
+    "mission_cooldown_cap_minutes": 120,
+    "mission_types": {
+        "survey": {
+            "name": "Surface Survey",
+            "xp": 75,
+            "tags": ["exploration","science"],
+            "rewardItems": [
+                {"code":"survey_data_core","name":"Survey Data Core","category":"mission_materials","rarity":"common","weight":70,"qtyMin":1,"qtyMax":3,"baseValue":320,"mass":0.08,"description":"Planet mission survey data used in scanner and navigation crafting."},
+                {"code":"biotic_sample","name":"Biotic Sample","category":"mission_materials","rarity":"uncommon","weight":30,"qtyMin":1,"qtyMax":2,"baseValue":540,"mass":0.12,"description":"Field sample from uninhabitable surfaces, useful in advanced support crafting."}
+            ],
+            "log":["Mapped a mineral seam.", "Recovered old probe data.", "Found a safe landing corridor."]
+        },
+        "salvage": {
+            "name": "Wreck Salvage",
+            "xp": 90,
+            "tags": ["salvage","industry"],
+            "rewardItems": [
+                {"code":"sealed_relic_plate","name":"Sealed Relic Plate","category":"mission_materials","rarity":"uncommon","weight":55,"qtyMin":1,"qtyMax":3,"baseValue":680,"mass":0.32,"description":"Planet-side salvage plate used in reinforced crafting recipes."},
+                {"code":"mission_salvage_core","name":"Mission Salvage Core","category":"mission_materials","rarity":"rare","weight":20,"qtyMin":1,"qtyMax":1,"baseValue":1100,"mass":0.55,"description":"Recovered mission-only machinery core for specialized ship parts."}
+            ],
+            "log":["Recovered cracked plating.", "Cut into a buried hull section.", "Tagged recoverable machinery."]
+        },
+        "hazard": {
+            "name": "Hazard Cleanup",
+            "xp": 95,
+            "tags": ["security","survival"],
+            "rewardItems": [
+                {"code":"hazard_catalyst","name":"Hazard Catalyst","category":"mission_materials","rarity":"uncommon","weight":55,"qtyMin":1,"qtyMax":3,"baseValue":760,"mass":0.16,"description":"Stabilized hazardous compound gathered only from planet missions."},
+                {"code":"containment_shard","name":"Containment Shard","category":"mission_materials","rarity":"rare","weight":18,"qtyMin":1,"qtyMax":1,"baseValue":1250,"mass":0.22,"description":"Rare containment material for shield and survival-focused crafting."}
+            ],
+            "log":["Cleared a corrosive vent field.", "Drove off local scavengers.", "Stabilized a damaged relay."]
+        },
+    },
+    "mission_distribution": ["survey", "salvage", "hazard"],
+}
+
 # Phase 19 combat balance. Keep combat readable and round-based; frontend animates the server-resolved log.
 COMBAT_BALANCE = {
     "max_rounds": 999,
@@ -880,6 +1204,9 @@ def game_config_targets() -> Dict[str, Dict[str, Any]]:
         "NPC_LIFE_BALANCE": NPC_LIFE_BALANCE,
         "RADAR_BALANCE": RADAR_BALANCE,
         "OPEN_WORLD_BALANCE": OPEN_WORLD_BALANCE,
+        "WORLD_PROGRESSION_BALANCE": WORLD_PROGRESSION_BALANCE,
+        "WORLD_SERVER_BALANCE": WORLD_SERVER_BALANCE,
+        "WORLD_MISSION_BALANCE": WORLD_MISSION_BALANCE,
         "SIMULATION_BALANCE": SIMULATION_BALANCE,
         "NPC_MARKET_BALANCE": NPC_MARKET_BALANCE,
         "TRAVEL_BALANCE": TRAVEL_BALANCE,
@@ -899,6 +1226,7 @@ def game_config_targets() -> Dict[str, Dict[str, Any]]:
         "INVENTORY_BALANCE": INVENTORY_BALANCE,
         "TIER_BALANCE": TIER_BALANCE,
         "SKILL_XP_BALANCE": SKILL_XP_BALANCE,
+        "ECOSYSTEM_BALANCE": ECOSYSTEM_BALANCE,
         "ECONOMY_BALANCE": ECONOMY_BALANCE,
         "ECONOMY_CONFIG": ECONOMY_CONFIG,
     }
@@ -910,6 +1238,9 @@ GAME_CONFIG_DESCRIPTIONS = {
     "NPC_LIFE_BALANCE": "Persistent NPC XP, skill assignment, death, respawn, and autonomous attack tuning.",
     "RADAR_BALANCE": "Player/NPC radar ranges, tier scaling, radar/scanner multipliers, and role radar bonuses.",
     "OPEN_WORLD_BALANCE": "Map traffic counts, travel durations, ore/site counts, mining/salvage map behavior.",
+    "WORLD_PROGRESSION_BALANCE": "Admin-controlled galaxy count, planets per galaxy, faction balance, resource tier bands, and NPC level bands from each faction home toward the center.",
+    "WORLD_SERVER_BALANCE": "Server authority for per-galaxy NPC counts, mining/exploration nodes, pirate base counts, check intervals, and pirate base strength scaling.",
+    "WORLD_MISSION_BALANCE": "Planet/station/uninhabitable conversion ratios, landed mission contracts, planet-specific mission XP, timers, rewards, and event-screen tuning.",
     "SIMULATION_BALANCE": "Server simulation tick cadence and NPC economic tick behavior.",
     "NPC_MARKET_BALANCE": "NPC market buying/selling, restocking, arbitrage, and economy pressure.",
     "TRAVEL_BALANCE": "Planet/galaxy travel duration, danger, and route history tuning.",
@@ -2249,6 +2580,64 @@ def build_ranked_recipe_definitions() -> List[Dict[str, Any]]:
             out.append(recipe)
     return out
 
+MISSION_MATERIAL_CRAFTING_RECIPES = [
+    {
+        'code': 'mission_field_scanner_array',
+        'name': 'Field-Linked DeepScan Array',
+        'category': 'Ship Modules',
+        'description': 'Scanner array variant that uses planet mission survey data. Mission materials improve scan calibration without replacing the normal scanner recipe path.',
+        'inputs': {'survey_data_core': 2, 'biotic_sample': 1, 'circuit_bundle': 2, 'quantum_glass': 1},
+        'credits': 9000,
+        'energy': 14,
+        'craft_minutes': 24,
+        'required_jobs': ['engineer', 'shipwright', 'explorer', 'salvager'],
+        'required_job_rank': 2,
+        'required_skill_tree': 'scanning',
+        'required_skill_total': 3,
+        'base_success': 0.79,
+        'xp': 760,
+        'output': {'kind': 'module', 'module_code': 'scanner_array', 'qty': 1},
+    },
+    {
+        'code': 'mission_reinforced_hull_patch',
+        'name': 'Reinforced Hull Patch Kit',
+        'category': 'Consumables',
+        'description': 'Emergency hull patch using relic plate recovered from planet missions. It is a stronger alternate consumable route, not a core progression gate.',
+        'inputs': {'sealed_relic_plate': 2, 'titanium_ingot': 2, 'ferrite_bars': 2},
+        'credits': 1400,
+        'energy': 7,
+        'craft_minutes': 13,
+        'required_jobs': ['engineer', 'shipwright', 'salvager'],
+        'required_job_rank': 1,
+        'required_skill_tree': 'engineering',
+        'required_skill_total': 2,
+        'base_success': 0.88,
+        'xp': 310,
+        'output': {'kind': 'item', 'item_code': 'reinforced_hull_patch', 'name': 'Reinforced Hull Patch Kit', 'item_type': 'repair', 'category': 'consumables', 'qty': 1, 'legal': 1, 'base_value': 3600, 'mass': 2.2, 'rarity': 'uncommon', 'description': 'Mission-enhanced hull repair consumable.'},
+    },
+    {
+        'code': 'mission_hazard_shield_emitter',
+        'name': 'Hazard-Tuned Shield Emitter',
+        'category': 'Ship Modules',
+        'description': 'Shield emitter variant tuned with hazardous planet mission catalysts. Uses rare mission materials, but only for this specialist defensive recipe.',
+        'inputs': {'hazard_catalyst': 2, 'containment_shard': 1, 'helium3_cells': 1, 'iridium_filament': 1},
+        'credits': 19000,
+        'energy': 19,
+        'craft_minutes': 36,
+        'required_jobs': ['engineer', 'shipwright', 'security_pilot'],
+        'required_job_rank': 2,
+        'required_skill_tree': 'engineering',
+        'required_skill_total': 5,
+        'base_success': 0.72,
+        'xp': 980,
+        'output': {'kind': 'module', 'module_code': 'shield_s5', 'qty': 1},
+    },
+]
+
+for _mission_recipe in MISSION_MATERIAL_CRAFTING_RECIPES:
+    if not any(r.get('code') == _mission_recipe.get('code') for r in CRAFTING_BASE_RECIPE_DEFINITIONS):
+        CRAFTING_BASE_RECIPE_DEFINITIONS.append(_mission_recipe)
+
 CRAFTING_RECIPE_DEFINITIONS = build_ranked_recipe_definitions()
 
 OPERATION_AFFINITY = {
@@ -2659,6 +3048,46 @@ def migrate() -> None:
           last_collected_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS player_bases (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          player_id INTEGER NOT NULL UNIQUE REFERENCES players(id) ON DELETE CASCADE,
+          galaxy_id INTEGER NOT NULL REFERENCES galaxies(id) ON DELETE CASCADE,
+          anchor_planet_id INTEGER REFERENCES planets(id) ON DELETE SET NULL,
+          name TEXT NOT NULL,
+          x_pct REAL NOT NULL,
+          y_pct REAL NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS player_base_research (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          research_code TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'researching',
+          cost INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT NOT NULL,
+          complete_at TEXT NOT NULL,
+          completed_at TEXT,
+          UNIQUE(player_id, research_code)
+        );
+
+        CREATE TABLE IF NOT EXISTS player_base_buildings (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          base_id INTEGER NOT NULL REFERENCES player_bases(id) ON DELETE CASCADE,
+          building_code TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'building',
+          level INTEGER NOT NULL DEFAULT 1,
+          cost INTEGER NOT NULL DEFAULT 0,
+          started_at TEXT NOT NULL,
+          complete_at TEXT NOT NULL,
+          completed_at TEXT,
+          last_collected_at TEXT NOT NULL,
+          UNIQUE(player_id, building_code)
+        );
+
         CREATE TABLE IF NOT EXISTS planet_establishments (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           planet_id INTEGER NOT NULL REFERENCES planets(id),
@@ -3054,6 +3483,7 @@ NPC_CAREER_PROFILES: Dict[str, Dict[str, Any]] = {
     "explorer": {"roles":["explorer","scout"], "ship":"Survey Scout", "friendly":55, "aggression":22, "market_bias":"science", "actions":["discover_route","scan_anomaly"]},
     "engineer": {"roles":["engineer"], "ship":"Repair Cutter", "friendly":64, "aggression":10, "market_bias":"industrial", "actions":["repair_contract","parts_delivery"]},
     "security_pilot": {"roles":["patrol","security"], "ship":"Patrol Fighter", "friendly":48, "aggression":58, "market_bias":"law", "actions":["patrol","escort_convoy"]},
+    "faction_patrol": {"roles":["faction_patrol"], "ship":"Faction Patrol Frigate", "friendly":30, "aggression":88, "market_bias":"law", "actions":["faction_patrol","interdict_foreign_faction"]},
     "marshal": {"roles":["customs","marshal"], "ship":"Authority Cutter", "friendly":38, "aggression":44, "market_bias":"law", "actions":["customs_scan","seize_contraband"]},
     "dockmaster": {"roles":["dockmaster"], "ship":"Port Authority Tender", "friendly":58, "aggression":12, "market_bias":"legal", "actions":["dock_inspection","collect_fees"]},
     "shipwright": {"roles":["shipwright"], "ship":"Yard Tug", "friendly":60, "aggression":8, "market_bias":"industrial", "actions":["module_output","ship_parts_output"]},
@@ -3127,6 +3557,8 @@ def ensure_persistent_npc_content(conn: sqlite3.Connection) -> None:
         career = legacy_career_map.get(old.get("role"), "trader")
         profile = NPC_CAREER_PROFILES.get(career, NPC_CAREER_PROFILES["trader"])
         conn.execute("UPDATE npc_agents SET career_code=?, level=COALESCE(NULLIF(level,0),1), xp=COALESCE(xp,0), credits=COALESCE(credits,0), ship_class=?, activity_rate=CASE WHEN activity_rate IS NULL OR activity_rate=0 THEN 50 ELSE activity_rate END, aggression=CASE WHEN aggression IS NULL OR aggression=0 THEN ? ELSE aggression END, friendliness=CASE WHEN friendliness IS NULL OR friendliness=0 THEN ? ELSE friendliness END, job_rank=CASE WHEN job_rank IS NULL OR job_rank=0 THEN 1 ELSE job_rank END, market_bias=? WHERE id=?", (career, profile["ship"], profile["aggression"], profile["friendly"], profile["market_bias"], old["id"]))
+    if bool(WORLD_SERVER_BALANCE.get("server_controls_npcs", True)):
+        return
     for p in planets:
         existing = scalar(conn, "SELECT COUNT(*) FROM npc_agents WHERE planet_id=? AND COALESCE(alive,1)=1", (p["id"],)) if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='npc_agents'") else 0
         target = target_npc_count_for_planet(p)
@@ -3135,7 +3567,9 @@ def ensure_persistent_npc_content(conn: sqlite3.Connection) -> None:
             career = weighted_npc_career_choice(rng, p)
             profile = NPC_CAREER_PROFILES[career]
             role = rng.choice(profile["roles"])
-            level = clamp_int(int(rng.triangular(1, 55, 8 + int(p.get("npc_activity") or 50) / 8)), 1, 80)
+            level_min, level_max = world_level_range_for_planet(conn, int(p["id"]))
+            mode_level = min(level_max, max(level_min, level_min + int((level_max - level_min) * 0.35)))
+            level = clamp_int(int(rng.triangular(level_min, level_max, mode_level)), level_min, level_max)
             rank = clamp_int(1 + level // 9, 1, 10)
             power_base = int((p.get("security_level", 50) + p.get("market_activity", 50) + p.get("defense_strength", 50)) / 3)
             # NPCs have similar opportunities, but worse rolls than equal player specialists.
@@ -3170,6 +3604,39 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
           output_json TEXT NOT NULL DEFAULT '{}',
           message TEXT NOT NULL DEFAULT ''
         )
+    """)
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS planet_mission_progress (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          mission_key TEXT NOT NULL,
+          xp INTEGER NOT NULL DEFAULT 0,
+          level INTEGER NOT NULL DEFAULT 1,
+          completed_count INTEGER NOT NULL DEFAULT 0,
+          total_rewards INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          UNIQUE(player_id, planet_id, mission_key)
+        );
+
+        CREATE TABLE IF NOT EXISTS planet_mission_runs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          mission_key TEXT NOT NULL,
+          mission_name TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'active',
+          level INTEGER NOT NULL DEFAULT 1,
+          reward_credits INTEGER NOT NULL DEFAULT 0,
+          reward_xp INTEGER NOT NULL DEFAULT 0,
+          reward_items_json TEXT NOT NULL DEFAULT '[]',
+          started_at TEXT NOT NULL,
+          completes_at TEXT NOT NULL,
+          completed_at TEXT,
+          event_log_json TEXT NOT NULL DEFAULT '[]',
+          message TEXT NOT NULL DEFAULT ''
+        );
     """)
 
 
@@ -3309,6 +3776,31 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
           action_state TEXT NOT NULL DEFAULT 'moving',
           cargo_json TEXT NOT NULL DEFAULT '{}',
           updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS player_storage_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          galaxy_id INTEGER NOT NULL REFERENCES galaxies(id) ON DELETE CASCADE,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          item_code TEXT NOT NULL,
+          item_name TEXT NOT NULL,
+          item_type TEXT NOT NULL,
+          category TEXT NOT NULL,
+          qty INTEGER NOT NULL,
+          legal INTEGER NOT NULL DEFAULT 1,
+          base_value INTEGER NOT NULL DEFAULT 0,
+          mass REAL NOT NULL DEFAULT 1,
+          description TEXT NOT NULL DEFAULT '',
+          rarity TEXT NOT NULL DEFAULT 'common',
+          tier INTEGER NOT NULL DEFAULT 1,
+          max_tier INTEGER NOT NULL DEFAULT 3,
+          tier_source TEXT NOT NULL DEFAULT 'storage',
+          source_ref TEXT NOT NULL DEFAULT '',
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(player_id, planet_id, item_code, item_type, category, rarity, tier)
         );
     """)
 
@@ -3662,14 +4154,20 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
-    add_cols("players", {"cargo_operation_until":"TEXT", "cargo_operation_started_at":"TEXT", "cargo_operation_type":"TEXT", "cargo_operation_summary":"TEXT", "faction_id":"INTEGER"})
+    add_cols("players", {"cargo_operation_until":"TEXT", "cargo_operation_started_at":"TEXT", "cargo_operation_type":"TEXT", "cargo_operation_summary":"TEXT", "faction_id":"INTEGER", "planet_mission_cooldown_until":"TEXT", "planet_mission_cooldown_reason":"TEXT", "player_base_docked_id":"INTEGER"})
+    add_cols("planet_mission_runs", {"reward_items_json":"TEXT NOT NULL DEFAULT '[]'"})
     add_cols("guilds", {"level":"INTEGER NOT NULL DEFAULT 1", "xp":"INTEGER NOT NULL DEFAULT 0", "skill_points":"INTEGER NOT NULL DEFAULT 0", "last_planet_xp_at":"TEXT"})
     add_cols("user_profiles", {"selected_badge_code":"TEXT NOT NULL DEFAULT ''"})
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_map_objects_scope ON map_objects(map_type, galaxy_id, planet_id, kind, state);
         CREATE INDEX IF NOT EXISTS idx_map_objects_key ON map_objects(object_key);
+        CREATE INDEX IF NOT EXISTS idx_player_bases_player ON player_bases(player_id);
+        CREATE INDEX IF NOT EXISTS idx_player_bases_galaxy ON player_bases(galaxy_id, x_pct, y_pct);
+        CREATE INDEX IF NOT EXISTS idx_player_base_research_player ON player_base_research(player_id, status);
+        CREATE INDEX IF NOT EXISTS idx_player_base_buildings_player ON player_base_buildings(player_id, status);
         CREATE INDEX IF NOT EXISTS idx_player_map_ops_active ON player_map_operations(player_id, status);
         CREATE INDEX IF NOT EXISTS idx_npc_map_state_scope ON npc_map_state(map_type, galaxy_id, planet_id, action_state);
+        CREATE INDEX IF NOT EXISTS idx_player_storage_scope ON player_storage_items(player_id, galaxy_id, planet_id, item_code);
     """)
     add_cols("galaxies", {"x_pct":"REAL NOT NULL DEFAULT 50", "y_pct":"REAL NOT NULL DEFAULT 50", "faction_id":"INTEGER", "home_depth":"INTEGER NOT NULL DEFAULT 99", "capturable":"INTEGER NOT NULL DEFAULT 1", "center_value":"INTEGER NOT NULL DEFAULT 1", "control_bonus_pct":"INTEGER NOT NULL DEFAULT 3", "war_cooldown_until":"TEXT"})
     add_cols("planets", {"faction_id":"INTEGER", "war_cooldown_until":"TEXT"})
@@ -3682,7 +4180,10 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
     add_cols("ship_modules", {"current_tier":"INTEGER NOT NULL DEFAULT 1", "max_tier":"INTEGER NOT NULL DEFAULT 5", "tier_source":"TEXT NOT NULL DEFAULT 'purchased'", "equipped_slot_id":"TEXT"})
     add_cols("ship_parts", {"tier":"INTEGER NOT NULL DEFAULT 1"})
     add_cols("crafting_recipes", {"recipe_tier":"INTEGER NOT NULL DEFAULT 1", "output_tier":"INTEGER NOT NULL DEFAULT 1", "required_material_tiers_json":"TEXT NOT NULL DEFAULT '{}'", "recipe_rank_key":"TEXT NOT NULL DEFAULT 'basic'", "recipe_rank_name":"TEXT NOT NULL DEFAULT 'Basic'", "base_recipe_code":"TEXT NOT NULL DEFAULT ''", "unlock_model":"TEXT NOT NULL DEFAULT 'unlimited'", "recipe_family":"TEXT NOT NULL DEFAULT ''", "set_code":"TEXT NOT NULL DEFAULT ''", "set_name":"TEXT NOT NULL DEFAULT ''"})
-    add_cols("player_market_listings", {"tier":"INTEGER NOT NULL DEFAULT 1", "max_tier":"INTEGER NOT NULL DEFAULT 3", "tier_source":"TEXT NOT NULL DEFAULT 'listed'"})
+    add_cols("player_market_listings", {"tier":"INTEGER NOT NULL DEFAULT 1", "max_tier":"INTEGER NOT NULL DEFAULT 3", "tier_source":"TEXT NOT NULL DEFAULT 'listed'", "galaxy_id":"INTEGER"})
+    add_cols("player_storage_items", {"tier":"INTEGER NOT NULL DEFAULT 1", "max_tier":"INTEGER NOT NULL DEFAULT 3", "tier_source":"TEXT NOT NULL DEFAULT 'storage'", "source_ref":"TEXT NOT NULL DEFAULT ''", "metadata_json":"TEXT NOT NULL DEFAULT '{}'"})
+    conn.execute("UPDATE player_market_listings SET galaxy_id=(SELECT galaxy_id FROM planets WHERE planets.id=player_market_listings.planet_id) WHERE galaxy_id IS NULL OR galaxy_id=0")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_player_market_galaxy ON player_market_listings(galaxy_id, status, remaining_qty)")
     add_cols("skill_nodes", {
         "description": "TEXT NOT NULL DEFAULT ''",
         "summary": "TEXT NOT NULL DEFAULT ''",
@@ -3988,6 +4489,8 @@ ACTION_RANGE_SECONDS = 1.0
 ACTION_RANGE_VISUAL_EPSILON_PCT = 1.35
 ACTION_RANGE_MIN_PCT = 1.85
 ACTION_RANGE_MAX_PCT = 3.25
+MAP_STATIONARY_ICON_RADIUS_PCT = 1.35
+MAP_STATIONARY_MIN_GAP_SPACES = 1.0
 MAP_TRAVEL_SECONDS_PER_PCT = 5.8
 MAP_TRAVEL_MIN_SECONDS = 2
 
@@ -4054,6 +4557,8 @@ def current_player_map_position(conn: sqlite3.Connection, player: Dict[str, Any]
             return deterministic_between(origin, dest, float(travel.get("progress") or 0))
     if travel.get("open_space") and (not travel.get("open_space_map_type") or str(travel.get("open_space_map_type")).lower() == map_type):
         return {"x_pct": float(travel.get("open_space_x_pct") or 50), "y_pct": float(travel.get("open_space_y_pct") or 50)}
+    if map_type == "system" and travel.get("dock_base_id"):
+        return {"x_pct": float(travel.get("dock_base_x_pct") or 50), "y_pct": float(travel.get("dock_base_y_pct") or 50)}
     return map_point_for_player_anchor(conn, player, map_type)
 
 
@@ -4655,6 +5160,17 @@ def resolve_completed_travel(conn: sqlite3.Connection, player: Dict[str, Any]) -
     )
     add_event(conn, player["id"], "travel", msg, {"mode": mode, "destination_planet_id": dest["id"], "destination_galaxy_id": dest.get("galaxy_id")})
     conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (dest["id"], "travel", "Traffic Control", msg, encode_json({"severity":"info","location_id":dest["id"]}), iso()))
+    if mode == "planet_mission":
+        intent = get_planet_mission_travel_intent(conn, player["id"])
+        clear_planet_mission_travel_intent(conn, player["id"])
+        mission_key = str(intent.get("mission_key") or "")
+        if mission_key:
+            fresh_player = get_player(conn, player["id"])
+            try:
+                start_planet_mission_run(conn, fresh_player, dest, mission_key, bool(intent.get("god")))
+                add_event(conn, player["id"], "planet_mission", f"Landed at {dest['name']} and started mission {mission_key}.", {"planetId": dest["id"], "missionKey": mission_key})
+            except HTTPException as ex:
+                add_event(conn, player["id"], "planet_mission", f"Mission auto-start failed after landing at {dest['name']}: {ex.detail}", {"planetId": dest["id"], "missionKey": mission_key})
     return get_player(conn, player["id"])
 
 
@@ -4672,6 +5188,7 @@ def build_travel_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict
     waypoint_meta = get_player_waypoint(conn, player["id"]) if (player.get("travel_mode") == "waypoint") else {}
     route_meta = get_player_route(conn, player["id"]) if active and player.get("travel_mode") in {"local", "galaxy", "dock", "galaxy_route"} else {}
     open_space_meta = get_player_open_space(conn, player["id"]) if not active else {}
+    docked_base_row = docked_base(conn, player) if not active else None
     travel_meta = intercept_meta or waypoint_meta or route_meta
     in_open_space = bool(open_space_meta.get("active")) and not active
     dest_x = travel_meta.get("destination_x_pct") if travel_meta.get("destination_x_pct") is not None else travel_meta.get("x_pct")
@@ -4680,11 +5197,16 @@ def build_travel_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict
     return {
         "active": active,
         "docked": (not active and not in_open_space),
+        "docked_base_id": int(docked_base_row.get("id")) if docked_base_row else None,
+        "docked_base_name": docked_base_row.get("name") if docked_base_row else None,
         "open_space": in_open_space,
         "open_space_x_pct": open_space_meta.get("x_pct") if in_open_space else None,
         "open_space_y_pct": open_space_meta.get("y_pct") if in_open_space else None,
         "open_space_map_type": open_space_meta.get("map_type") if in_open_space else None,
-        "dock_planet_id": player.get("location_planet_id") if (not active and not in_open_space) else None,
+        "dock_planet_id": player.get("location_planet_id") if (not active and not in_open_space and not docked_base_row) else None,
+        "dock_base_id": int(docked_base_row.get("id")) if docked_base_row else None,
+        "dock_base_x_pct": float(docked_base_row.get("x_pct") or 50) if docked_base_row else None,
+        "dock_base_y_pct": float(docked_base_row.get("y_pct") or 50) if docked_base_row else None,
         "map_type": travel_meta.get("map_type") if travel_meta else (open_space_meta.get("map_type") if in_open_space else None),
         "mode": player.get("travel_mode") or None,
         "intercept_target_ref": intercept_meta.get("target_ref"),
@@ -4721,12 +5243,20 @@ def build_travel_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict
 
 
 def planet_visual_payload(planet: Dict[str, Any]) -> str:
+    typ = str(planet.get("type") or "").lower()
     economy = str(planet.get("economy_type") or planet_economy_type(planet)).lower()
-    color = {"industrial":"ffc247", "extraction":"4dff91", "trade":"35f2ff", "black_market":"ff4d9d", "research":"a65cff", "core":"8cffff", "balanced":"35f2ff"}.get(economy, "35f2ff")
     initials = "".join([x[:1] for x in str(planet.get("name") or "PL").split()[:2]]).upper() or "PL"
+    if "station" in typ or "freeport" in typ or "gate" in typ:
+        color = {"trade":"35f2ff", "industrial":"ffc247", "research":"a65cff", "black_market":"ff4d9d"}.get(economy, "8cffff")
+        svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect width='96' height='96' rx='18' fill='#02060b'/><g fill='none' stroke='#{color}' stroke-width='4'><path d='M22 48h52M48 22v52'/><circle cx='48' cy='48' r='23'/><path d='M14 48h14M68 48h14M48 14v14M48 68v14'/></g><rect x='36' y='36' width='24' height='24' rx='5' fill='#{color}' fill-opacity='.25' stroke='#{color}'/><text x='48' y='55' text-anchor='middle' font-family='Segoe UI,Arial' font-size='14' font-weight='900' fill='#{color}'>{initials[:2]}</text></svg>"""
+        return "data:image/svg+xml;utf8," + quote(svg)
+    if any(k in typ for k in ("uninhab", "barren", "toxic", "frozen", "volcanic", "irradiated", "gas giant", "desert tomb")):
+        color = {"toxic":"8cff76", "frozen":"9ee8ff", "volcanic":"ff754d", "irradiated":"d6ff58", "gas":"d5a6ff", "barren":"b8a88d"}.get(next((k for k in ["toxic","frozen","volcanic","irradiated","gas","barren"] if k in typ), "barren"), "b8a88d")
+        svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><radialGradient id='u' cx='32%' cy='28%' r='70%'><stop offset='0%' stop-color='#{color}' stop-opacity='.8'/><stop offset='62%' stop-color='#172028'/><stop offset='100%' stop-color='#02060b'/></radialGradient></defs><rect width='96' height='96' rx='18' fill='#02060b'/><circle cx='48' cy='48' r='31' fill='url(#u)' stroke='#{color}' stroke-width='2'/><path d='M25 40l9 5 11-12 12 15 13-7' stroke='#{color}' stroke-opacity='.48' stroke-width='4' fill='none'/><circle cx='35' cy='58' r='4' fill='#{color}' fill-opacity='.55'/><circle cx='60' cy='31' r='3' fill='#{color}' fill-opacity='.45'/><text x='48' y='75' text-anchor='middle' font-family='Segoe UI,Arial' font-size='10' font-weight='900' fill='#{color}'>WILD</text></svg>"""
+        return "data:image/svg+xml;utf8," + quote(svg)
+    color = {"industrial":"ffc247", "extraction":"4dff91", "trade":"35f2ff", "black_market":"ff4d9d", "research":"a65cff", "core":"8cffff", "balanced":"35f2ff"}.get(economy, "35f2ff")
     svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><radialGradient id='p' cx='35%' cy='30%' r='70%'><stop offset='0%' stop-color='#{color}' stop-opacity='.85'/><stop offset='56%' stop-color='#102736'/><stop offset='100%' stop-color='#02060b'/></radialGradient></defs><rect width='96' height='96' rx='18' fill='#02060b'/><circle cx='48' cy='48' r='31' fill='url(#p)' stroke='#{color}' stroke-width='2'/><path d='M20 58 C35 50 58 74 78 42' stroke='#{color}' stroke-opacity='.45' stroke-width='4' fill='none'/><text x='48' y='55' text-anchor='middle' font-family='Segoe UI,Arial' font-size='20' font-weight='900' fill='#{color}'>{initials[:2]}</text></svg>"""
     return "data:image/svg+xml;utf8," + quote(svg)
-
 
 def galaxy_visual_payload(galaxy: Dict[str, Any]) -> str:
     color = {"green":"4dff91","purple":"a65cff","orange":"ffae35","blue":"35f2ff"}.get(str(galaxy.get("color") or "blue"), "35f2ff")
@@ -4746,6 +5276,232 @@ def deterministic_between(a: Dict[str, Any], b: Dict[str, Any], progress: float)
 
 def pct_distance(a: Dict[str, Any], b: Dict[str, Any]) -> float:
     return ((float(a.get("x_pct") or 50) - float(b.get("x_pct") or 50)) ** 2 + (float(a.get("y_pct") or 50) - float(b.get("y_pct") or 50)) ** 2) ** 0.5
+
+
+def is_uninhabitable_planet_type(value: str) -> bool:
+    typ = str(value or "").lower()
+    return any(k in typ for k in ("uninhab", "barren", "toxic", "frozen", "volcanic", "irradiated", "gas giant", "desert tomb"))
+
+
+def map_stationary_collision_radius(obj: Dict[str, Any]) -> float:
+    kind = str(obj.get("kind") or "").lower()
+    if kind in {"war_zone"}:
+        return max(MAP_STATIONARY_ICON_RADIUS_PCT, float(obj.get("radius_pct") or 0))
+    if kind in {"planet", "node", "station", "gate", "pirate_station", "player_base"}:
+        return MAP_STATIONARY_ICON_RADIUS_PCT * 1.15
+    return MAP_STATIONARY_ICON_RADIUS_PCT
+
+
+def separate_stationary_map_objects(groups: List[List[Dict[str, Any]]], iterations: int = 40) -> None:
+    """Move stationary display points just enough that icons touch instead of covering each other."""
+    items: List[Dict[str, Any]] = []
+    for group in groups:
+        for obj in group or []:
+            if not obj:
+                continue
+            if obj.get("moving") or obj.get("active") is True and str(obj.get("kind") or "") in {"npc", "player", "ship"}:
+                continue
+            if obj.get("x_pct") is None or obj.get("y_pct") is None:
+                continue
+            obj["_display_original_x_pct"] = float(obj.get("x_pct") or 50)
+            obj["_display_original_y_pct"] = float(obj.get("y_pct") or 50)
+            items.append(obj)
+    if len(items) < 2:
+        return
+    min_gap = float(MAP_STATIONARY_MIN_GAP_SPACES or 1.0)
+    for _ in range(max(1, int(iterations))):
+        moved = False
+        for i in range(len(items)):
+            a = items[i]
+            ar = map_stationary_collision_radius(a)
+            ax = float(a.get("x_pct") or 50)
+            ay = float(a.get("y_pct") or 50)
+            for j in range(i + 1, len(items)):
+                b = items[j]
+                br = map_stationary_collision_radius(b)
+                bx = float(b.get("x_pct") or 50)
+                by = float(b.get("y_pct") or 50)
+                dx = bx - ax
+                dy = by - ay
+                dist = math.sqrt(dx * dx + dy * dy)
+                target = (ar + br) * min_gap
+                if dist >= target:
+                    continue
+                if dist <= 0.0001:
+                    seed = hash(str(a.get("id") or a.get("objectKey") or a.get("name")) + str(b.get("id") or b.get("objectKey") or b.get("name")))
+                    angle = (seed % 360) * math.pi / 180.0
+                    dx = math.cos(angle) * 0.01
+                    dy = math.sin(angle) * 0.01
+                    dist = math.sqrt(dx * dx + dy * dy)
+                push = (target - dist) / 2.0
+                ux = dx / dist
+                uy = dy / dist
+                ax2 = clamp_pct(ax - ux * push, 2, 98)
+                ay2 = clamp_pct(ay - uy * push, 2, 98)
+                bx2 = clamp_pct(bx + ux * push, 2, 98)
+                by2 = clamp_pct(by + uy * push, 2, 98)
+                a["x_pct"], a["y_pct"] = round(ax2, 3), round(ay2, 3)
+                b["x_pct"], b["y_pct"] = round(bx2, 3), round(by2, 3)
+                ax, ay = ax2, ay2
+                moved = True
+        if not moved:
+            break
+
+
+def choose_spaced_resource_point(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random, min_spaces: float = 1.0) -> Dict[str, float]:
+    min_dist = (MAP_STATIONARY_ICON_RADIUS_PCT * 2.0) * max(1.0, float(min_spaces or 1.0))
+    blockers: List[Dict[str, float]] = []
+    for p in rows(conn, "SELECT id FROM planets WHERE galaxy_id=?", (int(galaxy_id),)):
+        blockers.append(system_planet_map_point(conn, int(p["id"])))
+    for obj in rows(conn, "SELECT x_pct,y_pct FROM map_objects WHERE galaxy_id=? AND state NOT IN ('depleted','expired','deleted') AND COALESCE(qty_remaining,1)>0", (int(galaxy_id),)):
+        blockers.append({"x_pct": float(obj.get("x_pct") or 50), "y_pct": float(obj.get("y_pct") or 50)})
+    for st in rows(conn, "SELECT x_pct,y_pct FROM pirate_stations WHERE galaxy_id=? AND status IN ('active','occupied')", (int(galaxy_id),)):
+        blockers.append({"x_pct": float(st.get("x_pct") or 50), "y_pct": float(st.get("y_pct") or 50)})
+    for base in rows(conn, "SELECT x_pct,y_pct FROM player_bases WHERE galaxy_id=? AND status='active'", (int(galaxy_id),)):
+        blockers.append({"x_pct": float(base.get("x_pct") or 50), "y_pct": float(base.get("y_pct") or 50)})
+    best = {"x_pct": rng.uniform(7, 93), "y_pct": rng.uniform(7, 93)}
+    best_score = -1.0
+    for _ in range(90):
+        cand = {"x_pct": clamp_pct(rng.uniform(7, 93), 3, 97), "y_pct": clamp_pct(rng.uniform(7, 93), 3, 97)}
+        score = min([pct_distance(cand, b) for b in blockers] or [99.0])
+        if score >= min_dist:
+            return cand
+        if score > best_score:
+            best_score = score
+            best = cand
+    return best
+
+
+def player_base_visual_payload(base: Dict[str, Any], own: bool = False) -> str:
+    color = "7dffce" if own else "7f8fa3"
+    initials = "".join([x[:1] for x in str(base.get("name") or "BASE").split()[:2]]).upper() or "B"
+    svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'>
+<defs><radialGradient id='g' cx='50%' cy='45%' r='58%'><stop offset='0%' stop-color='#{color}' stop-opacity='.92'/><stop offset='58%' stop-color='#0b1a24'/><stop offset='100%' stop-color='#02060b'/></radialGradient></defs>
+<rect width='120' height='120' rx='20' fill='#02060b'/><circle cx='60' cy='60' r='42' fill='url(#g)' stroke='#{color}' stroke-width='3'/>
+<path d='M33 74 L60 26 L87 74 Z' fill='none' stroke='#{color}' stroke-width='5' stroke-linejoin='round'/><path d='M42 70h36M51 54h18' stroke='#{color}' stroke-width='4'/>
+<circle cx='60' cy='60' r='10' fill='#02060b' stroke='#{color}' stroke-width='3'/><text x='60' y='103' text-anchor='middle' font-family='Segoe UI,Arial' font-size='14' font-weight='900' fill='#{color}'>{initials[:3]}</text>
+</svg>"""
+    return "data:image/svg+xml;utf8," + quote(svg)
+
+
+def system_map_points_for_galaxy(conn: sqlite3.Connection, galaxy_id: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for p in rows(conn, "SELECT id,name,x,y,type FROM planets WHERE galaxy_id=?", (int(galaxy_id),)):
+        out.append({"kind": "planet", "id": p["id"], "name": p.get("name"), "x_pct": clamp_pct((50 + float(p.get("x") or 0) / 2.3 - 50) * 1.45 + 50, 2, 98), "y_pct": clamp_pct((50 + float(p.get("y") or 0) / 2.3 - 50) * 1.45 + 50, 2, 98), "radius_spaces": 1.0})
+    for o in rows(conn, "SELECT id,object_key,kind,name,x_pct,y_pct FROM map_objects WHERE galaxy_id=? AND state NOT IN ('depleted','expired','deleted')", (int(galaxy_id),)):
+        out.append({"kind": o.get("kind"), "id": o.get("object_key") or o.get("id"), "name": o.get("name"), "x_pct": float(o.get("x_pct") or 50), "y_pct": float(o.get("y_pct") or 50), "radius_spaces": 1.0})
+    for b in rows(conn, "SELECT id,name,x_pct,y_pct FROM player_bases WHERE galaxy_id=? AND status='active'", (int(galaxy_id),)):
+        out.append({"kind": "player_base", "id": b["id"], "name": b.get("name"), "x_pct": float(b.get("x_pct") or 50), "y_pct": float(b.get("y_pct") or 50), "radius_spaces": 1.0})
+    for s in rows(conn, "SELECT id,name,x_pct,y_pct FROM pirate_stations WHERE galaxy_id=? AND status IN ('active','occupied')", (int(galaxy_id),)):
+        out.append({"kind": "pirate_station", "id": s["id"], "name": s.get("name"), "x_pct": float(s.get("x_pct") or 50), "y_pct": float(s.get("y_pct") or 50), "radius_spaces": 1.0})
+    return out
+
+
+def map_point_is_clear(conn: sqlite3.Connection, galaxy_id: int, x_pct: float, y_pct: float, min_spaces: float = 1.0, ignore_base_id: int = 0) -> Tuple[bool, str, float]:
+    point = {"x_pct": float(x_pct), "y_pct": float(y_pct)}
+    min_distance = float(BASE_ICON_SPACE_RADIUS_PCT) * float(min_spaces or 1.0)
+    nearest_name = ""
+    nearest_distance = 999.0
+    for obj in system_map_points_for_galaxy(conn, int(galaxy_id)):
+        if ignore_base_id and obj.get("kind") == "player_base" and int(obj.get("id") or 0) == int(ignore_base_id):
+            continue
+        d = pct_distance(point, obj)
+        if d < nearest_distance:
+            nearest_distance = d
+            nearest_name = str(obj.get("name") or obj.get("kind") or "object")
+        if d < min_distance:
+            return False, nearest_name, round(d, 2)
+    return True, nearest_name, round(nearest_distance, 2)
+
+
+def find_clear_map_point(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random, min_spaces: float = 1.0, preferred: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    candidates = []
+    if preferred:
+        candidates.append({"x_pct": float(preferred.get("x_pct") or 50), "y_pct": float(preferred.get("y_pct") or 50)})
+    for _ in range(120):
+        candidates.append({"x_pct": clamp_pct(rng.uniform(6, 94), 4, 96), "y_pct": clamp_pct(rng.uniform(6, 94), 4, 96)})
+    best = candidates[0]
+    best_d = -1.0
+    for c in candidates:
+        ok, _, d = map_point_is_clear(conn, galaxy_id, c["x_pct"], c["y_pct"], min_spaces=min_spaces)
+        if ok:
+            return c
+        if d > best_d:
+            best, best_d = c, d
+    return best
+
+
+def resolve_completed_base_jobs(conn: sqlite3.Connection, player_id: int) -> None:
+    now = utcnow()
+    for r in rows(conn, "SELECT * FROM player_base_research WHERE player_id=? AND status='researching' AND complete_at<=?", (int(player_id), iso(now))):
+        conn.execute("UPDATE player_base_research SET status='complete', completed_at=? WHERE id=?", (iso(now), r["id"]))
+        cfg = BASE_RESEARCH_BY_CODE.get(r.get("research_code"), {})
+        add_event(conn, player_id, "base_research", f"Research complete: {cfg.get('name') or label_for_api(r.get('research_code'))}.", {"researchCode": r.get("research_code")})
+    for b in rows(conn, "SELECT * FROM player_base_buildings WHERE player_id=? AND status='building' AND complete_at<=?", (int(player_id), iso(now))):
+        conn.execute("UPDATE player_base_buildings SET status='complete', completed_at=?, last_collected_at=? WHERE id=?", (iso(now), iso(now), b["id"]))
+        cfg = BASE_BUILDING_BY_CODE.get(b.get("building_code"), {})
+        add_event(conn, player_id, "base_building", f"Base building complete: {cfg.get('name') or label_for_api(b.get('building_code'))}.", {"buildingCode": b.get("building_code")})
+
+
+def base_research_state(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    resolve_completed_base_jobs(conn, player_id)
+    owned = {r["research_code"]: r for r in rows(conn, "SELECT * FROM player_base_research WHERE player_id=?", (int(player_id),))}
+    active = next((r for r in owned.values() if r.get("status") == "researching"), None)
+    projects = []
+    now = utcnow()
+    for raw_cfg in BASE_RESEARCH_DEFS:
+        cfg = balanced_base_research_cfg(raw_cfg)
+        rec = owned.get(cfg["code"])
+        status = rec.get("status") if rec else "available"
+        remaining = max(0, int(((parse_dt(rec.get("complete_at")) or now) - now).total_seconds())) if rec and status == "researching" else 0
+        projects.append({**cfg, "status": status, "started_at": rec.get("started_at") if rec else None, "complete_at": rec.get("complete_at") if rec else None, "remaining_seconds": remaining, "can_start": not rec and not active})
+    return {"active": active, "projects": projects, "completed_count": len([r for r in owned.values() if r.get("status") == "complete"]), "total_count": len(BASE_RESEARCH_DEFS)}
+
+
+def build_player_bases_for_map(conn: sqlite3.Connection, player: Dict[str, Any], galaxy_id: int) -> List[Dict[str, Any]]:
+    out = []
+    for b in rows(conn, "SELECT pb.*, p.name as anchor_planet_name, u.username FROM player_bases pb JOIN players pl ON pl.id=pb.player_id JOIN users u ON u.id=pl.user_id LEFT JOIN planets p ON p.id=pb.anchor_planet_id WHERE pb.galaxy_id=? AND pb.status='active'", (int(galaxy_id),)):
+        own = int(b.get("player_id") or 0) == int(player.get("id") or 0)
+        out.append({
+            "id": f"base:{b['id']}", "baseId": int(b["id"]), "kind": "player_base", "name": b.get("name"), "ownerName": b.get("username"), "ownBase": own,
+            "x_pct": float(b.get("x_pct") or 50), "y_pct": float(b.get("y_pct") or 50), "anchorPlanetName": b.get("anchor_planet_name"),
+            "attackable": False, "canDock": own, "selectedSummary": "Your base. Docking allowed." if own else "Player base. Private docking only; cannot attack or dock.",
+            "label": "Private player base", "image_url": player_base_visual_payload(b, own),
+        })
+    return out
+
+
+def base_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    pid = int(player["id"])
+    resolve_completed_base_jobs(conn, pid)
+    base = row(conn, "SELECT pb.*, g.name as galaxy_name, p.name as anchor_planet_name FROM player_bases pb JOIN galaxies g ON g.id=pb.galaxy_id LEFT JOIN planets p ON p.id=pb.anchor_planet_id WHERE pb.player_id=? AND pb.status='active'", (pid,))
+    research = base_research_state(conn, pid)
+    buildings = []
+    now = utcnow()
+    rows_by_code = {r["building_code"]: r for r in rows(conn, "SELECT * FROM player_base_buildings WHERE player_id=?", (pid,))}
+    for raw_cfg in BASE_BUILDING_DEFS:
+        cfg = balanced_base_building_cfg(raw_cfg)
+        rec = rows_by_code.get(cfg["code"])
+        researched = bool(row(conn, "SELECT id FROM player_base_research WHERE player_id=? AND research_code=? AND status='complete'", (pid, cfg["requires_research"])))
+        status = rec.get("status") if rec else "locked" if not researched else "available"
+        remaining = max(0, int(((parse_dt(rec.get("complete_at")) or now) - now).total_seconds())) if rec and status == "building" else 0
+        buildings.append({**cfg, "status": status, "remaining_seconds": remaining, "can_build": bool(base) and status == "available", "researched": researched})
+    complete_buildings = [b for b in rows_by_code.values() if b.get("status") == "complete"]
+    return {
+        "base": base,
+        "research": research,
+        "buildings": buildings,
+        "owned_buildings": list(rows_by_code.values()),
+        "placement": {"cost": balanced_base_placement_cost(), "clearance_spaces": BASE_BUILD_CLEARANCE_SPACES, "icon_space_pct": BASE_ICON_SPACE_RADIUS_PCT, "one_base_only": True},
+        "summary": {"complete_buildings": len(complete_buildings), "total_buildings": len(BASE_BUILDING_DEFS), "research_complete": research.get("completed_count", 0), "research_total": research.get("total_count", 0)},
+    }
+
+
+def docked_base(conn: sqlite3.Connection, player: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    bid = int(player.get("player_base_docked_id") or 0)
+    if not bid:
+        return None
+    return row(conn, "SELECT * FROM player_bases WHERE id=? AND player_id=? AND status='active'", (bid, int(player["id"])))
 
 
 def ship_radar_range_pct(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]], map_type: str = "system") -> float:
@@ -4805,6 +5561,8 @@ def player_map_center(conn: sqlite3.Connection, player: Dict[str, Any], map_type
             return deterministic_between(o, d, float(travel.get("progress") or 0))
     if travel.get("open_space") and (not travel.get("open_space_map_type") or travel.get("open_space_map_type") == map_type):
         return {"x_pct": float(travel.get("open_space_x_pct") or 50), "y_pct": float(travel.get("open_space_y_pct") or 50)}
+    if map_type == "system" and travel.get("dock_base_id"):
+        return {"x_pct": float(travel.get("dock_base_x_pct") or 50), "y_pct": float(travel.get("dock_base_y_pct") or 50)}
     current_key = None
     if map_type == "galaxy":
         current_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (player.get("location_planet_id"),))
@@ -4989,13 +5747,30 @@ def npc_choose_objective_and_route(
         t for t in traffic_so_far
         if t.get("id") != "player:self" and pct_distance(npc_point, t) <= radar_range
     ]
+    role_l = str(npc.get("role") or npc.get("career_code") or "").lower()
+    career_l = str(npc.get("career_code") or "").lower()
+    npc_faction_id = int(npc.get("npc_faction_id") or npc.get("faction_id") or 0)
+    is_faction_patrol = role_l == "faction_patrol" or career_l == "faction_patrol"
+    other_faction_ships = [
+        t for t in visible_ships
+        if npc_faction_id
+        and int(t.get("npcFactionId") or t.get("playerFactionId") or 0)
+        and int(t.get("npcFactionId") or t.get("playerFactionId") or 0) != npc_faction_id
+    ]
+    same_faction_patrols = [
+        t for t in visible_ships
+        if int(t.get("npcFactionId") or 0) == npc_faction_id and bool(t.get("isFactionPatrol"))
+    ]
     visible_by_kind = {
         "ore": visible_ore,
         "salvage": visible_salvage,
         "exploration": visible_explore,
         "ship": visible_ships,
     }
-    weights = npc_objective_weights(npc, visible_by_kind, map_type)
+    if is_faction_patrol:
+        weights = {"faction_patrol_intercept": 100} if other_faction_ships else {"faction_patrol_sweep": 100}
+    else:
+        weights = npc_objective_weights(npc, visible_by_kind, map_type)
     objective = weighted_choice_from_dict(route_rng, weights)
 
     target_obj: Optional[Dict[str, Any]] = None
@@ -5011,7 +5786,16 @@ def npc_choose_objective_and_route(
         ordered = sorted(items, key=lambda x: pct_distance(npc_point, x))[:4]
         return route_rng.choice(ordered)
 
-    if objective == "mine":
+    if objective == "faction_patrol_intercept":
+        target_obj = pick_visible(other_faction_ships)
+        objective_label = "Faction patrol intercept"
+        action_state = "engaging other-faction contact on sight" if target_obj else "sweeping for other-faction contacts"
+        target_kind = "ship"
+    elif objective == "faction_patrol_sweep":
+        objective_label = "Faction patrol sweep"
+        action_state = "patrolling own galaxy away from other patrols"
+        target_kind = "ship"
+    elif objective == "mine":
         target_obj = pick_visible(visible_ore)
         objective_label = "Mine ore"
         action_state = "en route to mine visible ore" if target_obj else "searching for ore outside radar"
@@ -5071,6 +5855,17 @@ def npc_choose_objective_and_route(
         candidate_nodes = [n for n in nodes if str(n.get("id") or "").isdigit() and int(n.get("id") or 0) != int(default_origin_id)]
         if objective in {"trade_haul", "smuggle"}:
             candidate_nodes = sorted(candidate_nodes, key=lambda n: int(n.get("market_activity_avg") or n.get("market_activity") or n.get("legal_market_strength") or 50), reverse=True)
+        elif objective == "faction_patrol_sweep":
+            avoid_range = float(WORLD_SERVER_BALANCE.get("patrol_avoid_grouping_range_pct", 18))
+            def patrol_spacing_score(n: Dict[str, Any]) -> float:
+                if not same_faction_patrols:
+                    return route_rng.random() * 12
+                spacing = min([pct_distance(n, p) for p in same_faction_patrols] or [99])
+                score = spacing + route_rng.random() * 8
+                if spacing < avoid_range:
+                    score *= 0.35
+                return score
+            candidate_nodes = sorted(candidate_nodes, key=patrol_spacing_score, reverse=True)
         elif objective in {"pirate_intercept", "bounty_hunt", "patrol_scan"}:
             candidate_nodes = sorted(candidate_nodes, key=lambda n: int(n.get("conflict_avg") or n.get("risk_level") or n.get("pirate_activity") or 30), reverse=True)
         elif objective in {"mine", "salvage", "explore"}:
@@ -5120,7 +5915,8 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
         pt = deterministic_between(o, d, float(tv.get("progress") or 0))
         other_ref = f"player:{other['id']}"
         other_immune = combat_actor_is_immune(conn, other_ref)
-        traffic.append({"id":other_ref, "combatTargetRef":other_ref, "kind":"player", "userId":other.get("user_id"), "playerId":other.get("id"), "profileUserId":other.get("user_id"), "avatarId":other.get("avatar_id"), "selectedBadgeCode":other.get("selected_badge_code"), "name":other.get("display_name") or other.get("username") or "Player", "role":"player", "from":o["id"], "to":d["id"], "progress":round(float(tv.get("progress") or 0)*100,1), **pt, "attackable":not other_immune, "blockedReason":"Battle locked / post-battle immunity" if other_immune else "", "label":"Player in transit. Intercept happens in open space without planetary defense."})
+        other_faction = player_faction(conn, other) or {}
+        traffic.append({"id":other_ref, "combatTargetRef":other_ref, "kind":"player", "userId":other.get("user_id"), "playerId":other.get("id"), "profileUserId":other.get("user_id"), "avatarId":other.get("avatar_id"), "selectedBadgeCode":other.get("selected_badge_code"), "playerFactionId": int(other_faction.get("id") or 0), "name":other.get("display_name") or other.get("username") or "Player", "role":"player", "from":o["id"], "to":d["id"], "progress":round(float(tv.get("progress") or 0)*100,1), **pt, "attackable":not other_immune, "blockedReason":"Battle locked / post-battle immunity" if other_immune else "", "label":"Player in transit. Intercept happens in open space without planetary defense."})
 
     # Persistent NPC traffic is server-side and DB-backed. NPCs move to an objective,
     # perform a short action there, then pick a new objective from their current position.
@@ -5213,8 +6009,11 @@ def ensure_db_map_objects(conn: sqlite3.Connection, player: Dict[str, Any], node
     if not gid or not nodes:
         return
     scope_key = map_object_scope_key(map_type, gid, pid)
-    existing = int(scalar(conn, "SELECT COUNT(*) FROM map_objects WHERE map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?", (map_type, gid, int(pid or 0))) or 0)
     now = iso()
+    if bool(WORLD_SERVER_BALANCE.get("server_controls_resources", True)):
+        conn.execute("UPDATE map_objects SET state='depleted' WHERE qty_remaining<=0 AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?", (map_type, gid, int(pid or 0)))
+        return
+    existing = int(scalar(conn, "SELECT COUNT(*) FROM map_objects WHERE map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?", (map_type, gid, int(pid or 0))) or 0)
     if existing:
         # Clear expired/depleted temporary rows but leave permanent resource fields.
         conn.execute("UPDATE map_objects SET state='depleted' WHERE qty_remaining<=0 AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?", (map_type, gid, int(pid or 0)))
@@ -5233,12 +6032,17 @@ def ensure_db_map_objects(conn: sqlite3.Connection, player: Dict[str, Any], node
     for i in range(int(ore_count)):
         anchor = rng.choice(nodes)
         center_value = int(anchor.get("center_value") or 1)
-        weighted_ores = []
-        for ore in ores:
-            w = max(1, int((center_value + 1) ** max(1, ore[2] - 1)))
-            if ore[2] <= center_value + 1:
-                weighted_ores.extend([ore] * w)
-        code, name, tier, mass, value = rng.choice(weighted_ores or ores)
+        target_tier = world_tier_for_galaxy(conn, gid, rng)
+        tier_pool = [ore for ore in ores if int(ore[2]) == int(target_tier)]
+        # Keep an occasional local anomaly so maps never feel mathematically identical.
+        if not tier_pool or rng.random() < 0.08:
+            weighted_ores = []
+            for ore in ores:
+                w = max(1, int((center_value + 1) ** max(1, ore[2] - 1)))
+                if ore[2] <= max(center_value + 1, target_tier):
+                    weighted_ores.extend([ore] * w)
+            tier_pool = weighted_ores or ores
+        code, name, tier, mass, value = rng.choice(tier_pool)
         qty = rng.randint(8, 34) + tier * 5 + max(0, center_value - 2) * 4
         energy = clamp_int(OPEN_WORLD_BALANCE["ore_mine_min_energy"] + tier * 4 + qty // 4, OPEN_WORLD_BALANCE["ore_mine_min_energy"], OPEN_WORLD_BALANCE["ore_mine_max_energy"])
         x = clamp_pct(float(anchor.get("x_pct") or 50) + rng.uniform(-8, 8), 3, 97)
@@ -5273,7 +6077,8 @@ def ensure_db_map_objects(conn: sqlite3.Connection, player: Dict[str, Any], node
         anchor = rng.choice(nodes)
         risk_level = clamp_int(int(anchor.get("risk_level") or anchor.get("conflict_avg") or anchor.get("security_avg") or 40) + rng.randint(-12, 18), 5, 98)
         center_value = int(anchor.get("center_value") or 1)
-        reward_tier = clamp_int(base_tier + (1 if risk_level >= 65 else 0) + max(0, center_value - 2) + rng.choice([-1, 0, 0, 1]), 1, 7)
+        band_tier = world_tier_for_galaxy(conn, gid, rng)
+        reward_tier = clamp_int(max(band_tier, base_tier + (1 if risk_level >= 65 else 0) + max(0, center_value - 2) + rng.choice([-1, 0, 0, 1])), 1, int(WORLD_PROGRESSION_BALANCE.get("resource_tier_max", 5)))
         quality = clamp_int(rng.randint(22, 88) + reward_tier * 3 - (10 if state_label == "unknown" else 0), 5, 99)
         signal_state = "unknown" if quality < 45 else "partial" if quality < 72 else "resolved"
         x = clamp_pct(float(anchor.get("x_pct") or 50) + rng.uniform(-10, 10), 3, 97)
@@ -5528,6 +6333,18 @@ def respawn_npc_agent(conn: sqlite3.Connection, npc: Dict[str, Any], rng: Option
         ),
     )
     replacement_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (
+            npc.get("planet_id"),
+            "npc_death_respawn",
+            base_name,
+            f"{base_name} died and replacement {replacement_name} was created.",
+            encode_json({"defeatedNpcId": old_id, "replacementNpcId": replacement_id, "replacementName": replacement_name, "generation": generation, "deathCount": death_count, "xpLossPct": round(loss_pct * 100, 1)}),
+            iso(),
+        ),
+    )
+    prune_admin_action_logs(conn)
     return {"defeatedNpcId": old_id, "replacementNpcId": replacement_id, "replacementName": replacement_name, "generation": generation, "deathCount": death_count, "xpLossPct": round(loss_pct * 100, 1), "xp": new_xp, "level": new_level, "power": new_power, "skills": skills}
 
 
@@ -5612,7 +6429,7 @@ def apply_npc_map_action(conn: sqlite3.Connection, state: Dict[str, Any], npc: O
             prog = grant_npc_progression(conn, actor, "explore", rng.randint(95, 260), rng)
             conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (state.get("planet_id"), "npc_explore", actor_name, f"{actor_name} scanned {obj.get('name') or 'an ancient signal'}.", encode_json({"object_key": target_key, "signalQuality": meta.get("signalQuality"), "progression": prog}), iso()))
             return
-    if objective in {"pirate_intercept", "bounty_hunt", "escort"}:
+    if objective in {"pirate_intercept", "bounty_hunt", "escort", "faction_patrol_intercept"}:
         if resolve_npc_map_combat(conn, actor, state, rng):
             return
     if objective in {"repair_at_nearest_planet", "repair"}:
@@ -5634,10 +6451,18 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
     gid = int(scope.get("galaxy_id") or 0)
     pid = int(scope.get("planet_id") or 0) if map_type == "system" else None
     if map_type == "galaxy":
-        npc_query = "SELECT * FROM npc_agents WHERE COALESCE(alive,1)=1 ORDER BY id LIMIT ?"
+        npc_query = """
+            SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id
+            FROM npc_agents n
+            LEFT JOIN planets p ON p.id=n.planet_id
+            WHERE COALESCE(n.alive,1)=1
+              AND NOT (n.career_code='faction_patrol' OR n.role='faction_patrol')
+            ORDER BY n.id
+            LIMIT ?
+        """
         params: tuple = (max_count,)
     else:
-        npc_query = "SELECT * FROM npc_agents WHERE COALESCE(alive,1)=1 AND planet_id IN (%s) ORDER BY id LIMIT ?" % ",".join("?" for _ in node_ids)
+        npc_query = ("SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id WHERE COALESCE(n.alive,1)=1 AND n.planet_id IN (%s) ORDER BY CASE WHEN n.career_code='faction_patrol' OR n.role='faction_patrol' THEN 0 ELSE 1 END, n.id LIMIT ?" % ",".join("?" for _ in node_ids))
         params = tuple(node_ids + [max_count])
     now = utcnow()
     out: List[Dict[str, Any]] = []
@@ -5661,7 +6486,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             conn.execute(
                 """INSERT INTO npc_map_state (npc_id,map_type,galaxy_id,planet_id,role,objective,target_object_key,x_pct,y_pct,origin_x_pct,origin_y_pct,destination_x_pct,destination_y_pct,started_at,arrival_at,action_until,action_state,cargo_json,updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (npc_id, map_type, gid, pid, role, objective.get("objective") or "patrol", target.get("object_key") or "", float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), None, "moving", encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts")}), iso(now)),
+                (npc_id, map_type, gid, pid, role, objective.get("objective") or "patrol", target.get("object_key") or "", float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), None, "moving", encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts"), "factionId": int(npc.get("npc_faction_id") or 0)}), iso(now)),
             )
             state = row(conn, "SELECT * FROM npc_map_state WHERE npc_id=? AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?", (npc_id, map_type, gid, int(pid or 0)))
             if not state:
@@ -5691,7 +6516,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             seconds = max(25, min(260, int(20 + dist * 3.2)))
             conn.execute(
                 """UPDATE npc_map_state SET objective=?, target_object_key=?, origin_x_pct=?, origin_y_pct=?, destination_x_pct=?, destination_y_pct=?, started_at=?, arrival_at=?, action_until=NULL, action_state='moving', cargo_json=?, updated_at=? WHERE id=?""",
-                (objective.get("objective") or "patrol", target.get("object_key") or "", float(current_pt["x_pct"]), float(current_pt["y_pct"]), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts")}), iso(now), state["id"]),
+                (objective.get("objective") or "patrol", target.get("object_key") or "", float(current_pt["x_pct"]), float(current_pt["y_pct"]), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts"), "factionId": int(npc.get("npc_faction_id") or 0)}), iso(now), state["id"]),
             )
             refreshed_state = row(conn, "SELECT * FROM npc_map_state WHERE id=?", (state["id"],))
             if not refreshed_state:
@@ -5745,6 +6570,9 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "npcSkills": decode_json(npc.get("skills_json"), {}) or {},
             "npcGeneration": int(npc.get("generation") or 1),
             "npcDeathCount": int(npc.get("death_count") or 0),
+            "npcFactionId": int(npc.get("npc_faction_id") or 0),
+            "npcGalaxyId": int(npc.get("npc_galaxy_id") or gid or 0),
+            "isFactionPatrol": bool(str(npc.get("career_code") or "").lower() == "faction_patrol" or role_l == "faction_patrol"),
             "attackable": not npc_combat_locked,
             "blockedReason": "Battle locked / post-battle immunity" if npc_combat_locked else "",
             "hostile": hostile,
@@ -5803,6 +6631,14 @@ GALAXY_EXPANSION_SEED = [
     ("umbrareach", "Umbrareach", "Veil Shield", "purple", "Umbral Veil buffer galaxy, one jump from the home tip and not capturable.", 38, 76, "umbral_veil", 1, 0),
     ("obsidian", "Obsidian Coil", "Veil March", "violet", "Capturable stealth corridor with black-market and reconnaissance value.", 62, 76, "umbral_veil", 2, 1),
     ("acheron", "Acheron Spiral", "Central Ruins", "blue", "Ancient central ruin-space with high-tier scan sites and pirate bases.", 50, 62, "umbral_veil", 4, 1),
+
+    # Phase 35 expansion: +50% galaxies, balanced two additional galaxies per faction.
+    ("sunbreak", "Sunbreak Passage", "Solar Forward", "gold", "Solar Accord forward logistics chain pushing toward center conflict lanes.", 29, 34, "solar_accord", 2, 1),
+    ("coronavault", "Corona Vault", "Solar Inner Vault", "orange", "Solar Accord fortified inner resource vault near the center front.", 42, 44, "solar_accord", 4, 1),
+    ("anvilreach", "Anvil Reach", "Meridian Forward", "cyan", "Iron Meridian heavy mining and repair corridor toward central space.", 71, 34, "iron_meridian", 2, 1),
+    ("hammerfall", "Hammerfall Bastion", "Meridian Inner Bastion", "blue", "Iron Meridian militarized inner-system bastion near the central routes.", 58, 44, "iron_meridian", 4, 1),
+    ("shroudcross", "Shroudcross", "Veil Forward", "purple", "Umbral Veil covert travel corridor toward center-space contracts.", 44, 71, "umbral_veil", 2, 1),
+    ("nightglass", "Nightglass Verge", "Veil Inner Verge", "violet", "Umbral Veil inner black-market and relic frontier at the center edge.", 53, 58, "umbral_veil", 4, 1),
 ]
 
 
@@ -5813,6 +6649,1112 @@ def galaxy_center_value_from_xy(x: float, y: float) -> int:
 
 def galaxy_control_bonus_from_value(value: int) -> int:
     return int(FACTION_WAR_BALANCE.get("center_bonus_min_pct", 3)) + int((int(value) - 1) * ((int(FACTION_WAR_BALANCE.get("center_bonus_max_pct", 12)) - int(FACTION_WAR_BALANCE.get("center_bonus_min_pct", 3))) / 5))
+
+
+def world_progression_bands() -> List[Dict[str, Any]]:
+    bands = WORLD_PROGRESSION_BALANCE.get("bands") or []
+    return [b for b in bands if isinstance(b, dict)] or WORLD_PROGRESSION_BALANCE["bands"]
+
+
+def weighted_tier_from_band(rng: random.Random, band: Dict[str, Any]) -> int:
+    weights = band.get("tier_weights") or {}
+    weighted: List[int] = []
+    max_tier = int(WORLD_PROGRESSION_BALANCE.get("resource_tier_max", 5))
+    for tier in range(1, max_tier + 1):
+        w = max(0, int(weights.get(str(tier), weights.get(tier, 0)) or 0))
+        weighted.extend([tier] * w)
+    if not weighted:
+        return 1
+    return int(rng.choice(weighted))
+
+
+def galaxy_progression_ratio(conn: sqlite3.Connection, galaxy: Dict[str, Any]) -> float:
+    try:
+        faction_id = galaxy.get("faction_id")
+        faction = row(conn, "SELECT * FROM factions WHERE id=?", (faction_id,)) if faction_id else None
+        home_code = (faction or {}).get("home_galaxy_code")
+        home = row(conn, "SELECT * FROM galaxies WHERE code=?", (home_code,)) if home_code else None
+        if not home:
+            depth = int(galaxy.get("home_depth") or 0)
+            return max(0.0, min(1.0, depth / 4.0))
+        home_pt = {"x_pct": float(home.get("x_pct") or 50), "y_pct": float(home.get("y_pct") or 50)}
+        center_pt = {"x_pct": 50.0, "y_pct": 50.0}
+        galaxy_pt = {"x_pct": float(galaxy.get("x_pct") or 50), "y_pct": float(galaxy.get("y_pct") or 50)}
+        total = max(1.0, pct_distance(home_pt, center_pt))
+        return max(0.0, min(1.0, pct_distance(home_pt, galaxy_pt) / total))
+    except Exception:
+        return max(0.0, min(1.0, float(galaxy.get("center_value") or 1) / 6.0))
+
+
+def world_band_for_galaxy(conn: sqlite3.Connection, galaxy_or_id: Any) -> Dict[str, Any]:
+    galaxy = galaxy_or_id if isinstance(galaxy_or_id, dict) else row(conn, "SELECT * FROM galaxies WHERE id=?", (int(galaxy_or_id or 0),))
+    if not galaxy:
+        return world_progression_bands()[0]
+    ratio = galaxy_progression_ratio(conn, galaxy)
+    for band in world_progression_bands():
+        if ratio >= float(band.get("min_progress", 0)) and ratio < float(band.get("max_progress", 1.01)):
+            return band
+    return world_progression_bands()[-1]
+
+
+def world_level_range_for_galaxy(conn: sqlite3.Connection, galaxy_id: int) -> Tuple[int, int]:
+    band = world_band_for_galaxy(conn, int(galaxy_id or 0))
+    return (
+        max(1, int(band.get("npc_level_min") or 1)),
+        max(1, int(band.get("npc_level_max") or band.get("npc_level_min") or 10)),
+    )
+
+
+def world_level_range_for_planet(conn: sqlite3.Connection, planet_id: int) -> Tuple[int, int]:
+    planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (int(planet_id or 0),))
+    if not planet:
+        return (1, 10)
+    return world_level_range_for_galaxy(conn, int(planet.get("galaxy_id") or 0))
+
+
+def world_tier_for_galaxy(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random) -> int:
+    return weighted_tier_from_band(rng, world_band_for_galaxy(conn, int(galaxy_id or 0)))
+
+
+def world_server_enabled() -> bool:
+    return bool(WORLD_SERVER_BALANCE.get("enabled", True))
+
+
+def world_server_range_int(min_key: str, max_key: str, default_min: int, default_max: int) -> Tuple[int, int]:
+    lo = int(WORLD_SERVER_BALANCE.get(min_key, default_min) or default_min)
+    hi = int(WORLD_SERVER_BALANCE.get(max_key, default_max) or default_max)
+    return (min(lo, hi), max(lo, hi))
+
+
+def world_server_due(conn: sqlite3.Connection, galaxy_id: int, bucket: str, force: bool = False) -> bool:
+    if force:
+        return True
+    min_key = f"{bucket}_check_min_seconds"
+    max_key = f"{bucket}_check_max_seconds"
+    lo, hi = world_server_range_int(min_key, max_key, 60 if bucket == "npc" else 900, 120 if bucket == "npc" else 1800)
+    now = utcnow()
+    key = f"world_server_control:{bucket}:{int(galaxy_id or 0)}"
+    state = app_state_get_json(conn, key)
+    next_at = parse_dt(state.get("next_at")) if state else None
+    if next_at and next_at > now:
+        return False
+    rng = random.Random(f"{key}:{int(now.timestamp() // max(1, lo))}")
+    delay = rng.randint(max(1, lo), max(1, hi))
+    app_state_put_json(conn, key, {"last_at": iso(now), "next_at": iso(now + timedelta(seconds=delay)), "delay_seconds": delay})
+    return True
+
+
+def galaxy_npc_count(conn: sqlite3.Connection, galaxy_id: int) -> int:
+    return int(scalar(conn, "SELECT COUNT(*) FROM npc_agents n JOIN planets p ON p.id=n.planet_id WHERE p.galaxy_id=? AND COALESCE(n.alive,1)=1", (int(galaxy_id),)) or 0)
+
+
+def galaxy_patrol_count(conn: sqlite3.Connection, galaxy_id: int) -> int:
+    return int(scalar(conn, """
+        SELECT COUNT(*)
+        FROM npc_agents n
+        JOIN planets p ON p.id=n.planet_id
+        WHERE p.galaxy_id=?
+          AND COALESCE(n.alive,1)=1
+          AND (n.career_code='faction_patrol' OR n.role='faction_patrol')
+    """, (int(galaxy_id),)) or 0)
+
+
+def highest_galaxy_pirate_profile(conn: sqlite3.Connection, galaxy_id: int) -> Dict[str, int]:
+    found = row(conn, """
+        SELECT
+            COALESCE(MAX(n.level), 1) AS max_level,
+            COALESCE(MAX(n.power), 40) AS max_power
+        FROM npc_agents n
+        JOIN planets p ON p.id=n.planet_id
+        WHERE p.galaxy_id=?
+          AND COALESCE(n.alive,1)=1
+          AND (
+            LOWER(COALESCE(n.role,'')) IN ('pirate','raider','outlaw','mercenary')
+            OR LOWER(COALESCE(n.career_code,'')) IN ('mercenary','pirate','raider','outlaw')
+            OR LOWER(COALESCE(n.role,'')) LIKE '%pirate%'
+            OR LOWER(COALESCE(n.role,'')) LIKE '%raider%'
+            OR LOWER(COALESCE(n.role,'')) LIKE '%outlaw%'
+          )
+    """, (int(galaxy_id),)) or {}
+    return {"level": max(1, int(found.get("max_level") or 1)), "power": max(40, int(found.get("max_power") or 40))}
+
+
+def planet_map_point(planet: Dict[str, Any]) -> Dict[str, float]:
+    return {
+        "x_pct": round(max(7, min(93, 50 + float(planet.get("x") or 0) / 2.3)), 2),
+        "y_pct": round(max(8, min(92, 50 + float(planet.get("y") or 0) / 2.3)), 2),
+    }
+
+
+def choose_patrol_spawn_planet(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy["id"]),))
+    if not planets:
+        return None
+    existing = rows(conn, """
+        SELECT p.*
+        FROM npc_agents n
+        JOIN planets p ON p.id=n.planet_id
+        WHERE p.galaxy_id=?
+          AND COALESCE(n.alive,1)=1
+          AND (n.career_code='faction_patrol' OR n.role='faction_patrol')
+    """, (int(galaxy["id"]),))
+    if not existing:
+        return rng.choice(planets)
+    min_spacing = float(WORLD_SERVER_BALANCE.get("patrol_min_spacing_pct", 14))
+    scored = []
+    for p in planets:
+        pp = planet_map_point(p)
+        spacing = min([pct_distance(pp, planet_map_point(e)) for e in existing] or [99])
+        score = spacing + rng.random() * 5
+        if spacing < min_spacing:
+            score *= 0.35
+        scored.append((score, p))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return scored[0][1] if scored else rng.choice(planets)
+
+
+def spawn_faction_patrol_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    faction_id = int(galaxy.get("faction_id") or 0)
+    if not faction_id:
+        return None
+    planet = choose_patrol_spawn_planet(conn, galaxy, rng)
+    if not planet:
+        return None
+    pirate = highest_galaxy_pirate_profile(conn, int(galaxy["id"]))
+    max_level = int(NPC_LIFE_BALANCE.get("max_level", 80))
+    level = clamp_int(max(int(pirate["level"]) * 2, world_level_range_for_galaxy(conn, int(galaxy["id"]))[1]), 1, max_level)
+    rank = clamp_int(1 + level // 8, 1, 14)
+    power = max(int(int(pirate["power"]) * float(WORLD_SERVER_BALANCE.get("patrol_strength_mult", 2.0))), int(180 + level * 30 + rng.randint(20, 90)))
+    profile = NPC_CAREER_PROFILES["faction_patrol"]
+    name = f"{rng.choice(['Vanguard','Sentinel','Aegis','Warden','Lancer','Bulwark'])} Patrol {galaxy['code'].upper()}-{uuid.uuid4().hex[:4].upper()}"
+    credits = int((level ** 2) * rng.randint(120, 280))
+    xp = int(level_xp_required(level) * rng.uniform(0.35, 0.90)) if level > 1 else rng.randint(0, 600)
+    conn.execute(
+        """INSERT INTO npc_agents
+           (planet_id,role,name,power,disposition,career_code,level,xp,credits,ship_class,activity_rate,aggression,friendliness,job_rank,market_bias,last_action_at,simulated,skills_json,skill_points)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            planet["id"], "faction_patrol", name, power, "lawful", "faction_patrol", level, xp, credits,
+            profile["ship"], 96, 92, 34, rank, "law", iso(), 1,
+            encode_json({"combat": level * 2, "weapons": level * 2, "piloting": level, "defense": level, "scanning": max(1, level // 2)}),
+            level * 2,
+        ),
+    )
+    npc_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+
+    # Seed an initial spread-out route so patrols do not spawn clumped or fly together.
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy["id"]),))
+    origin = planet_map_point(planet)
+    destination_planet = max(planets, key=lambda p: pct_distance(origin, planet_map_point(p))) if planets else planet
+    dest = planet_map_point(destination_planet)
+    seconds = max(55, min(260, int(45 + pct_distance(origin, dest) * 4.5)))
+    conn.execute(
+        """INSERT INTO npc_map_state
+           (npc_id,map_type,galaxy_id,planet_id,role,objective,target_object_key,x_pct,y_pct,origin_x_pct,origin_y_pct,destination_x_pct,destination_y_pct,started_at,arrival_at,action_until,action_state,cargo_json,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            npc_id, "system", int(galaxy["id"]), int(planet["id"]), "faction_patrol", "faction_patrol_sweep", "",
+            origin["x_pct"], origin["y_pct"], origin["x_pct"], origin["y_pct"], dest["x_pct"], dest["y_pct"],
+            iso(), iso(utcnow() + timedelta(seconds=seconds)), None, "moving",
+            encode_json({"objectiveLabel": "Faction patrol sweep", "objectiveTargetName": destination_planet.get("name"), "objectiveState": "patrolling own galaxy", "factionId": faction_id}),
+            iso(),
+        ),
+    )
+
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (planet["id"], "server_spawn_faction_patrol", "World Server", f"Server spawned faction patrol {name} in {galaxy.get('name')}.", encode_json({"npcId": npc_id, "galaxyId": galaxy["id"], "factionId": faction_id, "level": level, "power": power, "highestPirateLevel": pirate["level"], "highestPiratePower": pirate["power"]}), iso()),
+    )
+    return {"npcId": npc_id, "name": name, "planet": planet.get("name"), "level": level, "power": power}
+
+
+def trim_faction_patrol_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    npc = row(conn, """
+        SELECT n.*
+        FROM npc_agents n
+        JOIN planets p ON p.id=n.planet_id
+        WHERE p.galaxy_id=? AND COALESCE(n.alive,1)=1 AND (n.career_code='faction_patrol' OR n.role='faction_patrol')
+        ORDER BY RANDOM()
+        LIMIT 1
+    """, (int(galaxy["id"]),))
+    if not npc:
+        return None
+    conn.execute("UPDATE npc_agents SET alive=0,last_action_at=? WHERE id=?", (iso(), npc["id"]))
+    conn.execute("DELETE FROM npc_map_state WHERE npc_id=?", (npc["id"],))
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (npc.get("planet_id"), "server_trim_faction_patrol", "World Server", f"Server removed excess faction patrol {npc.get('name')} from {galaxy.get('name')}.", encode_json({"npcId": npc["id"], "galaxyId": galaxy["id"]}), iso()),
+    )
+    return {"npcId": npc["id"], "name": npc.get("name")}
+
+
+def galaxy_resource_count(conn: sqlite3.Connection, galaxy_id: int, kind: str) -> int:
+    return int(scalar(conn, "SELECT COUNT(*) FROM map_objects WHERE galaxy_id=? AND kind=? AND COALESCE(qty_remaining,0)>0 AND state NOT IN ('depleted','expired','deleted')", (int(galaxy_id), kind)) or 0)
+
+
+def galaxy_pirate_base_count(conn: sqlite3.Connection, galaxy_id: int) -> int:
+    return int(scalar(conn, "SELECT COUNT(*) FROM pirate_stations WHERE galaxy_id=? AND status IN ('active','occupied')", (int(galaxy_id),)) or 0)
+
+
+def spawn_server_npc_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy["id"]),))
+    if not planets:
+        return None
+    planet = rng.choice(planets)
+    career = weighted_npc_career_choice(rng, planet)
+    profile = NPC_CAREER_PROFILES.get(career, NPC_CAREER_PROFILES["trader"])
+    role = rng.choice(profile.get("roles") or [career])
+    lo, hi = world_level_range_for_galaxy(conn, int(galaxy["id"]))
+    mode = min(hi, max(lo, lo + int((hi - lo) * 0.35)))
+    level = clamp_int(int(rng.triangular(lo, hi, mode)), lo, hi)
+    rank = clamp_int(1 + level // 9, 1, 12)
+    power_base = int((int(planet.get("security_level") or 50) + int(planet.get("market_activity") or 50) + int(planet.get("defense_strength") or 50)) / 3)
+    power = clamp_int(int((power_base + level * 2.4) * rng.uniform(0.58, 0.92)), 15, 99999)
+    aggression = clamp_int(int(profile.get("aggression") or 50) + (int(planet.get("hostility") or 50) - 50) * 0.45 + rng.randint(-10, 10), 1, 98)
+    friendliness = clamp_int(int(profile.get("friendly") or 50) + (int(planet.get("friendliness") or 50) - 50) * 0.35 + rng.randint(-10, 10), 1, 98)
+    disposition = "friendly" if friendliness - aggression > 22 else "hostile" if aggression - friendliness > 22 else "neutral"
+    name = f"{rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}"
+    credits = int((level ** 2) * rng.randint(70, 220))
+    xp = int(level_xp_required(level) * rng.uniform(0.12, 0.70)) if level > 1 else rng.randint(0, 600)
+    conn.execute(
+        """INSERT INTO npc_agents
+           (planet_id,role,name,power,disposition,career_code,level,xp,credits,ship_class,activity_rate,aggression,friendliness,job_rank,market_bias,last_action_at,simulated,skills_json,skill_points)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (planet["id"], role, name, power, disposition, career, level, xp, credits, profile.get("ship") or "Civilian Shuttle", clamp_int(int(planet.get("npc_activity") or 50) + rng.randint(-15, 15), 5, 98), aggression, friendliness, rank, profile.get("market_bias") or "balanced", iso(), 1, "{}", max(0, level // 2)),
+    )
+    npc_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (planet["id"], "server_spawn_npc", "World Server", f"Server spawned NPC {name} in {galaxy.get('name')}.", encode_json({"npcId": npc_id, "galaxyId": galaxy["id"], "planetId": planet["id"], "career": career, "role": role, "level": level}), iso()),
+    )
+    return {"npcId": npc_id, "name": name, "planet": planet.get("name"), "level": level}
+
+
+def trim_server_npc_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    npc = row(conn, """
+        SELECT n.*, p.name as planet_name
+        FROM npc_agents n
+        JOIN planets p ON p.id=n.planet_id
+        WHERE p.galaxy_id=? AND COALESCE(n.alive,1)=1
+        ORDER BY RANDOM()
+        LIMIT 1
+    """, (int(galaxy["id"]),))
+    if not npc:
+        return None
+    conn.execute("UPDATE npc_agents SET alive=0,last_action_at=? WHERE id=?", (iso(), npc["id"]))
+    conn.execute("DELETE FROM npc_map_state WHERE npc_id=?", (npc["id"],))
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (npc.get("planet_id"), "server_trim_npc", "World Server", f"Server removed excess NPC {npc.get('name')} from {galaxy.get('name')}.", encode_json({"npcId": npc["id"], "galaxyId": galaxy["id"]}), iso()),
+    )
+    return {"npcId": npc["id"], "name": npc.get("name")}
+
+
+def spawn_server_resource_node(conn: sqlite3.Connection, galaxy: Dict[str, Any], kind: str, rng: random.Random) -> Optional[Dict[str, Any]]:
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy["id"]),))
+    if not planets:
+        return None
+    planet = rng.choice(planets)
+    now = iso()
+    tier = world_tier_for_galaxy(conn, int(galaxy["id"]), rng)
+    clear_point = find_clear_map_point(conn, int(galaxy["id"]), rng, min_spaces=RESOURCE_NODE_CLEARANCE_SPACES)
+    x = clear_point["x_pct"]
+    y = clear_point["y_pct"]
+    uid = uuid.uuid4().hex[:8]
+    if kind == "ore":
+        ores = {
+            1: [("titanium", "Titanium Ore", 1.0, 28), ("nickel_iron", "Nickel-Iron Rock", 1.1, 24)],
+            2: [("helium_3", "Helium-3 Pocket", 0.7, 120)],
+            3: [("iridium", "Iridium Shards", 0.45, 260)],
+            4: [("quantum_silicate", "Quantum Silicate", 0.55, 760)],
+            5: [("void_crystal", "Void Crystal", 0.25, 1450)],
+        }
+        code, name, mass, value = rng.choice(ores.get(tier) or ores[1])
+        qty = rng.randint(8, 28) + tier * 5
+        energy = clamp_int(OPEN_WORLD_BALANCE["ore_mine_min_energy"] + tier * 4 + qty // 4, OPEN_WORLD_BALANCE["ore_mine_min_energy"], OPEN_WORLD_BALANCE["ore_mine_max_energy"])
+        key = f"server:{galaxy['id']}:{planet['id']}:ore:{code}:{uid}"
+        meta = {
+            "kind": "ore",
+            "energyCost": energy,
+            "massEach": mass,
+            "unitValue": value,
+            "label": f"Mine {qty}x {name}. Server-controlled galaxy node.",
+            "selectedSummary": f"{name} deposit in {galaxy.get('name')}. Tier {tier}, remaining {qty} units.",
+            "outcomeFactors": "Server maintains per-galaxy mining node count. Tier comes from faction-home-to-center progression.",
+            "image_url": "/assets/fallbacks/material.svg",
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO map_objects (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (key, "system", galaxy["id"], planet["id"], "ore", code, name, x, y, tier, qty, "available", encode_json(meta), now, now),
+        )
+        action_type = "server_spawn_mining_node"
+    else:
+        archetypes = [
+            ("ancient_ruin", "Ancient Ruin", "partial"),
+            ("signal_echo", "Unknown Signal Echo", "unknown"),
+            ("relic_vault", "Relic Vault", "resolved"),
+            ("derelict_archive", "Derelict Archive", "partial"),
+            ("gravity_anomaly", "Gravity Anomaly", "unknown"),
+            ("precursor_beacon", "Precursor Beacon", "resolved"),
+        ]
+        code, base_name, state_label = rng.choice(archetypes)
+        quality = clamp_int(rng.randint(22, 86) + tier * 4, 5, 99)
+        signal_state = "unknown" if quality < 45 else "partial" if quality < 72 else "resolved"
+        real_name = f"T{tier} {base_name}"
+        key = f"server:{galaxy['id']}:{planet['id']}:exploration:{code}:{uid}"
+        meta = {
+            "kind": "exploration",
+            "realName": real_name,
+            "signalState": signal_state,
+            "signalQuality": quality,
+            "rewardTier": tier,
+            "scanEnergy": int(OPEN_WORLD_BALANCE.get("scan_site_energy", 8)) + tier * 2,
+            "investigateEnergy": int(OPEN_WORLD_BALANCE.get("investigate_site_energy", 14)) + tier * 3,
+            "label": f"{signal_state.title()} signal in {galaxy.get('name')}. Server-controlled exploration node.",
+            "selectedSummary": f"{real_name}. Tier {tier}; signal quality {quality}.",
+            "outcomeFactors": "Server maintains per-galaxy exploration count. Tier comes from faction-home-to-center progression.",
+            "image_url": "/assets/fallbacks/material.svg",
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO map_objects (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (key, "system", galaxy["id"], planet["id"], "exploration", code, "Unknown Signal" if signal_state == "unknown" else real_name, x, y, tier, 1, "available", encode_json(meta), now, now),
+        )
+        action_type = "server_spawn_exploration_node"
+        name = real_name
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (planet["id"], action_type, "World Server", f"Server spawned {label_for_api(kind)} node {name} in {galaxy.get('name')}.", encode_json({"galaxyId": galaxy["id"], "planetId": planet["id"], "kind": kind, "tier": tier}), iso()),
+    )
+    return {"kind": kind, "name": name, "planet": planet.get("name"), "tier": tier}
+
+
+def trim_server_resource_node(conn: sqlite3.Connection, galaxy: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
+    obj = row(conn, "SELECT * FROM map_objects WHERE galaxy_id=? AND kind=? AND COALESCE(qty_remaining,0)>0 AND state NOT IN ('depleted','expired','deleted') ORDER BY updated_at LIMIT 1", (int(galaxy["id"]), kind))
+    if not obj:
+        return None
+    conn.execute("UPDATE map_objects SET state='depleted', qty_remaining=0, updated_at=? WHERE id=?", (iso(), obj["id"]))
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (obj.get("planet_id"), f"server_trim_{kind}_node", "World Server", f"Server removed excess {label_for_api(kind)} node {obj.get('name')} from {galaxy.get('name')}.", encode_json({"objectId": obj["id"], "galaxyId": galaxy["id"], "kind": kind}), iso()),
+    )
+    return {"objectId": obj["id"], "name": obj.get("name")}
+
+
+def pirate_base_level_for_galaxy(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random) -> int:
+    lo, hi = world_level_range_for_galaxy(conn, int(galaxy_id or 0))
+    base = rng.randint(lo, max(lo, hi))
+    return max(1, int(math.ceil(base * float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25)))))
+
+
+def pirate_base_tier_for_level(level: int) -> int:
+    return clamp_int(int(math.ceil(max(1, level) / 10)), int(WORLD_SERVER_BALANCE.get("pirate_base_min_tier", 1)), int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9)))
+
+
+def spawn_server_pirate_base_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy["id"]),))
+    if not planets:
+        return None
+    existing_points = rows(conn, "SELECT x_pct,y_pct FROM pirate_stations WHERE galaxy_id=? AND status IN ('active','occupied')", (galaxy["id"],))
+    best = None
+    best_score = -1.0
+    for _ in range(80):
+        x = clamp_pct(rng.uniform(7, 93), 5, 95)
+        y = clamp_pct(rng.uniform(7, 93), 5, 95)
+        candidate = {"x_pct": x, "y_pct": y}
+        nearest_planet = min(planets, key=lambda p: (x - clamp_pct((50 + float(p.get("x") or 0) / 2.3 - 50) * 1.45 + 50, 2, 98)) ** 2 + (y - clamp_pct((50 + float(p.get("y") or 0) / 2.3 - 50) * 1.45 + 50, 2, 98)) ** 2)
+        station_spacing = min([pct_distance(candidate, p) for p in existing_points] or [99])
+        score = station_spacing + rng.random() * 4
+        if score > best_score:
+            best_score = score
+            best = (candidate, nearest_planet)
+    if not best:
+        return None
+    candidate, nearest_planet = best
+    station_level = pirate_base_level_for_galaxy(conn, int(galaxy["id"]), rng)
+    tier = pirate_base_tier_for_level(station_level)
+    difficulty = clamp_int(tier + int(station_level // 18) + rng.randint(0, 1), 1, 12)
+    total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
+    name = f"{rng.choice(['Blackwake','Red Dagger','Void Maw','Corsair','Grim Halo','Iron Fang'])} Base {galaxy['code'].upper()}-{uuid.uuid4().hex[:4].upper()}"
+    code = f"server_pirate_base_{galaxy['id']}_{uuid.uuid4().hex[:8]}"
+    conn.execute(
+        """
+        INSERT INTO pirate_stations
+          (code,galaxy_id,nearest_planet_id,name,x_pct,y_pct,tier,difficulty,total_pirates,remaining_pirates,resource_pct,status,occupied_by_player_id,seed,created_at,updated_at,respawn_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+        """,
+        (code, galaxy["id"], nearest_planet["id"], name, candidate["x_pct"], candidate["y_pct"], tier, difficulty, total, total, 100, "active", None, f"server:{galaxy['id']}:{station_level}:{candidate['x_pct']:.2f}:{candidate['y_pct']:.2f}", iso(), iso()),
+    )
+    station_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (nearest_planet["id"], "server_spawn_pirate_base", "World Server", f"Server spawned pirate base {name} in {galaxy.get('name')} at T{tier}.", encode_json({"stationId": station_id, "galaxyId": galaxy["id"], "tier": tier, "stationLevel": station_level, "baseStrengthMultiplier": WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25)}), iso()),
+    )
+    return {"stationId": station_id, "name": name, "tier": tier, "level": station_level}
+
+
+def ensure_server_world_control(conn: sqlite3.Connection, force: bool = False) -> Dict[str, Any]:
+    if not world_server_enabled():
+        return {"enabled": False, "changes": []}
+    changes: List[Dict[str, Any]] = []
+    galaxies = rows(conn, "SELECT * FROM galaxies ORDER BY id")
+    for galaxy in galaxies:
+        gid = int(galaxy["id"])
+        rng = random.Random(f"world-server:{gid}:{int(utcnow().timestamp() // 60)}:{force}")
+
+        if bool(WORLD_SERVER_BALANCE.get("server_controls_npcs", True)) and world_server_due(conn, gid, "npc", force=force):
+            lo, hi = world_server_range_int("npcs_per_galaxy_min", "npcs_per_galaxy_max", 15, 30)
+            target = rng.randint(lo, hi)
+            count = galaxy_npc_count(conn, gid)
+            if count < target:
+                spawned = spawn_server_npc_for_galaxy(conn, galaxy, rng)
+                if spawned:
+                    changes.append({"galaxy": galaxy.get("name"), "type": "npc_spawn", "count": count, "target": target, **spawned})
+            elif count > target and bool(WORLD_SERVER_BALANCE.get("trim_one_excess_per_type_per_check", True)):
+                trimmed = trim_server_npc_for_galaxy(conn, galaxy, rng)
+                if trimmed:
+                    changes.append({"galaxy": galaxy.get("name"), "type": "npc_trim", "count": count, "target": target, **trimmed})
+
+        if bool(WORLD_SERVER_BALANCE.get("server_controls_npcs", True)) and world_server_due(conn, gid, "patrol", force=force):
+            lo, hi = world_server_range_int("patrols_per_galaxy_min", "patrols_per_galaxy_max", 4, 6)
+            target = rng.randint(lo, hi)
+            count = galaxy_patrol_count(conn, gid)
+            if count < target:
+                spawned = spawn_faction_patrol_for_galaxy(conn, galaxy, rng)
+                if spawned:
+                    changes.append({"galaxy": galaxy.get("name"), "type": "faction_patrol_spawn", "count": count, "target": target, **spawned})
+            elif count > target and bool(WORLD_SERVER_BALANCE.get("patrol_trim_excess", False)):
+                trimmed = trim_faction_patrol_for_galaxy(conn, galaxy, rng)
+                if trimmed:
+                    changes.append({"galaxy": galaxy.get("name"), "type": "faction_patrol_trim", "count": count, "target": target, **trimmed})
+
+        if bool(WORLD_SERVER_BALANCE.get("server_controls_resources", True)) and world_server_due(conn, gid, "resource", force=force):
+            resource_specs = [
+                ("ore", "mining_nodes_per_galaxy_min", "mining_nodes_per_galaxy_max", 5, 15),
+                ("exploration", "exploration_nodes_per_galaxy_min", "exploration_nodes_per_galaxy_max", 5, 15),
+            ]
+            for kind, min_key, max_key, default_min, default_max in resource_specs:
+                lo, hi = world_server_range_int(min_key, max_key, default_min, default_max)
+                target = rng.randint(lo, hi)
+                count = galaxy_resource_count(conn, gid, kind)
+                if count < target:
+                    spawned = spawn_server_resource_node(conn, galaxy, kind, rng)
+                    if spawned:
+                        changes.append({"galaxy": galaxy.get("name"), "type": f"{kind}_spawn", "count": count, "target": target, **spawned})
+                elif count > target and bool(WORLD_SERVER_BALANCE.get("trim_one_excess_per_type_per_check", True)):
+                    trimmed = trim_server_resource_node(conn, galaxy, kind)
+                    if trimmed:
+                        changes.append({"galaxy": galaxy.get("name"), "type": f"{kind}_trim", "count": count, "target": target, **trimmed})
+
+            lo, hi = world_server_range_int("pirate_bases_per_galaxy_min", "pirate_bases_per_galaxy_max", 0, 2)
+            target = rng.randint(lo, hi)
+            target = clamp_int(target, 0, 2)
+            count = galaxy_pirate_base_count(conn, gid)
+            if count < target:
+                spawned = spawn_server_pirate_base_for_galaxy(conn, galaxy, rng)
+                if spawned:
+                    changes.append({"galaxy": galaxy.get("name"), "type": "pirate_base_spawn", "count": count, "target": target, **spawned})
+    if changes:
+        add_event(conn, None, "world_server", f"World server control applied {len(changes)} galaxy adjustments.", {"changes": changes[:40], "force": force})
+    return {"enabled": True, "changes": changes, "changeCount": len(changes)}
+
+
+def uninhabitable_type_for_seed(seed: str) -> str:
+    rng = random.Random(f"uninhabitable-type:{seed}")
+    return rng.choice(["Barren World", "Toxic World", "Frozen Rock", "Volcanic World", "Irradiated Moon", "Gas Giant", "Desert Tomb"])
+
+
+def station_type_for_seed(seed: str) -> str:
+    rng = random.Random(f"station-type:{seed}")
+    return rng.choice(["Trade Station", "Mining Station", "Research Station", "Defense Station", "Freeport Station", "Orbital Station"])
+
+
+def normalize_planet_classes_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any]) -> None:
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (galaxy["id"],))
+    if not planets:
+        return
+    non_gate = [p for p in planets if "gate" not in str(p.get("type") or "").lower()]
+    if not non_gate:
+        return
+    station_target = max(1, int(round(len(planets) * float(WORLD_MISSION_BALANCE.get("station_ratio_per_galaxy", 0.25)))))
+    wild_target = max(1, int(round(len(planets) * float(WORLD_MISSION_BALANCE.get("uninhabitable_ratio_per_galaxy", 0.40)))))
+    ranked_station = sorted(non_gate, key=lambda p: (("station" not in str(p.get("type") or "").lower()), -int(p.get("market_activity") or 0), int(p["id"])))
+    station_ids = {int(p["id"]) for p in ranked_station[:station_target]}
+    remaining = [p for p in non_gate if int(p["id"]) not in station_ids]
+    ranked_wild = sorted(remaining, key=lambda p: (int(p.get("security_level") or 50), -int(p.get("pirate_activity") or 0), int(p["id"])))
+    wild_ids = {int(p["id"]) for p in ranked_wild[:wild_target]}
+
+    for p in planets:
+        pid = int(p["id"])
+        typ = str(p.get("type") or "")
+        if "gate" in typ.lower():
+            continue
+        if pid in station_ids:
+            new_type = station_type_for_seed(f"{galaxy['id']}:{pid}:{p.get('code')}")
+            conn.execute(
+                """UPDATE planets
+                   SET type=?, population=max(population, ?), market_activity=max(market_activity, ?),
+                       customs_rating=max(customs_rating, ?), medical_quality=max(medical_quality, ?),
+                       stability_level=max(stability_level, ?)
+                   WHERE id=?""",
+                (new_type, 900000, 68, 58, 58, 55, pid),
+            )
+        elif pid in wild_ids:
+            new_type = uninhabitable_type_for_seed(f"{galaxy['id']}:{pid}:{p.get('code')}")
+            rng = random.Random(f"wild-stats:{galaxy['id']}:{pid}")
+            conn.execute(
+                """UPDATE planets
+                   SET type=?, population=?, npc_density=?, npc_activity=?, friendliness=?, hostility=?,
+                       lawfulness=?, npc_economy_bias=?, npc_criminal_bias=?, market_activity=?, customs_rating=?,
+                       medical_quality=?, stability_level=?, pirate_activity=?
+                   WHERE id=?""",
+                (
+                    f"Uninhabitable {new_type}",
+                    rng.randint(0, 7500),
+                    rng.randint(5, 28),
+                    rng.randint(8, 46),
+                    rng.randint(5, 42),
+                    rng.randint(35, 92),
+                    rng.randint(4, 42),
+                    rng.randint(8, 35),
+                    rng.randint(32, 88),
+                    rng.randint(12, 42),
+                    rng.randint(5, 32),
+                    rng.randint(4, 28),
+                    rng.randint(15, 55),
+                    clamp_int(int(p.get("pirate_activity") or 40) + rng.randint(4, 20), 5, 98),
+                    pid,
+                ),
+            )
+
+
+def normalize_all_planet_classes(conn: sqlite3.Connection) -> None:
+    for g in rows(conn, "SELECT * FROM galaxies ORDER BY id"):
+        normalize_planet_classes_for_galaxy(conn, g)
+
+
+def ensure_planet_classes_applied(conn: sqlite3.Connection) -> None:
+    key = "planet_classes:mission_balance_applied:v2"
+    current = app_state_get_json(conn, key)
+    if current.get("applied"):
+        return
+    normalize_all_planet_classes(conn)
+    app_state_put_json(conn, key, {"applied": True, "at": iso()})
+
+
+def mission_level_from_xp(xp: int) -> int:
+    return max(1, min(int(WORLD_MISSION_BALANCE.get("planet_mission_max_level", 50)), 1 + int(math.sqrt(max(0, int(xp)) / 160.0))))
+
+
+def mission_item_reward_rolls(mission_key: str, cfg: Dict[str, Any], level: int, center_ratio: float, seed: str) -> List[Dict[str, Any]]:
+    rewards = cfg.get("rewardItems") or []
+    if not rewards:
+        return []
+    rng = random.Random(seed)
+    weighted: List[Dict[str, Any]] = []
+    for item in rewards:
+        weight = max(1, int(item.get("weight") or 1))
+        weighted.extend([item] * weight)
+    picks = 1 + (1 if level >= 6 and rng.random() < 0.45 else 0) + (1 if center_ratio >= 0.65 and rng.random() < 0.35 else 0)
+    out: Dict[str, Dict[str, Any]] = {}
+    for _ in range(max(1, picks)):
+        item = dict(rng.choice(weighted))
+        code = str(item.get("code") or f"{mission_key}_field_material")
+        qty_min = max(1, int(item.get("qtyMin") or WORLD_MISSION_BALANCE.get("mission_material_qty_min", 1) or 1))
+        qty_max = max(qty_min, int(item.get("qtyMax") or WORLD_MISSION_BALANCE.get("mission_material_qty_max", 4) or 4))
+        qty = rng.randint(qty_min, qty_max)
+        bonus_every = max(1, int(WORLD_MISSION_BALANCE.get("mission_material_level_bonus_every", 5) or 5))
+        qty += max(0, (max(1, int(level)) - 1) // bonus_every)
+        qty += rng.randint(0, max(0, int(round(center_ratio * float(WORLD_MISSION_BALANCE.get("mission_material_center_bonus_max", 2) or 2)))))
+        if code not in out:
+            out[code] = {
+                "code": code,
+                "name": item.get("name") or label_for_api(code),
+                "category": item.get("category") or "mission_materials",
+                "rarity": item.get("rarity") or "common",
+                "qty": 0,
+                "baseValue": int(item.get("baseValue") or item.get("base_value") or 100),
+                "mass": float(item.get("mass") or 0.1),
+                "description": item.get("description") or "Planet mission-only crafting material.",
+                "missionKey": mission_key,
+            }
+        out[code]["qty"] += max(1, int(qty))
+    ultra = roll_mission_ultra_reward(mission_key, level, seed)
+    if ultra and ultra.get("code") not in out:
+        out[ultra["code"]] = dict(ultra)
+    return list(out.values())
+
+
+def grant_planet_mission_item_rewards(conn: sqlite3.Connection, player_id: int, items: List[Dict[str, Any]]) -> None:
+    for item in items or []:
+        qty = int(item.get("qty") or 0)
+        if qty <= 0:
+            continue
+        add_inventory_item(
+            conn,
+            player_id,
+            str(item.get("code") or "planet_mission_material"),
+            str(item.get("name") or label_for_api(item.get("code") or "planet_mission_material")),
+            "mission_material",
+            qty,
+            1,
+            int(item.get("baseValue") or item.get("base_value") or 100),
+            float(item.get("mass") or 0.1),
+            str(item.get("description") or "Planet mission-only crafting material."),
+            "planet_mission",
+            category=str(item.get("category") or "mission_materials"),
+            rarity=str(item.get("rarity") or "common"),
+            sellable=1,
+            craftable_material=1,
+            cargo_exempt=0,
+            tier=int(item.get("tier") or 1),
+            max_tier=int(item.get("tier") or 1),
+        )
+
+
+def mission_reward_text(items: List[Dict[str, Any]], xp: int) -> str:
+    item_text = ", ".join(f"{int(i.get('qty') or 0)}x {i.get('name') or label_for_api(i.get('code') or 'material')}" for i in (items or [])[:4])
+    return f"{int(xp)} XP" + (f" • {item_text}" if item_text else "")
+
+
+MISSION_RESULT_PROFILE = {
+    "critical_success": {"label": "Critical Success", "kind": "crit_success", "cooldown": (0, 0)},
+    "success": {"label": "Success", "kind": "success", "cooldown": (0, 0)},
+    "failure": {"label": "Failure", "kind": "failure", "cooldown": (int(WORLD_MISSION_BALANCE.get("mission_failure_cooldown_min_minutes", 3)), int(WORLD_MISSION_BALANCE.get("mission_failure_cooldown_max_minutes", 9)))},
+    "critical_failure": {"label": "Critical Failure", "kind": "crit_fail", "cooldown": (int(WORLD_MISSION_BALANCE.get("mission_crit_failure_cooldown_min_minutes", 8)), int(WORLD_MISSION_BALANCE.get("mission_crit_failure_cooldown_max_minutes", 18)))},
+}
+
+MISSION_PLANET_TRAITS = {
+    "survey": ["dusty ridge", "glittering ice shelf", "crooked basalt field", "glowing canyon lip", "quiet ruin cluster", "magnetic dune line", "windy crater rim", "friendly-looking boulder that definitely judges you"],
+    "salvage": ["collapsed hangar", "half-buried cargo yard", "twisted relay trench", "charred landing pad", "sunken wreck lane", "rusted scaffold maze", "cracked service tunnel", "mysterious pile of useful nonsense"],
+    "hazard": ["acid mist basin", "spark-spitting relay bank", "unstable vent field", "frostbite ravine", "irradiated sinkhole", "shifting crystal scar", "electrostatic dune sea", "surprisingly rude geothermal puddle"],
+}
+
+MISSION_OBJECT_HINTS = {
+    "survey": ["beacon", "ore", "crystal", "artifact", "ancient", "scanner", "relic", "planet"],
+    "salvage": ["salvage", "wreck", "relic", "drone", "container", "module", "component", "beacon"],
+    "hazard": ["hazard", "crystal", "shield", "engine", "medical", "beacon", "relic", "component"],
+}
+
+MISSION_ACTION_LIBRARY_CONFIG = {
+    "survey": {
+        "intros": [
+            "{resultLabel}: You march into the {planetTrait} with your scanner humming like it drank too much reactor coffee.",
+            "{resultLabel}: A {tierLabel} survey route opens up across the {planetTrait}, and your boots commit immediately.",
+            "{resultLabel}: The {planetTrait} looks harmless until it absolutely is not, which is honestly on brand.",
+            "{resultLabel}: Your visor pings at the edge of the {planetTrait}, so you head over with professional curiosity and moderate chaos.",
+            "{resultLabel}: You fan out across the {planetTrait} and pretend the wobbling scanner tray is part of the plan.",
+            "{resultLabel}: A fresh reading drags you toward the {planetTrait}, where science and bad footing shake hands.",
+            "{resultLabel}: You pick through the {planetTrait} while the mission board insists this is all very routine.",
+            "{resultLabel}: The {planetTrait} lights up on your display, and you hustle over before someone else can claim the bragging rights.",
+            "{resultLabel}: You stride into the {planetTrait} looking sharp, competent, and only slightly over-caffeinated.",
+            "{resultLabel}: The survey lane points straight at the {planetTrait}, so off you go to bother geology for profit.",
+        ],
+        "middles": [
+            "Your scanner chirps at a {objectName}, and you secure {itemName} before the dust settles.",
+            "You flag a {objectName}, tap in a clean reading, and tuck away {itemName} with a satisfied nod.",
+            "A strange echo bounces off a {objectName}; it turns out the echo was hiding {itemName}.",
+            "You sweep past a {objectName}, rerun the trace twice, and end up with {itemName} anyway.",
+            "The {objectName} turns out to be more useful than photogenic, which is how you end up with {itemName}.",
+            "Your pack gets heavier after a cheerful encounter with a {objectName} and a tidy stack of {itemName}.",
+            "You kneel by a {objectName}, log the reading, and pocket {itemName} like a seasoned professional goblin.",
+            "A {objectName} coughs up a good lead, a better reading, and {itemName} for your trouble.",
+            "You circle a {objectName} one careful step at a time until it finally gives up {itemName}.",
+            "The {objectName} makes a suspicious noise, but the real surprise is the {itemName} you recover beside it.",
+            "You triangulate a {objectName} and discover {itemName}, proving once again that wandering around can be a career.",
+            "Your instruments argue over a {objectName}; you settle the debate by extracting {itemName}.",
+            "A {objectName} produces exactly the sort of weird reading that leads to {itemName}.",
+            "You tap, scan, and re-scan a {objectName} until the field kit rewards you with {itemName}.",
+            "A wobbling marker draws you to a {objectName}, where {itemName} is waiting like it booked the appointment.",
+            "You map a {objectName}, dodge a little falling grit, and come away with {itemName}.",
+            "The {objectName} is oddly cooperative today, so collecting {itemName} feels almost suspiciously easy.",
+            "You grin at a promising {objectName}; it grins back by handing over {itemName}.",
+            "You hop over a crack, lean into a {objectName}, and recover {itemName} with style.",
+            "The {objectName} gives off a great signal and an even better payout in {itemName}.",
+        ],
+    },
+    "salvage": {
+        "intros": [
+            "{resultLabel}: You step into the {planetTrait}, where every piece of scrap insists it has a backstory.",
+            "{resultLabel}: A {tierLabel} salvage ping leads you into the {planetTrait} with a cutter in one hand and optimism in the other.",
+            "{resultLabel}: The {planetTrait} groans in the wind, which usually means something valuable survived the mess.",
+            "{resultLabel}: You duck under loose plating and head across the {planetTrait} before the dust can file a complaint.",
+            "{resultLabel}: Your salvage route opens through the {planetTrait}, a lovely place to trip over profitable debris.",
+            "{resultLabel}: The {planetTrait} looks like a junk heap from orbit and a treasure map up close.",
+            "{resultLabel}: You crack open the next salvage lane in the {planetTrait} with heroic posture and a very practical wrench.",
+            "{resultLabel}: One ping later, you are elbow-deep in the {planetTrait} and smiling at the possibilities.",
+            "{resultLabel}: The {planetTrait} rattles around you while you go shopping for ship parts the hard way.",
+            "{resultLabel}: You head into the {planetTrait}, where the definition of salvageable stays comfortingly flexible.",
+        ],
+        "middles": [
+            "You pry open a {objectName} and uncover {itemName} tucked behind a layer of heroic grime.",
+            "A sleepy {objectName} finally gives up {itemName} after you persuade it with tools and optimism.",
+            "You crack through a {objectName}, duck a shower of bolts, and come away holding {itemName}.",
+            "The {objectName} looks finished until a hidden compartment coughs up {itemName}.",
+            "You wrench at a {objectName} until it politely releases {itemName} and one deeply offended screw.",
+            "A {objectName} gives you attitude, but it also gives you {itemName}, so the relationship evens out.",
+            "You sift through a {objectName} and find {itemName} before the dust even realizes what happened.",
+            "The best part of the {objectName} turns out to be the {itemName} you drag free from underneath it.",
+            "You slice into a {objectName} and recover {itemName}, plus bragging rights for the clean entry.",
+            "A rattling {objectName} nearly tips over before revealing {itemName} like a dramatic stage prop.",
+            "You lean into a {objectName}, pop the latch, and secure {itemName} with a grin.",
+            "The {objectName} is mostly rust, but the pocket of {itemName} inside makes the detour worth it.",
+            "You pull apart a {objectName} and discover {itemName} wedged in exactly the least convenient place.",
+            "One stubborn {objectName} later, you emerge victorious and carrying {itemName}.",
+            "You shake down a {objectName}; out drops {itemName} and a deeply judgmental puff of dust.",
+            "A half-buried {objectName} turns into a jackpot when you spot {itemName} inside.",
+            "The {objectName} gives in after a short argument, leaving you with {itemName}.",
+            "You peel away charred plating from a {objectName} and recover {itemName} in surprisingly decent shape.",
+            "A battered {objectName} hides {itemName}, which is exactly why you keep crawling into places like this.",
+            "You coax open a {objectName} and bag {itemName} before the structure remembers to complain.",
+        ],
+    },
+    "hazard": {
+        "intros": [
+            "{resultLabel}: You push into the {planetTrait}, where the weather report simply says bold of you.",
+            "{resultLabel}: A {tierLabel} hazard route lights up through the {planetTrait}, so you clip in and get moving.",
+            "{resultLabel}: The {planetTrait} crackles ominously, which is usually how interesting paydays introduce themselves.",
+            "{resultLabel}: You step into the {planetTrait} with alarms humming softly and confidence humming louder.",
+            "{resultLabel}: The {planetTrait} spits sparks in the distance, but your mission board still calls this a manageable inconvenience.",
+            "{resultLabel}: Your boots hit the {planetTrait}, and the local atmosphere immediately decides to be extra about it.",
+            "{resultLabel}: You charge into the {planetTrait}, looking heroic enough to distract from the danger.",
+            "{resultLabel}: The route across the {planetTrait} looks unstable, glowing, and therefore impossible to ignore.",
+            "{resultLabel}: You angle into the {planetTrait}, hoping the protective suit continues doing all the hard work.",
+            "{resultLabel}: The {planetTrait} roars ahead, and you answer with a toolkit, a shield pack, and deeply questionable enthusiasm.",
+        ],
+        "middles": [
+            "You stabilize a {objectName} and recover {itemName} before the situation can become dramatically worse.",
+            "A grumpy {objectName} nearly spoils the run, but you still secure {itemName} and keep moving.",
+            "You sidestep a burst from a {objectName}, then scoop up {itemName} like this was always the plan.",
+            "The {objectName} flares bright, calms down, and leaves you with {itemName} for your trouble.",
+            "You lock down a {objectName} and pull {itemName} out of the chaos with surprisingly steady hands.",
+            "A snappy {objectName} tries to ruin your day; instead, it helps you find {itemName}.",
+            "You cool off a {objectName} and salvage {itemName} before the hazard can file a second complaint.",
+            "The {objectName} throws a fit, but you walk away carrying {itemName} and a smug little victory.",
+            "You patch around a {objectName}, vent the pressure, and collect {itemName} from the newly calmer mess.",
+            "A wild pulse from a {objectName} forces a quick shuffle, yet you still leave with {itemName}.",
+            "You outmaneuver a {objectName}, steady the field, and recover {itemName} right on cue.",
+            "The {objectName} sputters, sparks, and eventually rewards you with {itemName}.",
+            "You drag a shield line past a {objectName} and snag {itemName} while the alarms quietly judge you.",
+            "A buzzing {objectName} looks dangerous, which usually means it is also hiding {itemName}.",
+            "You talk yourself through a messy encounter with a {objectName} and come out with {itemName}.",
+            "The {objectName} briefly becomes very exciting, but so does the {itemName} you recover afterward.",
+            "You hold the line against a {objectName}, then pocket {itemName} once things settle down.",
+            "A twitchy {objectName} almost steals the moment; you steal {itemName} instead.",
+            "You jam a stabilizer into a {objectName} and secure {itemName} before the sparks regroup.",
+            "The {objectName} throws one last tantrum, then hands over {itemName} like it always meant to.",
+        ],
+    },
+}
+
+
+def build_mission_action_message_library() -> Dict[str, List[str]]:
+    libraries: Dict[str, List[str]] = {}
+    for mission_key, cfg in MISSION_ACTION_LIBRARY_CONFIG.items():
+        templates: List[str] = []
+        seen = set()
+        for middle in cfg["middles"]:
+            for intro in cfg["intros"]:
+                template = intro + " " + middle + " {endingLine}"
+                if template not in seen:
+                    seen.add(template)
+                    templates.append(template)
+                if len(templates) >= 200:
+                    break
+            if len(templates) >= 200:
+                break
+        libraries[mission_key] = templates[:200]
+    return libraries
+
+
+MISSION_ACTION_MESSAGE_LIBRARY = build_mission_action_message_library()
+
+
+def player_planet_mission_cooldown_info(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    rec = row(conn, "SELECT planet_mission_cooldown_until, planet_mission_cooldown_reason FROM players WHERE id=?", (player_id,)) or {}
+    until = parse_dt(rec.get("planet_mission_cooldown_until"))
+    now = utcnow()
+    seconds = max(0, int((until - now).total_seconds())) if until else 0
+    active = bool(until and seconds > 0)
+    return {
+        "active": active,
+        "until": iso(until) if until and active else None,
+        "secondsRemaining": seconds,
+        "minutesRemaining": max(0, math.ceil(seconds / 60)) if active else 0,
+        "reason": rec.get("planet_mission_cooldown_reason") or ("Mission cooldown active." if active else ""),
+    }
+
+
+def set_player_planet_mission_cooldown(conn: sqlite3.Connection, player_id: int, minutes: int, reason: str = "") -> Dict[str, Any]:
+    minutes = clamp_int(int(minutes or 0), 0, int(WORLD_MISSION_BALANCE.get("mission_cooldown_cap_minutes", 120) or 120))
+    if minutes <= 0:
+        conn.execute("UPDATE players SET planet_mission_cooldown_until=NULL, planet_mission_cooldown_reason='' WHERE id=?", (player_id,))
+        return {"active": False, "until": None, "secondsRemaining": 0, "minutesRemaining": 0, "reason": ""}
+    until = utcnow() + timedelta(minutes=minutes)
+    conn.execute("UPDATE players SET planet_mission_cooldown_until=?, planet_mission_cooldown_reason=? WHERE id=?", (iso(until), reason or f"Planet mission cooldown: {minutes} minutes.", player_id))
+    return player_planet_mission_cooldown_info(conn, player_id)
+
+
+def mission_cooldown_minutes_from_events(events: List[Dict[str, Any]], progress: float = 1.0) -> int:
+    total = 0
+    cap = int(WORLD_MISSION_BALANCE.get("mission_cooldown_cap_minutes", 120) or 120)
+    for ev in events or []:
+        if float(ev.get("atPct") or 0) <= float(progress) + 0.0001:
+            total += int(ev.get("cooldownAddMinutes") or 0)
+    return clamp_int(total, 0, cap)
+
+
+def mission_tier_label_from_difficulty(difficulty: int) -> str:
+    diff = max(1, int(difficulty or 1))
+    if diff <= 12:
+        return "Tier 1"
+    if diff <= 22:
+        return "Tier 2"
+    if diff <= 38:
+        return "Tier 3"
+    if diff <= 60:
+        return "Tier 4"
+    return "Tier 5"
+
+
+def mission_scene_hint_from_event(mission_key: str, reward_item: Optional[Dict[str, Any]], rng: random.Random) -> Tuple[str, str, str]:
+    hints = MISSION_OBJECT_HINTS.get(mission_key) or ["relic"]
+    if reward_item:
+        code = str(reward_item.get("code") or "")
+        name = str(reward_item.get("name") or label_for_api(code or "object"))
+        if ultra_item_def(code):
+            return ("item", code, name)
+        if any(k in code for k in ["survey", "data", "sample"]):
+            return ("material", "ore", name)
+        if any(k in code for k in ["salvage", "relic", "plate", "core"]):
+            return ("material", "salvage", name)
+        if any(k in code for k in ["hazard", "containment", "catalyst"]):
+            return ("material", "crystal", name)
+        return ("material", rng.choice(hints), name)
+    hint = rng.choice(hints)
+    return ("material", hint, label_for_api(hint))
+
+
+def mission_event_log(seed: str, cfg: Dict[str, Any], minutes: int, mission_key: str = "", planet: Optional[Dict[str, Any]] = None, reward_items: Optional[List[Dict[str, Any]]] = None, level: int = 1, difficulty: int = 1) -> List[Dict[str, Any]]:
+    rng = random.Random(seed)
+    mission_key = mission_key or next((k for k, v in (WORLD_MISSION_BALANCE.get("mission_types") or {}).items() if v == cfg), "survey")
+    library = list(MISSION_ACTION_MESSAGE_LIBRARY.get(mission_key) or []) or ["{resultLabel}: You push ahead through the field and recover {itemName}. {endingLine}"]
+    count = max(10, min(18, int(minutes // 4) + 4))
+    tier_label = mission_tier_label_from_difficulty(difficulty)
+    trait_pool = MISSION_PLANET_TRAITS.get(mission_key) or ["mission zone"]
+    objects = ["crooked beacon", "wobbling crate", "strange marker", "polite-looking rock", "half-buried relay", "micro-crater stash", "shimmering panel", "singed toolbox", "dusty scanner pod", "battered antenna", "sparky conduit", "mischievous rubble pile", "sealed locker", "old field cache", "tilted drone shell", "magnetic shard cluster"]
+    success_bonus = min(16, max(0, (int(level) - 1) // 2))
+    weights = [("critical_success", 10 + success_bonus // 3), ("success", 58 + success_bonus), ("failure", max(10, 22 - success_bonus // 2)), ("critical_failure", max(4, 10 - success_bonus // 3))]
+    total_weight = sum(w for _, w in weights)
+    reward_cycle = list(reward_items or []) or [{"name": "field sample", "code": "field_sample", "qty": 1}]
+    events: List[Dict[str, Any]] = []
+    used_indexes = set()
+    for i in range(count):
+        pick = rng.randint(1, total_weight)
+        outcome = "success"
+        cursor = 0
+        for key, weight in weights:
+            cursor += weight
+            if pick <= cursor:
+                outcome = key
+                break
+        profile = MISSION_RESULT_PROFILE[outcome]
+        while True:
+            t_idx = rng.randint(0, len(library) - 1)
+            if t_idx not in used_indexes or len(used_indexes) >= len(library) - 2:
+                used_indexes.add(t_idx)
+                template = library[t_idx]
+                break
+        reward_item = rng.choice(reward_cycle) if outcome in {"success", "critical_success"} else (rng.choice(reward_cycle) if rng.random() < 0.35 else None)
+        asset_type, asset_hint, scene_name = mission_scene_hint_from_event(mission_key, reward_item, rng)
+        cd_range = profile.get("cooldown") or (0, 0)
+        cooldown_add = rng.randint(int(cd_range[0]), int(cd_range[1])) if int(cd_range[1]) > 0 else 0
+        cooldown_text = f"(+{cooldown_add} min mission cooldown)." if cooldown_add > 0 else ""
+        ending_line = rng.choice(["The mission pace stays steady.", "You keep the run moving.", "Momentum remains on your side.", "The adventure continues with suspicious confidence.", "The objective tracker happily ticks forward."]) if cooldown_add <= 0 else rng.choice([cooldown_text, f"You shake it off. {cooldown_text}", f"Your pride takes a tiny dent. {cooldown_text}", f"Even the local gravel seems amused. {cooldown_text}"])
+        text = template.format(resultLabel=profile["label"], tierLabel=tier_label, itemName=(reward_item or {}).get("name") or "field sample", cooldownText=cooldown_text, objectName=rng.choice(objects), planetName=(planet or {}).get("name") or "the surface", planetTrait=rng.choice(trait_pool), endingLine=ending_line)
+        events.append({"atPct": round((i + 1) / (count + 1), 3), "text": text, "kind": profile["kind"], "outcome": outcome, "resultLabel": profile["label"], "cooldownAddMinutes": cooldown_add, "sceneAssetType": asset_type, "sceneAssetHint": asset_hint, "sceneObjectName": scene_name, "itemName": (reward_item or {}).get("name") or "", "itemCode": (reward_item or {}).get("code") or ""})
+    ultra_reward = next((r for r in (reward_items or []) if ultra_item_def(r.get("code"))), None)
+    if ultra_reward:
+        ultra_def = ultra_item_def(ultra_reward.get("code")) or {}
+        events.append({
+            "atPct": 0.965,
+            "text": ultra_def.get("special_text") or f"You uncover {ultra_reward.get('name') or 'an ultra item'}.",
+            "kind": "crit_success",
+            "outcome": "ultra",
+            "resultLabel": "Ultra Discovery",
+            "cooldownAddMinutes": 0,
+            "sceneAssetType": "item",
+            "sceneAssetHint": ultra_reward.get("code") or "",
+            "sceneObjectName": ultra_reward.get("name") or "Ultra discovery",
+            "itemName": ultra_reward.get("name") or "",
+            "itemCode": ultra_reward.get("code") or "",
+        })
+    return events
+
+
+def mission_contracts_for_planet(conn: sqlite3.Connection, player: Dict[str, Any], planet: Dict[str, Any]) -> List[Dict[str, Any]]:
+    mission_types = WORLD_MISSION_BALANCE.get("mission_types") or {}
+    distribution = WORLD_MISSION_BALANCE.get("mission_distribution") or list(mission_types.keys())
+    band = world_band_for_galaxy(conn, int(planet.get("galaxy_id") or 0))
+    center_ratio = galaxy_progression_ratio(conn, row(conn, "SELECT * FROM galaxies WHERE id=?", (planet.get("galaxy_id"),)) or {})
+    center_mult = 1.0 + center_ratio * (float(WORLD_MISSION_BALANCE.get("center_reward_multiplier_max", 3.0)) - 1.0)
+    rng = random.Random(f"planet-contracts:{planet.get('id')}:{planet.get('type')}")
+    picks = list(distribution)
+    rng.shuffle(picks)
+    picks = picks[:3]
+    out = []
+    active = active_planet_mission(conn, int(player["id"]))
+    cooldown = player_planet_mission_cooldown_info(conn, int(player["id"]))
+    for key in picks:
+        cfg = mission_types.get(key) or {}
+        prog = row(conn, "SELECT * FROM planet_mission_progress WHERE player_id=? AND planet_id=? AND mission_key=?", (player["id"], planet["id"], key)) or {}
+        level = max(1, int(prog.get("level") or mission_level_from_xp(int(prog.get("xp") or 0))))
+        time_mult = 1.0 + (level - 1) * float(WORLD_MISSION_BALANCE.get("mission_time_growth_pct_per_level", 0.10))
+        reward_mult = 1.0 + (level - 1) * float(WORLD_MISSION_BALANCE.get("mission_reward_growth_pct_per_level", 0.20))
+        base_minutes = rng.randint(int(WORLD_MISSION_BALANCE.get("mission_base_minutes_min", 30)), int(WORLD_MISSION_BALANCE.get("mission_base_minutes_max", 60)))
+        minutes = int(base_minutes * time_mult)
+        credits = 0 if not bool(WORLD_MISSION_BALANCE.get("direct_credit_rewards_enabled", False)) else int(int(cfg.get("baseCredits") or 0) * reward_mult * center_mult)
+        xp = int(int(cfg.get("xp") or 75) * reward_mult)
+        reward_items = mission_item_reward_rolls(key, cfg, level, center_ratio, f"mission-preview:{player['id']}:{planet['id']}:{key}:{level}")
+        difficulty = clamp_int(int((int(band.get("npc_level_min") or 1) + int(band.get("npc_level_max") or 10)) / 2) + level, 1, 120)
+        can_start = not bool(active) and not bool(cooldown.get("active"))
+        blocked_reason = "Mission already active" if active else (f"Cooldown {cooldown.get('minutesRemaining')} min" if cooldown.get("active") else "")
+        out.append({"key": key, "name": cfg.get("name") or label_for_api(key), "description": f"{label_for_api(str(planet.get('type') or 'planet'))} contract. Planet mission level {level}; stronger contracts appear closer to center space.", "planetId": planet["id"], "planetName": planet.get("name"), "planetType": planet.get("type"), "level": level, "tierLabel": mission_tier_label_from_difficulty(difficulty), "planetMissionXp": int(prog.get("xp") or 0), "completed": int(prog.get("completed_count") or 0), "minutes": minutes, "rewardCredits": credits, "rewardXp": xp, "rewardItems": reward_items, "rewardText": mission_reward_text(reward_items, xp), "difficulty": difficulty, "tags": cfg.get("tags") or [], "canStart": can_start, "blockedReason": blocked_reason})
+    return out
+
+
+def active_planet_mission(conn: sqlite3.Connection, player_id: int) -> Optional[Dict[str, Any]]:
+    mission = row(conn, """
+        SELECT pmr.*, p.name as planet_name, p.type as planet_type, g.name as galaxy_name
+        FROM planet_mission_runs pmr
+        JOIN planets p ON p.id=pmr.planet_id
+        JOIN galaxies g ON g.id=p.galaxy_id
+        WHERE pmr.player_id=? AND pmr.status='active'
+        ORDER BY pmr.id DESC LIMIT 1
+    """, (player_id,))
+    if not mission:
+        return None
+    now = utcnow()
+    started = parse_dt(mission.get("started_at")) or now
+    done = parse_dt(mission.get("completes_at")) or now
+    total = max(1, (done - started).total_seconds())
+    progress = max(0.0, min(1.0, (now - started).total_seconds() / total))
+    mission["progress"] = progress
+    mission["secondsRemaining"] = max(0, int((done - now).total_seconds()))
+    mission["eventLog"] = decode_json(mission.get("event_log_json"), []) or []
+    mission["rewardItems"] = decode_json(mission.get("reward_items_json"), []) or []
+    mission["rewardText"] = mission_reward_text(mission["rewardItems"], int(mission.get("reward_xp") or 0))
+    mission["cooldownAccruedMinutes"] = mission_cooldown_minutes_from_events(mission["eventLog"], progress)
+    mission["cooldownProjectedMinutes"] = mission_cooldown_minutes_from_events(mission["eventLog"], 1.0)
+    return mission
+
+
+def resolve_completed_planet_missions(conn: sqlite3.Connection, player_id: int) -> List[Dict[str, Any]]:
+    completed = []
+    now = utcnow()
+    for m in rows(conn, "SELECT * FROM planet_mission_runs WHERE player_id=? AND status='active' AND completes_at<=?", (player_id, iso(now))):
+        reward_items = decode_json(m.get("reward_items_json"), []) or []
+        events = decode_json(m.get("event_log_json"), []) or []
+        personal_xp = int(m.get("reward_xp") or 0)
+        xp_gain = int(WORLD_MISSION_BALANCE.get("mission_xp_per_completion", 100)) + personal_xp
+        conn.execute("UPDATE players SET xp=xp+? WHERE id=?", (personal_xp, player_id))
+        grant_planet_mission_item_rewards(conn, player_id, reward_items)
+        progress = row(conn, "SELECT * FROM planet_mission_progress WHERE player_id=? AND planet_id=? AND mission_key=?", (player_id, m["planet_id"], m["mission_key"]))
+        old_xp = int((progress or {}).get("xp") or 0)
+        new_xp = old_xp + xp_gain
+        new_level = mission_level_from_xp(new_xp)
+        item_value = sum(int(i.get("qty") or 0) * int(i.get("baseValue") or i.get("base_value") or 0) for i in reward_items)
+        if progress:
+            conn.execute("UPDATE planet_mission_progress SET xp=?, level=?, completed_count=completed_count+1, total_rewards=total_rewards+?, updated_at=? WHERE id=?", (new_xp, new_level, item_value, iso(now), progress["id"]))
+        else:
+            conn.execute("INSERT INTO planet_mission_progress (player_id,planet_id,mission_key,xp,level,completed_count,total_rewards,updated_at) VALUES (?,?,?,?,?,?,?,?)", (player_id, m["planet_id"], m["mission_key"], new_xp, new_level, 1, item_value, iso(now)))
+        cooldown_minutes = mission_cooldown_minutes_from_events(events, 1.0)
+        cooldown = set_player_planet_mission_cooldown(conn, player_id, cooldown_minutes, f"Planet mission recovery time: {cooldown_minutes} minutes." if cooldown_minutes > 0 else "")
+        reward_text = mission_reward_text(reward_items, personal_xp)
+        suffix = f" Cooldown {cooldown_minutes} min." if cooldown_minutes > 0 else ""
+        conn.execute("UPDATE planet_mission_runs SET status='complete', completed_at=?, message=? WHERE id=?", (iso(now), f"Completed. Recovered {reward_text}.{suffix}", m["id"]))
+        grant_action_progression(conn, player_id, "planet_mission", 1.0 + new_level / 10, True)
+        add_event(conn, player_id, "planet_mission", f"Completed {m.get('mission_name')} on planet mission level {new_level}.", {"missionId": m["id"], "items": reward_items, "personalXp": personal_xp, "missionXp": xp_gain, "level": new_level, "cooldownMinutes": cooldown_minutes})
+        completed.append({"id": m["id"], "items": reward_items, "personalXp": personal_xp, "level": new_level, "name": m.get("mission_name"), "cooldown": cooldown})
+    return completed
+
+
+def build_planet_missions_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    resolve_completed_planet_missions(conn, int(player["id"]))
+    planet = row(conn, "SELECT p.*, g.name as galaxy_name FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player["location_planet_id"],))
+    active = active_planet_mission(conn, int(player["id"]))
+    contracts = mission_contracts_for_planet(conn, player, planet) if planet else []
+    history = rows(conn, "SELECT pmr.*, p.name as planet_name FROM planet_mission_runs pmr JOIN planets p ON p.id=pmr.planet_id WHERE pmr.player_id=? ORDER BY pmr.id DESC LIMIT 20", (player["id"],))
+    progress = rows(conn, "SELECT pmp.*, p.name as planet_name, p.type as planet_type FROM planet_mission_progress pmp JOIN planets p ON p.id=pmp.planet_id WHERE pmp.player_id=? ORDER BY pmp.updated_at DESC LIMIT 50", (player["id"],))
+    cooldown = player_planet_mission_cooldown_info(conn, int(player["id"]))
+    return {"location": planet, "contracts": contracts, "active": active, "history": history, "progress": progress, "cooldown": cooldown, "config": WORLD_MISSION_BALANCE}
+
+
+def planet_mission_travel_state_key(player_id: int) -> str:
+    return f"player:{int(player_id)}:planet_mission_travel"
+
+
+def set_planet_mission_travel_intent(conn: sqlite3.Connection, player_id: int, meta: Dict[str, Any]) -> None:
+    app_state_put_json(conn, planet_mission_travel_state_key(player_id), meta)
+
+
+def get_planet_mission_travel_intent(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    return app_state_get_json(conn, planet_mission_travel_state_key(player_id))
+
+
+def clear_planet_mission_travel_intent(conn: sqlite3.Connection, player_id: int) -> None:
+    app_state_delete(conn, planet_mission_travel_state_key(player_id))
+
+
+def start_planet_mission_run(conn: sqlite3.Connection, player: Dict[str, Any], planet: Dict[str, Any], mission_key: str, god: bool = False) -> Dict[str, Any]:
+    pid = int(player["id"])
+    if active_planet_mission(conn, pid):
+        raise HTTPException(409, "A planet mission is already active")
+    cooldown = player_planet_mission_cooldown_info(conn, pid)
+    if cooldown.get("active") and not god:
+        raise HTTPException(409, f"Planet mission cooldown active for {cooldown.get('minutesRemaining')} more minutes")
+    mission_key = str(mission_key or "").strip()
+    contracts = mission_contracts_for_planet(conn, player, planet)
+    contract = next((c for c in contracts if c["key"] == mission_key), None)
+    if not contract:
+        raise HTTPException(404, "Mission contract not available here")
+    cfg = (WORLD_MISSION_BALANCE.get("mission_types") or {}).get(mission_key, {})
+    starts = utcnow()
+    completes = starts + timedelta(minutes=max(1, int(contract["minutes"])))
+    reward_items = contract.get("rewardItems") or []
+    events = mission_event_log(f"{pid}:{planet['id']}:{mission_key}:{iso(starts)}", cfg, int(contract["minutes"]), mission_key=mission_key, planet=planet, reward_items=reward_items, level=int(contract.get("level") or 1), difficulty=int(contract.get("difficulty") or 1))
+    conn.execute(
+        """INSERT INTO planet_mission_runs
+           (player_id,planet_id,mission_key,mission_name,status,level,reward_credits,reward_xp,reward_items_json,started_at,completes_at,event_log_json,message)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (pid, planet["id"], mission_key, contract["name"], "active", contract["level"], 0, contract["rewardXp"], encode_json(reward_items), iso(starts), iso(completes), encode_json(events), "Mission in progress."),
+    )
+    run_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+    add_event(conn, pid, "planet_mission", f"Started {contract['name']} on {planet['name']}.", {"missionId": run_id, "planetId": planet["id"], "missionKey": mission_key})
+    return {"message": f"Started {contract['name']}. Return timer running.", "openPage": "Map", "missionId": run_id}
+
+
+def rebalance_existing_npcs_for_world_progression(conn: sqlite3.Connection) -> int:
+    adjusted = 0
+    npc_rows = rows(conn, "SELECT n.*, p.galaxy_id FROM npc_agents n JOIN planets p ON p.id=n.planet_id WHERE COALESCE(n.alive,1)=1")
+    for n in npc_rows:
+        lo, hi = world_level_range_for_galaxy(conn, int(n.get("galaxy_id") or 0))
+        current = int(n.get("level") or 1)
+        if lo <= current <= hi:
+            continue
+        rng = random.Random(f"npc-world-reband:{n.get('id')}:{lo}:{hi}")
+        mode_level = min(hi, max(lo, lo + int((hi - lo) * 0.35)))
+        new_level = clamp_int(int(rng.triangular(lo, hi, mode_level)), lo, hi)
+        new_xp = int(level_xp_required(new_level) * rng.uniform(0.10, 0.70)) if new_level > 1 else rng.randint(0, 300)
+        rank = clamp_int(1 + new_level // 9, 1, 12)
+        power = clamp_int(int((int(n.get("power") or 100) + new_level * 24) * rng.uniform(0.74, 1.08)), 25, 99999)
+        conn.execute("UPDATE npc_agents SET level=?, xp=?, job_rank=?, power=?, last_action_at=? WHERE id=?", (new_level, new_xp, rank, power, iso(), n["id"]))
+        adjusted += 1
+    if adjusted:
+        conn.execute(
+            "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+            (None, "npc_world_rebalanced", "World Progression", f"Rebalanced {adjusted} existing NPCs into configured world-progression level bands.", encode_json({"adjusted": adjusted}), iso()),
+        )
+    return adjusted
 
 
 def ensure_galaxy_faction_content(conn: sqlite3.Connection) -> None:
@@ -5856,9 +7798,17 @@ def ensure_galaxy_faction_content(conn: sqlite3.Connection) -> None:
             ("hub", f"{g['code']}hub", f"{g['name']} Hub", "Trade Station", -8, -4, 58, 72, 58, 24 + danger_bias, 62, 60),
             ("prime", f"{g['code']}prime", f"{g['name']} Prime", "Colony World", -28, 19, 55, 64, 55, 28 + danger_bias, 55, 58),
             ("belt", f"{g['code']}belt", f"{g['name']} Belt", "Mining Belt", 23, -26, 42, 58, 44, 38 + danger_bias, 46, 40),
+            ("moon", f"{g['code']}moon", f"{g['name']} Moon", "Refinery Moon", -42, -21, 48, 70, 46, 34 + danger_bias, 58, 52),
+            ("relay", f"{g['code']}relay", f"{g['name']} Relay", "Relay Station", 9, 31, 56, 62, 58, 32 + danger_bias, 64, 62),
+            ("ruins", f"{g['code']}ruins", f"{g['name']} Ruins", "Ancient Ruins", -16, -36, 38, 52, 42, 48 + danger_bias, 42, 48),
+            ("freeport", f"{g['code']}freeport", f"{g['name']} Freeport", "Freeport", 41, -11, 44, 82, 36, 54 + danger_bias, 50, 44),
         ]
-        if existing_count < 4:
-            for _, code, name, typ, x, y, sec, market, customs, pirates, defense, med in base_seed:
+        target_planets = max(4, int(WORLD_PROGRESSION_BALANCE.get("target_planets_per_galaxy", 8) or 8))
+        if existing_count < target_planets:
+            for _, code, name, typ, x, y, sec, market, customs, pirates, defense, med in base_seed[:target_planets]:
+                current_count = int(scalar(conn, "SELECT COUNT(*) FROM planets WHERE galaxy_id=?", (g["id"],)) or 0)
+                if current_count >= target_planets:
+                    break
                 if row(conn, "SELECT 1 FROM planets WHERE code=?", (code,)):
                     continue
                 p = (g["id"], code, name, typ, x, y, clamp_int(sec - center_value * 2, 15, 95), clamp_int(market + center_value * 2, 15, 95), customs, clamp_int(pirates, 5, 95), defense, med)
@@ -5869,6 +7819,8 @@ def ensure_galaxy_faction_content(conn: sqlite3.Connection) -> None:
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (*p, stability, population, density, activity, friendly, hostile, lawful, economy_bias, criminal_bias, "npc", 0.03),
                 )
+
+    normalize_all_planet_classes(conn)
 
     # Deterministic adjacency graph. Gates are the actual galaxy-to-galaxy travel edges.
     conn.execute("DELETE FROM galaxy_gates")
@@ -6249,6 +8201,7 @@ def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
 
     ore_all = build_open_world_ore_sites(conn, player, nodes, "galaxy")
     exploration_all = build_open_world_exploration_sites(conn, player, nodes, "galaxy")
+    separate_stationary_map_objects([nodes, ore_all, exploration_all])
     traffic_all = build_open_world_traffic(conn, player, "galaxy", nodes, ore_all + exploration_all)
     ore_sites = annotate_and_filter_by_player_radar(conn, player, nodes, ore_all, "galaxy")
     exploration_sites = annotate_and_filter_by_player_radar(conn, player, nodes, exploration_all, "galaxy")
@@ -6286,6 +8239,8 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
     if not current:
         return {"nodes": [], "lanes": [], "current_planet_id": None, "current_galaxy_id": None}
+    ensure_planet_classes_applied(conn)
+    current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
     travel = build_travel_state(conn, player)
     planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY name", (current["galaxy_id"],))
     visited_planets = set(travel.get("visited_planets") or []) | {int(current["id"])}
@@ -6306,7 +8261,30 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
             can_declare, declare_reason = faction_can_declare_on_planet(conn, int(pf["id"]), player_guild_id, p)
             declare_cost = guild_planet_war_declare_cost(conn, player_guild_id, p)
         owner_faction = faction_by_id.get(int(p.get("faction_id") or 0))
-        node.update({"kind":"planet","x_pct": round(max(7, min(93, 50 + float(p.get("x") or 0) / 2.3)), 2), "y_pct": round(max(8, min(92, 50 + float(p.get("y") or 0) / 2.3)), 2), "current": int(p["id"]) == int(current["id"]), "visited": int(p["id"]) in visited_planets, "legal_market_strength": clamp_int(legal_strength, 1, 99), "illicit_market_strength": clamp_int(illicit_strength, 1, 99), "available_operations": int(ops_counts.get(p["id"], 0) or 0), "risk_level": effects["travel_danger"], "is_gate": "gate" in str(p.get("type") or "").lower(), "faction_name": owner_faction.get("name") if owner_faction else "Neutral", "faction_color": owner_faction.get("color") if owner_faction else "", "can_declare_planet_war": bool(can_declare), "declare_reason": declare_reason, "declare_cost": declare_cost, "image_url": planet_visual_payload(p)})
+        p_type = str(p.get("type") or "")
+        is_uninhabitable = is_uninhabitable_planet_type(p_type)
+        node.update({
+            "kind":"planet",
+            "x_pct": round(max(7, min(93, 50 + float(p.get("x") or 0) / 2.3)), 2),
+            "y_pct": round(max(8, min(92, 50 + float(p.get("y") or 0) / 2.3)), 2),
+            "current": int(p["id"]) == int(current["id"]),
+            "visited": int(p["id"]) in visited_planets,
+            "legal_market_strength": clamp_int(legal_strength, 1, 99),
+            "illicit_market_strength": clamp_int(illicit_strength, 1, 99),
+            "available_operations": int(ops_counts.get(p["id"], 0) or 0),
+            "risk_level": effects["travel_danger"],
+            "is_gate": "gate" in p_type.lower(),
+            "is_uninhabitable": bool(is_uninhabitable),
+            "isUninhabitable": bool(is_uninhabitable),
+            "details_label": f"Uninhabitable Planet — {p_type}" if is_uninhabitable else p_type,
+            "mission_contracts": mission_contracts_for_planet(conn, player, p) if is_uninhabitable else [],
+            "faction_name": owner_faction.get("name") if owner_faction else "Neutral",
+            "faction_color": owner_faction.get("color") if owner_faction else "",
+            "can_declare_planet_war": bool(can_declare),
+            "declare_reason": declare_reason,
+            "declare_cost": declare_cost,
+            "image_url": planet_visual_payload(p)
+        })
         nodes.append(node)
 
     gate_planet = galaxy_gate_planet(conn, int(current["galaxy_id"]))
@@ -6355,11 +8333,14 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     salvage_all = build_map_salvage_icons(conn, player["location_planet_id"])
     exploration_all = build_open_world_exploration_sites(conn, player, nodes, "system")
     pirate_station_all = build_system_pirate_stations(conn, player, nodes, int(current["galaxy_id"]))
-    traffic_all = build_open_world_traffic(conn, player, "system", nodes, ore_all + salvage_all + exploration_all + pirate_station_all)
+    player_base_all = build_player_bases_for_map(conn, player, int(current["galaxy_id"]))
+    separate_stationary_map_objects([nodes, ore_all, salvage_all, exploration_all, pirate_station_all, player_base_all])
+    traffic_all = build_open_world_traffic(conn, player, "system", nodes, ore_all + salvage_all + exploration_all + pirate_station_all + player_base_all)
     ore_sites = annotate_and_filter_by_player_radar(conn, player, nodes, ore_all, "system")
     salvage_icons = annotate_and_filter_by_player_radar(conn, player, nodes, [attach_tool_permissions(conn, player, o) for o in salvage_all], "system")
     exploration_sites = annotate_and_filter_by_player_radar(conn, player, nodes, exploration_all, "system")
     pirate_stations = annotate_and_filter_by_player_radar(conn, player, nodes, pirate_station_all, "system")
+    player_bases = annotate_and_filter_by_player_radar(conn, player, nodes, player_base_all, "system")
     traffic = [attach_tool_permissions(conn, player, o) for o in annotate_and_filter_by_player_radar(conn, player, nodes, traffic_all, "system") if o.get("id") != "player:self"]
     active_wars = active_or_upcoming_planet_wars(conn)
     node_by_id_for_war = {int(n["id"]): n for n in nodes if str(n.get("id") or "").isdigit()}
@@ -6389,7 +8370,7 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     ship = active_ship_for_player(conn, player)
     radar_range = ship_radar_range_pct(conn, ship, "system")
     radar_center = player_map_center(conn, player, "system", nodes)
-    hidden_total = (len(ore_all) - len(ore_sites)) + (len(salvage_all) - len(salvage_icons)) + (len(exploration_all) - len(exploration_sites)) + (len(pirate_station_all) - len(pirate_stations)) + (len([t for t in traffic_all if t.get("id") != "player:self"]) - len([t for t in traffic if t.get("id") != "player:self"]))
+    hidden_total = (len(ore_all) - len(ore_sites)) + (len(salvage_all) - len(salvage_icons)) + (len(exploration_all) - len(exploration_sites)) + (len(pirate_station_all) - len(pirate_stations)) + (len(player_base_all) - len(player_bases)) + (len([t for t in traffic_all if t.get("id") != "player:self"]) - len([t for t in traffic if t.get("id") != "player:self"]))
     summary = {
         "ships_in_transit": len(traffic),
         "ore_signatures": len(ore_sites),
@@ -6405,9 +8386,9 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
         "radar_center_y_pct": round(float(radar_center.get("y_pct") or 50), 2),
         "hidden_by_radar": max(0, hidden_total),
         "readable_hint": f"Unified system view: planet/station nodes plus gate links to adjacent galaxies. Ships and hidden contacts remain radar-limited ({radar_range}%).",
-        "nearby_opportunities": ["Galaxy gates", "Radar-limited contacts", "Pirate stations", "Mine ore", "Scan ancient sites", "Salvage wrecks"],
+        "nearby_opportunities": ["Galaxy gates", "Radar-limited contacts", "Player bases", "Pirate stations", "Mine ore", "Scan ancient sites", "Salvage wrecks"],
     }
-    return {"nodes": nodes, "lanes": lanes, "current_planet_id": current["id"], "current_galaxy_id": current["galaxy_id"], "traffic": traffic, "ore_sites": ore_sites, "salvage_icons": salvage_icons, "exploration_sites": exploration_sites, "pirate_stations": pirate_stations, "war_zones": war_zones, "summary": summary}
+    return {"nodes": nodes, "lanes": lanes, "current_planet_id": current["id"], "current_galaxy_id": current["galaxy_id"], "traffic": traffic, "ore_sites": ore_sites, "salvage_icons": salvage_icons, "exploration_sites": exploration_sites, "pirate_stations": pirate_stations, "player_bases": player_bases, "war_zones": war_zones, "summary": summary}
 
 
 
@@ -6444,6 +8425,9 @@ def ensure_pirate_station_content(conn: sqlite3.Connection) -> None:
         """,
         (iso(now), iso(now)),
     )
+    if bool(WORLD_SERVER_BALANCE.get("server_controls_resources", True)):
+        return
+
     active_total = int(scalar(conn, "SELECT COUNT(*) FROM pirate_stations WHERE status IN ('active','occupied','depleted')") or 0)
     if active_total >= int(PIRATE_STATION_BALANCE["global_station_soft_cap"]):
         return
@@ -6599,6 +8583,9 @@ def update_pirate_station_resource(conn: sqlite3.Connection, run: Dict[str, Any]
 def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station: Dict[str, Any]) -> None:
     count = max(1, int(station.get("remaining_pirates") or station.get("total_pirates") or 8))
     tier = int(station.get("tier") or 1)
+    galaxy_id = int(station.get("galaxy_id") or 0)
+    level_min, level_max = world_level_range_for_galaxy(conn, galaxy_id) if galaxy_id else (tier * 6, tier * 10)
+    strength_mult = float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25))
     rng = random.Random(f"pirate-run:{station.get('seed')}:{run_id}:{count}")
     points: List[Dict[str, float]] = []
     for i in range(count):
@@ -6622,10 +8609,12 @@ def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station
                 best_score, best = score, cand
         points.append(best or {"x_pct": rng.uniform(10, 90), "y_pct": rng.uniform(10, 90)})
     for i, pt in enumerate(points):
-        enemy_tier = clamp_int(tier + (1 if i % 5 == 0 and tier >= 4 else 0), 1, 8)
-        power = int(80 + enemy_tier * 48 + rng.randint(0, 45))
-        hull = int(120 + enemy_tier * 55 + rng.randint(0, 70))
-        shield = int(70 + enemy_tier * 34 + rng.randint(0, 45))
+        base_level = rng.randint(max(1, level_min), max(level_min, level_max))
+        enemy_level = max(1, int(math.ceil(base_level * strength_mult)))
+        enemy_tier = clamp_int(max(tier, pirate_base_tier_for_level(enemy_level)) + (1 if i % 5 == 0 and tier >= 4 else 0), 1, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9)))
+        power = int(85 + enemy_level * rng.uniform(14.5, 20.5) + enemy_tier * 32 + rng.randint(0, 55))
+        hull = int(150 + enemy_level * rng.uniform(32, 44) + enemy_tier * 45 + rng.randint(0, 80))
+        shield = int(90 + enemy_level * rng.uniform(18, 28) + enemy_tier * 28 + rng.randint(0, 55))
         name = f"{rng.choice(['Raider','Cutlass','Reaver','Marauder','Blackwake','Corsair'])} {i+1}"
         conn.execute(
             """
@@ -6952,7 +8941,17 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
         recipe_drops = roll_pirate_base_completion_recipe_drops(conn, player["id"], rng)
         if recipe_drops:
             rewards["recipes"] = recipe_drops
+        station_tier = int((station_now or {}).get("tier") or (station_for_drop or {}).get("tier") or enemy.get("tier") or 1)
+        ultra_reward = roll_pirate_base_ultra_reward(station_tier, rng)
+        if ultra_reward:
+            granted_ultra = grant_ultra_item_to_player(conn, player["id"], ultra_reward["code"], "pirate_base_ultra", god=god)
+            if granted_ultra:
+                ultra_reward = granted_ultra
+                rewards.setdefault("items", []).append(ultra_reward)
+                rewards["ultraItem"] = ultra_reward
         report["message"] = f"Station cleared. Final defender {enemy['name']} destroyed. Recovered {len(recipe_drops)} recipe copy/copies from station databanks."
+        if ultra_reward:
+            report["message"] += f" Ultra vault find: {ultra_reward['name']}."
         conn.execute("UPDATE pirate_station_runs SET status='completed', completed_at=?, updated_at=? WHERE station_id=? AND status='active'", (iso(), iso(), run["station_id"]))
     conn.execute("UPDATE pirate_station_runs SET battle_report_json=?, updated_at=? WHERE id=?", (encode_json(report), iso(), run["id"]))
     add_event(conn, player["id"], "pirate_station", report["message"], {"runId": run["id"], "enemyId": enemy["id"], "outcome": outcome})
@@ -8118,8 +10117,14 @@ def resolve_completed_cargo_operations(conn: sqlite3.Connection, player_id: int,
             value = int(payload.get("unit_value") or (60 + tier * 90))
             mass_each = float(payload.get("mass_each") or 0.8)
             add_inventory_item(conn, player_id, code, name, "ore", qty, 1, value, mass_each, f"Mined from an open-world ore field near {payload.get('location_name','the local system')}", "open_world_ore", category="raw_materials", rarity="rare" if tier >= 4 else "uncommon" if tier >= 2 else "common", tier=tier, respect_cargo=True, god=True)
+            ultra_reward = None
+            if payload.get("ultra_item_code"):
+                ultra_reward = grant_ultra_item_to_player(conn, player_id, str(payload.get("ultra_item_code") or ""), "mining_ultra", god=True)
             grant_action_progression(conn, player_id, "mining", max(1.0, qty / 2), True)
-            add_event(conn, player_id, "mining", f"Mining operation complete: recovered {qty}x {name} from an open-world ore field.")
+            mining_msg = f"Mining operation complete: recovered {qty}x {name} from an open-world ore field."
+            if ultra_reward:
+                mining_msg += f" Ultra discovery: {ultra_reward['name']}."
+            add_event(conn, player_id, "mining", mining_msg, {"ultraItem": ultra_reward})
         conn.execute("UPDATE pending_cargo_operations SET status='complete', completed_at=? WHERE id=?", (iso(), op["id"]))
         completed += 1
     if completed:
@@ -8252,8 +10257,129 @@ def run_planet_control_action(conn: sqlite3.Connection, player: Dict[str, Any], 
     add_event(conn, player["id"], "planet_control", msg, {"action": action_key, "planet_id": planet["id"]})
     return {"message": msg, "planet_control": build_planet_control_state(conn, player["id"], updated)}
 
+
+def eco_get(path: str, default: Any = None) -> Any:
+    cur: Any = ECOSYSTEM_BALANCE
+    for part in str(path or "").split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
+
+def eco_mult(path: str, default: float = 1.0) -> float:
+    try:
+        return float(eco_get(path, default))
+    except Exception:
+        return float(default)
+
+def commodity_base_price_balanced(commodity: Dict[str, Any]) -> int:
+    base = int(commodity.get("base_price") or 1)
+    category = str(commodity.get("category") or "goods").lower()
+    mults = ECOSYSTEM_BALANCE.get("commodity_price_mult_by_category") or {}
+    mult = float(mults.get(category, 1.0))
+    if not int(commodity.get("legal", 1)):
+        mult *= float(mults.get("contraband", 1.0)) if category != "contraband" else 1.0
+    return max(1, int(base * mult))
+
+def direct_vendor_sell_multiplier(item: Dict[str, Any]) -> float:
+    cat = str(item.get("category") or item.get("item_type") or "goods").lower()
+    typ = str(item.get("item_type") or "").lower()
+    if typ == "ore" or cat == "raw_materials":
+        base = float(ECONOMY_BALANCE.get("raw_ore_sell_mult", 0.18))
+    else:
+        base = float((ECOSYSTEM_BALANCE.get("direct_vendor_sell_mult_by_category") or {}).get(cat, ECONOMY_BALANCE.get("non_market_item_sell_mult", 0.46)))
+    rarity = str(item.get("rarity") or item.get("item_rarity") or "common").lower()
+    rarity_mult = float((ECOSYSTEM_BALANCE.get("rarity_vendor_mult") or {}).get(rarity, 1.0))
+    legal_mult = 1.0 if int(item.get("legal", 1)) else 0.82
+    return max(0.05, min(0.95, base * rarity_mult * legal_mult))
+
+def balanced_ship_purchase_price(template: Dict[str, Any]) -> int:
+    tier = max(1, int(template.get("ship_tier") or 1))
+    size = str(template.get("size_class") or "M").upper()
+    size_mult = {"S": 0.92, "M": 1.0, "L": 1.12, "C": 1.34}.get(size, 1.0)
+    return max(1, int(int(template.get("price") or 1) * eco_mult("progression_cost_mult.ships", 1.18) * (1.0 + max(0, tier-1) * 0.04) * size_mult))
+
+def balanced_module_purchase_price(module: Dict[str, Any]) -> int:
+    tier = max(1, int(module.get("tier") or 1))
+    rarity = str(module.get("rarity") or "common").lower()
+    rarity_mult = {"common": 1.0, "uncommon": 1.05, "rare": 1.13, "epic": 1.24, "legendary": 1.38}.get(rarity, 1.0)
+    return max(1, int(int(module.get("price") or 1) * eco_mult("progression_cost_mult.modules", 1.12) * (1.0 + max(0, tier-1) * 0.035) * rarity_mult))
+
+def balanced_base_placement_cost() -> int:
+    return max(1, int(BASE_PLACEMENT_COST * eco_mult("progression_cost_mult.base_placement", 1.35)))
+
+def balanced_base_research_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(cfg or {})
+    out["cost"] = max(1, int(int(out.get("cost") or 0) * eco_mult("progression_cost_mult.base_research", 1.22)))
+    out["hours"] = max(1, int(math.ceil(float(out.get("hours") or 1) * eco_mult("progression_time_mult.base_research", 1.12))))
+    return out
+
+def balanced_base_building_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(cfg or {})
+    out["cost"] = max(1, int(int(out.get("cost") or 0) * eco_mult("progression_cost_mult.base_building", 1.30)))
+    out["hours"] = max(1, int(math.ceil(float(out.get("hours") or 1) * eco_mult("progression_time_mult.base_building", 1.18))))
+    return out
+
+def balanced_recipe_credit_cost(recipe: Dict[str, Any], base_cost: int) -> int:
+    output_key = output_time_key(recipe) if "output_time_key" in globals() else str((recipe.get("output") or {}).get("kind") or "")
+    mult = eco_mult("progression_cost_mult.crafting_recipes", 1.10)
+    if output_key in {"module", "weapon", "armor"}:
+        mult *= 1.12
+    if output_key == "ship":
+        mult *= 1.30
+    return max(0, int(int(base_cost or 0) * mult))
+
+def balanced_crafting_seconds(seconds: int, recipe: Dict[str, Any]) -> int:
+    output_key = output_time_key(recipe) if "output_time_key" in globals() else str((recipe.get("output") or {}).get("kind") or "")
+    mult = eco_mult("progression_time_mult.crafting", 1.16)
+    if output_key in {"module", "weapon", "armor"}:
+        mult *= 1.10
+    if output_key == "ship":
+        mult *= 1.22
+    return max(0, int(math.ceil(int(seconds or 0) * mult)))
+
+def ecosystem_balance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
+    ship_prices = [balanced_ship_purchase_price(r) for r in rows(conn, "SELECT * FROM ship_templates")] if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ship_templates'") else []
+    module_prices = [balanced_module_purchase_price(r) for r in rows(conn, "SELECT * FROM module_templates")] if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='module_templates'") else []
+    commodity_prices = [commodity_base_price_balanced(r) for r in rows(conn, "SELECT * FROM commodities")] if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='commodities'") else []
+    def stat(values: List[int]) -> Dict[str, int]:
+        values = sorted([int(v) for v in values if int(v) > 0])
+        if not values:
+            return {"count": 0, "min": 0, "median": 0, "max": 0}
+        return {"count": len(values), "min": values[0], "median": values[len(values)//2], "max": values[-1]}
+    return {
+        "ships": stat(ship_prices),
+        "modules": stat(module_prices),
+        "commodities": stat(commodity_prices),
+        "vendorSell": {
+            "rawOre": ECONOMY_BALANCE.get("raw_ore_sell_mult"),
+            "defaultItem": ECONOMY_BALANCE.get("non_market_item_sell_mult"),
+            "legalFee": ECONOMY_BALANCE.get("legal_sell_fee"),
+            "illegalFee": ECONOMY_BALANCE.get("illegal_sell_fee"),
+        },
+        "targetShape": ECOSYSTEM_BALANCE.get("philosophy", {}),
+        "simulation": {
+            "runs": 1000,
+            "active_hours_per_day": 12,
+            "target_days": 730,
+            "mean_days": 737.64,
+            "median_days": 732.0,
+            "p10_days": 721.0,
+            "p90_days": 762.0,
+            "component_mean_days": {
+                "skills": 722.07,
+                "credits": 728.10,
+                "base_research_build": 625.74,
+                "crafting_recipes": 612.04,
+                "achievements_loops": 687.32,
+            },
+            "note": "Last local Monte Carlo verification from backend/tools/balance_simulation.py. Procedural/per-planet infinite content is modeled as finite mastery tracks.",
+        },
+    }
+
+
 def price_from_supply_demand(commodity: Dict[str, Any], planet: Dict[str, Any], supply: int, demand: int) -> Tuple[int, int]:
-    base = int(commodity["base_price"])
+    base = commodity_base_price_balanced(commodity)
     supply = max(0, min(MARKET_LAW_BALANCE["max_stock"], int(supply)))
     demand = max(1, min(MARKET_LAW_BALANCE["max_demand"], int(demand)))
     security = int(planet.get("security_level", 50) or 50)
@@ -8342,6 +10468,8 @@ def inventory_category(item_type: str, legal: int = 1) -> str:
 
 def inventory_rarity(item_type: str, base_value: int, legal: int = 1) -> str:
     t = (item_type or "").lower().strip()
+    if t in {"ultra", "ultra_artifact", "artifact_ultra"} or base_value >= 250000:
+        return "ultra"
     if not legal:
         return "black_market" if base_value >= 2500 else "rare"
     if t in {"unique", "artifact_unique"} or base_value >= 50000:
@@ -8405,8 +10533,485 @@ ITEM_CODE_VISUAL_OVERRIDES = {
 }
 
 
+ULTRA_ITEM_DEFS: Dict[str, Dict[str, Any]] = {
+    "aurora_cartographers_seal": {
+        "code": "aurora_cartographers_seal",
+        "name": "Aurora Cartographer's Seal",
+        "pool": "mission",
+        "mission_keys": [
+            "survey"
+        ],
+        "color": "#74f3ff",
+        "base_value": 420000,
+        "mass": 0.18,
+        "description": "A pristine seal once carried by a vanished planetary charting order. Pure flex, pure resale value.",
+        "special_text": "A frost-locked survey drum clicks open and the Aurora Cartographer's Seal rolls into your palm with a cold blue gleam.",
+        "image_url": "/assets/generated/ultra/aurora_cartographers_seal.svg"
+    },
+    "echofern_memory_bloom": {
+        "code": "echofern_memory_bloom",
+        "name": "Echofern Memory Bloom",
+        "pool": "mission",
+        "mission_keys": [
+            "survey"
+        ],
+        "color": "#98ffb8",
+        "base_value": 448000,
+        "mass": 0.16,
+        "description": "A preserved botanical relic that softly replays long-dead atmospheric readings. It serves no purpose beyond prestige and resale.",
+        "special_text": "Inside a cracked sample pod, an Echofern Memory Bloom unfurls and releases a chorus of ancient wind signatures.",
+        "image_url": "/assets/generated/ultra/echofern_memory_bloom.svg"
+    },
+    "veilglass_prism": {
+        "code": "veilglass_prism",
+        "name": "Veilglass Prism",
+        "pool": "mission",
+        "mission_keys": [
+            "survey"
+        ],
+        "color": "#8ed4ff",
+        "base_value": 472000,
+        "mass": 0.22,
+        "description": "A transparent prism that bends ambient light into shifting continent maps. Coveted by collectors and vendors alike.",
+        "special_text": "A buried optics case fractures apart, revealing a Veilglass Prism that throws impossible coastlines across your visor.",
+        "image_url": "/assets/generated/ultra/veilglass_prism.svg"
+    },
+    "sunken_atlas_shard": {
+        "code": "sunken_atlas_shard",
+        "name": "Sunken Atlas Shard",
+        "pool": "mission",
+        "mission_keys": [
+            "survey"
+        ],
+        "color": "#7db8ff",
+        "base_value": 505000,
+        "mass": 0.24,
+        "description": "A fragment of a planetary atlas plate engraved with pre-collapse route etchings. Valuable only as a trophy sale item.",
+        "special_text": "You pry loose a corroded plate and expose the Sunken Atlas Shard, still etched with routes to cities that no longer exist.",
+        "image_url": "/assets/generated/ultra/sunken_atlas_shard.svg"
+    },
+    "hushwind_compass": {
+        "code": "hushwind_compass",
+        "name": "Hushwind Compass",
+        "pool": "mission",
+        "mission_keys": [
+            "survey"
+        ],
+        "color": "#d7fff4",
+        "base_value": 531000,
+        "mass": 0.17,
+        "description": "A silent navigation compass that never settles, pointing toward storms that vanished centuries ago.",
+        "special_text": "Beneath a cairn of polished stone, a Hushwind Compass spins once and then points into empty sky.",
+        "image_url": "/assets/generated/ultra/hushwind_compass.svg"
+    },
+    "tide_of_dust_idol": {
+        "code": "tide_of_dust_idol",
+        "name": "Tide of Dust Idol",
+        "pool": "mission",
+        "mission_keys": [
+            "salvage"
+        ],
+        "color": "#ffd39a",
+        "base_value": 558000,
+        "mass": 0.29,
+        "description": "A ceremonial idol recovered from wreck-scoured ruins. It is functionless, flashy, and worth a strong vendor payout.",
+        "special_text": "A collapsed locker drops open and the Tide of Dust Idol stares back at you through a veil of drifting grit.",
+        "image_url": "/assets/generated/ultra/tide_of_dust_idol.svg"
+    },
+    "mourning_ember_petal": {
+        "code": "mourning_ember_petal",
+        "name": "Mourning Ember Petal",
+        "pool": "mission",
+        "mission_keys": [
+            "hazard"
+        ],
+        "color": "#ff9a6a",
+        "base_value": 588000,
+        "mass": 0.15,
+        "description": "A heat-scorched crystalline petal that never fully cools. A luxury relic with no utility beyond flexing or selling.",
+        "special_text": "Within a scorched containment bloom, the Mourning Ember Petal survives untouched, radiating a patient orange heat.",
+        "image_url": "/assets/generated/ultra/mourning_ember_petal.svg"
+    },
+    "pale_horizon_locket": {
+        "code": "pale_horizon_locket",
+        "name": "Pale Horizon Locket",
+        "pool": "mission",
+        "mission_keys": [
+            "survey",
+            "hazard"
+        ],
+        "color": "#f3f1c1",
+        "base_value": 612000,
+        "mass": 0.19,
+        "description": "A sealed horizon locket containing a miniature relief of an unknown moonrise. Desirable only as a prestige collectible.",
+        "special_text": "A pressure-sunk cache opens with a sigh, and the Pale Horizon Locket gleams against the dust like trapped dawn.",
+        "image_url": "/assets/generated/ultra/pale_horizon_locket.svg"
+    },
+    "starroot_lantern_seed": {
+        "code": "starroot_lantern_seed",
+        "name": "Starroot Lantern Seed",
+        "pool": "mission",
+        "mission_keys": [
+            "survey",
+            "hazard"
+        ],
+        "color": "#c2ff6a",
+        "base_value": 640000,
+        "mass": 0.13,
+        "description": "A bioluminescent seed from an extinct root-lantern species. Useless, beautiful, and surprisingly profitable.",
+        "special_text": "You brush away sterile ash and uncover a Starroot Lantern Seed, still glowing as if it remembers its forest.",
+        "image_url": "/assets/generated/ultra/starroot_lantern_seed.svg"
+    },
+    "whispercoil_totem": {
+        "code": "whispercoil_totem",
+        "name": "Whispercoil Totem",
+        "pool": "mission",
+        "mission_keys": [
+            "salvage",
+            "hazard"
+        ],
+        "color": "#d9a8ff",
+        "base_value": 675000,
+        "mass": 0.27,
+        "description": "A spiral totem of conductive alloys that hums at the edge of hearing. Prestigious salvage bait for the rich.",
+        "special_text": "From beneath twisted scrap, the Whispercoil Totem rises intact and fills the air with a low, impossible whisper.",
+        "image_url": "/assets/generated/ultra/whispercoil_totem.svg"
+    },
+    "corsair_kings_signet": {
+        "code": "corsair_kings_signet",
+        "name": "Corsair King's Signet",
+        "pool": "pirate_base",
+        "color": "#ffcf4d",
+        "base_value": 430000,
+        "mass": 0.18,
+        "description": "A gaudy signet stolen from a pirate monarch who almost certainly named himself. No utility, high brag value.",
+        "special_text": "Deep in the pirate vault, you recover the Corsair King's Signet from a velvet slot ringed in knife marks.",
+        "image_url": "/assets/generated/ultra/corsair_kings_signet.svg"
+    },
+    "blackwake_crown_chip": {
+        "code": "blackwake_crown_chip",
+        "name": "Blackwake Crown Chip",
+        "pool": "pirate_base",
+        "color": "#ff8a3d",
+        "base_value": 456000,
+        "mass": 0.14,
+        "description": "A severed crown segment from a famed raider dynasty. It exists only to show off or sell for a profit.",
+        "special_text": "A smashed command dais hides the Blackwake Crown Chip, still sticky with boot soot and old ceremony.",
+        "image_url": "/assets/generated/ultra/blackwake_crown_chip.svg"
+    },
+    "void_maw_warflag": {
+        "code": "void_maw_warflag",
+        "name": "Void Maw Warflag",
+        "pool": "pirate_base",
+        "color": "#ff5e7e",
+        "base_value": 488000,
+        "mass": 0.25,
+        "description": "A compact warflag core from a notorious pirate clan. Decorative only, but vendors love the provenance.",
+        "special_text": "You tear open a sealed captain's locker and draw out the Void Maw Warflag, folded around spent casings.",
+        "image_url": "/assets/generated/ultra/void_maw_warflag.svg"
+    },
+    "iron_fang_tribute_chain": {
+        "code": "iron_fang_tribute_chain",
+        "name": "Iron Fang Tribute Chain",
+        "pool": "pirate_base",
+        "color": "#d6d6d6",
+        "base_value": 520000,
+        "mass": 0.31,
+        "description": "A heavy tribute chain once worn by captains of the Iron Fang cartel. Entirely cosmetic and highly tradable.",
+        "special_text": "Buried under contraband manifests lies the Iron Fang Tribute Chain, each link stamped with old blood-price tallies.",
+        "image_url": "/assets/generated/ultra/iron_fang_tribute_chain.svg"
+    },
+    "red_dagger_reliquary": {
+        "code": "red_dagger_reliquary",
+        "name": "Red Dagger Reliquary",
+        "pool": "pirate_base",
+        "color": "#ff6f6f",
+        "base_value": 552000,
+        "mass": 0.21,
+        "description": "A compact reliquary lacquered in pirate reds. Worth nothing in battle and plenty at a vendor counter.",
+        "special_text": "Behind a False bulkhead, the Red Dagger Reliquary waits untouched, as if even pirates were afraid to pawn it.",
+        "image_url": "/assets/generated/ultra/red_dagger_reliquary.svg"
+    },
+    "gallowglass_holotomb": {
+        "code": "gallowglass_holotomb",
+        "name": "Gallowglass Holotomb",
+        "pool": "pirate_base",
+        "color": "#8ec7ff",
+        "base_value": 584000,
+        "mass": 0.22,
+        "description": "A miniature holotomb that projects the names of mutineers in ghost-blue script. Prestige loot only.",
+        "special_text": "A hidden projector coffin boots up at your touch, naming its dead before yielding the Gallowglass Holotomb.",
+        "image_url": "/assets/generated/ultra/gallowglass_holotomb.svg"
+    },
+    "scourge_captains_monocle": {
+        "code": "scourge_captains_monocle",
+        "name": "Scourge Captain's Monocle",
+        "pool": "pirate_base",
+        "color": "#b5ffed",
+        "base_value": 618000,
+        "mass": 0.09,
+        "description": "An overengineered captain's monocle plated in plundered alloys. Useless except as a flex piece or sale item.",
+        "special_text": "You crack a captain's helm apart and the Scourge Captain's Monocle drops free, flashing one last tactical ghostline.",
+        "image_url": "/assets/generated/ultra/scourge_captains_monocle.svg"
+    },
+    "blood_nebula_chart": {
+        "code": "blood_nebula_chart",
+        "name": "Blood Nebula Chart",
+        "pool": "pirate_base",
+        "color": "#ff6ad5",
+        "base_value": 652000,
+        "mass": 0.17,
+        "description": "A forbidden route chart inked in nebular reds. Collectors adore it; the map itself is long obsolete.",
+        "special_text": "Pinned beneath a knife on the plotting wall, the Blood Nebula Chart survives where the crew did not.",
+        "image_url": "/assets/generated/ultra/blood_nebula_chart.svg"
+    },
+    "marauders_victory_bell": {
+        "code": "marauders_victory_bell",
+        "name": "Marauder's Victory Bell",
+        "pool": "pirate_base",
+        "color": "#ffd670",
+        "base_value": 688000,
+        "mass": 0.28,
+        "description": "A ceremonial bell rung after successful raids. Loud in history, silent in function, excellent for resale.",
+        "special_text": "The command gantry still sways when you take the Marauder's Victory Bell from its shattered bronze cradle.",
+        "image_url": "/assets/generated/ultra/marauders_victory_bell.svg"
+    },
+    "last_mutiny_ledger": {
+        "code": "last_mutiny_ledger",
+        "name": "Last Mutiny Ledger",
+        "pool": "pirate_base",
+        "color": "#c6f0ff",
+        "base_value": 720000,
+        "mass": 0.2,
+        "description": "The final bookkeeping slate of a pirate mutiny, prized solely for story value and price tag.",
+        "special_text": "Stuffed behind a vent grille, the Last Mutiny Ledger records every betrayal in neat, profitable handwriting.",
+        "image_url": "/assets/generated/ultra/last_mutiny_ledger.svg"
+    },
+    "heartcore_adamant": {
+        "code": "heartcore_adamant",
+        "name": "Heartcore Adamant",
+        "pool": "mining",
+        "color": "#62ff8d",
+        "base_value": 510000,
+        "mass": 0.34,
+        "description": "An impossibly dense ore heart with mirror-bright fractures. It is not used in crafting; it is simply a flex stone.",
+        "special_text": "The drill cuts through a False seam and strikes Heartcore Adamant, a perfect ore heart nested in black glass.",
+        "image_url": "/assets/generated/ultra/heartcore_adamant.svg"
+    },
+    "eventide_singularity_ore": {
+        "code": "eventide_singularity_ore",
+        "name": "Eventide Singularity Ore",
+        "pool": "mining",
+        "color": "#7d8cff",
+        "base_value": 780000,
+        "mass": 0.36,
+        "description": "A gravity-warped ore nodule that seems to drag nearby light inward. Entirely ornamental and extremely lucrative.",
+        "special_text": "Your extraction beam stalls, then frees a chunk of Eventide Singularity Ore that bends the mining lights around it.",
+        "image_url": "/assets/generated/ultra/eventide_singularity_ore.svg"
+    },
+    "epoch_lens": {
+        "code": "epoch_lens",
+        "name": "Epoch Lens",
+        "pool": "exploration_node",
+        "color": "#87fff3",
+        "base_value": 560000,
+        "mass": 0.18,
+        "description": "A polished lens that shows layered ages of the same ruin at once. Pure collector bait with no gameplay function.",
+        "special_text": "Beneath the final dust veil, the Epoch Lens reveals several histories at once before settling into your grasp.",
+        "image_url": "/assets/generated/ultra/epoch_lens.svg"
+    },
+    "oracle_of_ash": {
+        "code": "oracle_of_ash",
+        "name": "Oracle of Ash",
+        "pool": "exploration_node",
+        "color": "#ffd49a",
+        "base_value": 640000,
+        "mass": 0.24,
+        "description": "A charred figurine carved from vitrified ashstone. It does nothing except prove you found the impossible.",
+        "special_text": "A sealed plinth cracks and releases the Oracle of Ash, warm to the touch despite centuries of silence.",
+        "image_url": "/assets/generated/ultra/oracle_of_ash.svg"
+    },
+    "paradox_reliquary": {
+        "code": "paradox_reliquary",
+        "name": "Paradox Reliquary",
+        "pool": "exploration_node",
+        "color": "#e39cff",
+        "base_value": 825000,
+        "mass": 0.26,
+        "description": "A paradoxical relic box that appears closed and open depending on the angle. All prestige, no function, top-tier sale value.",
+        "special_text": "Inside the deepest chamber, the Paradox Reliquary appears twice in the same space until you finally lift the real one free.",
+        "image_url": "/assets/generated/ultra/paradox_reliquary.svg"
+    }
+}
+
+ULTRA_ITEM_POOLS: Dict[str, Any] = {
+    "mission": [
+        "aurora_cartographers_seal",
+        "echofern_memory_bloom",
+        "veilglass_prism",
+        "sunken_atlas_shard",
+        "hushwind_compass",
+        "tide_of_dust_idol",
+        "mourning_ember_petal",
+        "pale_horizon_locket",
+        "starroot_lantern_seed",
+        "whispercoil_totem"
+    ],
+    "pirate_base": [
+        "corsair_kings_signet",
+        "blackwake_crown_chip",
+        "void_maw_warflag",
+        "iron_fang_tribute_chain",
+        "red_dagger_reliquary",
+        "gallowglass_holotomb",
+        "scourge_captains_monocle",
+        "blood_nebula_chart",
+        "marauders_victory_bell",
+        "last_mutiny_ledger"
+    ],
+    "mining": [
+        "heartcore_adamant",
+        "eventide_singularity_ore"
+    ],
+    "exploration_node": [
+        "epoch_lens",
+        "oracle_of_ash",
+        "paradox_reliquary"
+    ],
+    "mission_by_key": {
+        "survey": [
+            "aurora_cartographers_seal",
+            "echofern_memory_bloom",
+            "veilglass_prism",
+            "sunken_atlas_shard",
+            "hushwind_compass",
+            "pale_horizon_locket",
+            "starroot_lantern_seed"
+        ],
+        "salvage": [
+            "tide_of_dust_idol",
+            "whispercoil_totem"
+        ],
+        "hazard": [
+            "mourning_ember_petal",
+            "pale_horizon_locket",
+            "starroot_lantern_seed",
+            "whispercoil_totem"
+        ]
+    }
+}
+
+
+def ultra_item_def(code: str) -> Optional[Dict[str, Any]]:
+    return ULTRA_ITEM_DEFS.get(str(code or "").strip().lower())
+
+
+def ultra_item_reward_payload(code: str, qty: int = 1) -> Optional[Dict[str, Any]]:
+    item = ultra_item_def(code)
+    if not item:
+        return None
+    return {
+        "code": item["code"],
+        "name": item["name"],
+        "itemType": "ultra_artifact",
+        "category": "rare_artifacts",
+        "rarity": "ultra",
+        "qty": max(1, int(qty or 1)),
+        "baseValue": int(item.get("base_value") or 0),
+        "mass": float(item.get("mass") or 0.2),
+        "description": item.get("description") or "An ultra-rare vanity collectible.",
+        "imageUrl": item.get("image_url") or "",
+        "accentColor": item.get("color") or "#ffd670",
+        "specialText": item.get("special_text") or "You found something extraordinary.",
+        "pool": item.get("pool") or "ultra",
+        "sellable": 1,
+        "legal": 1,
+        "tier": 7,
+        "maxTier": 7,
+    }
+
+
+def scaled_ultra_drop_chance(level: int, low: float = 0.0025, high: float = 0.01, max_level: int = 50) -> float:
+    cap = max(1, int(max_level or 1))
+    lvl = max(1, min(int(level or 1), cap))
+    ratio = 0.0 if cap <= 1 else float(lvl - 1) / float(cap - 1)
+    return float(low) + (float(high) - float(low)) * ratio
+
+
+def roll_ultra_reward(codes: List[str], chance: float, rng: random.Random) -> Optional[Dict[str, Any]]:
+    pool = [str(code) for code in (codes or []) if ultra_item_def(code)]
+    if not pool or rng.random() >= float(chance):
+        return None
+    return ultra_item_reward_payload(rng.choice(pool))
+
+
+def mission_ultra_codes(mission_key: str) -> List[str]:
+    key = str(mission_key or "survey").lower()
+    return list((ULTRA_ITEM_POOLS.get("mission_by_key") or {}).get(key) or ULTRA_ITEM_POOLS.get("mission") or [])
+
+
+def roll_mission_ultra_reward(mission_key: str, level: int, seed: str) -> Optional[Dict[str, Any]]:
+    chance = scaled_ultra_drop_chance(level, 0.0025, 0.01, int(WORLD_MISSION_BALANCE.get("planet_mission_max_level", 50) or 50))
+    return roll_ultra_reward(mission_ultra_codes(mission_key), chance, random.Random(f"{seed}:mission-ultra"))
+
+
+def roll_pirate_base_ultra_reward(tier: int, rng: random.Random) -> Optional[Dict[str, Any]]:
+    chance = scaled_ultra_drop_chance(tier, 0.0025, 0.01, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9) or 9))
+    return roll_ultra_reward(list(ULTRA_ITEM_POOLS.get("pirate_base") or []), chance, rng)
+
+
+def roll_mining_ultra_reward(seed: str) -> Optional[Dict[str, Any]]:
+    return roll_ultra_reward(list(ULTRA_ITEM_POOLS.get("mining") or []), 0.005, random.Random(f"{seed}:mining-ultra"))
+
+
+def roll_exploration_node_ultra_reward(seed: str) -> Optional[Dict[str, Any]]:
+    return roll_ultra_reward(list(ULTRA_ITEM_POOLS.get("exploration_node") or []), 0.005, random.Random(f"{seed}:exploration-ultra"))
+
+
+def grant_ultra_item_to_player(conn: sqlite3.Connection, player_id: int, code: str, source: str = "ultra_drop", god: bool = False) -> Optional[Dict[str, Any]]:
+    reward = ultra_item_reward_payload(code)
+    if not reward:
+        return None
+    add_inventory_item(
+        conn,
+        player_id,
+        reward["code"],
+        reward["name"],
+        "ultra_artifact",
+        int(reward.get("qty") or 1),
+        1,
+        int(reward.get("baseValue") or 0),
+        float(reward.get("mass") or 0.2),
+        reward.get("description") or "Ultra vanity collectible.",
+        source,
+        category="rare_artifacts",
+        rarity="ultra",
+        subcategory=str(reward.get("pool") or "ultra"),
+        sellable=1,
+        craftable_material=0,
+        equippable=0,
+        usable=0,
+        image_id=reward["code"],
+        tier=7,
+        max_tier=7,
+        tier_locked=1,
+        tier_source="ultra_drop",
+        respect_cargo=False,
+        god=god,
+    )
+    return reward
+
 
 def item_visual_payload(name: str = "", item_type: str = "goods", category: str = "goods", legal: int = 1, item_code: str = "") -> Dict[str, str]:
+    ultra = ultra_item_def(item_code)
+    if ultra:
+        return {
+            "icon": "✦",
+            "label": "ULT",
+            "tone": "ultra",
+            "image_url": ultra.get("image_url") or "",
+            "accentColor": ultra.get("color") or "#ffd670",
+        }
     category = category or inventory_category(item_type, legal)
     base = dict(ITEM_VISUALS.get(category, ITEM_VISUALS["goods"]))
     code_key = str(item_code or "").lower().strip()
@@ -8476,6 +11081,8 @@ def infer_tier_from_value(base_value: int, category: str = "", rarity: str = "",
     value = int(base_value or 0)
     cat = str(category or "").lower()
     rar = str(rarity or "").lower()
+    if "ultra" in rar:
+        return 7
     if "legendary" in rar or "relic" in rar:
         return 7
     if "exotic" in rar:
@@ -8862,7 +11469,7 @@ def inventory_market_estimate(conn: sqlite3.Connection, player_id: int, item: Di
     player = get_player(conn, player_id)
     commodity = row(conn, "SELECT * FROM commodities WHERE code=?", (item.get("item_code"),))
     mp = row(conn, "SELECT * FROM market_prices WHERE planet_id=? AND commodity_id=?", (player["location_planet_id"], commodity["id"])) if commodity else None
-    unit = int(mp["sell_price"]) if mp else max(1, int(int(item.get("tier_value") or item.get("base_value") or 0) * ECONOMY_BALANCE["non_market_item_sell_mult"]))
+    unit = int(mp["sell_price"]) if mp else max(1, int(int(item.get("tier_value") or item.get("base_value") or 0) * direct_vendor_sell_multiplier(item)))
     fee_rate = ECONOMY_BALANCE["legal_sell_fee"] if int(item.get("legal", 1)) else ECONOMY_BALANCE["illegal_sell_fee"]
     qty = int(item.get("available_qty") or max(0, int(item.get("qty") or 0) - int(item.get("reserved_qty") or 0)))
     gross = unit * qty
@@ -9065,6 +11672,157 @@ def max_listing_unit_price(base_value: int) -> int:
     return max(1000, int(max(1, base_value) * PLAYER_MARKET_BALANCE["max_unit_price_mult"]))
 
 
+
+def player_location_scope(conn: sqlite3.Connection, player_or_id: Any) -> Dict[str, Any]:
+    pid = int(player_or_id.get("id") if isinstance(player_or_id, dict) else player_or_id)
+    p = row(
+        conn,
+        """
+        SELECT pl.id as player_id, pl.location_planet_id, p.name as planet_name, p.galaxy_id,
+               g.name as galaxy_name, g.code as galaxy_code
+        FROM players pl
+        JOIN planets p ON p.id=pl.location_planet_id
+        JOIN galaxies g ON g.id=p.galaxy_id
+        WHERE pl.id=?
+        """,
+        (pid,),
+    ) or {}
+    return {
+        "player_id": pid,
+        "planet_id": int(p.get("location_planet_id") or 0),
+        "planet_name": p.get("planet_name") or "Unknown Planet",
+        "galaxy_id": int(p.get("galaxy_id") or 0),
+        "galaxy_name": p.get("galaxy_name") or "Unknown Galaxy",
+        "galaxy_code": p.get("galaxy_code") or "",
+    }
+
+
+def player_market_current_scope(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    return player_location_scope(conn, player_id)
+
+
+def can_trade_player_market_listing(conn: sqlite3.Connection, player_id: int, listing: Dict[str, Any]) -> bool:
+    scope = player_market_current_scope(conn, player_id)
+    listing_gid = int(listing.get("galaxy_id") or 0)
+    if not listing_gid and listing.get("planet_id"):
+        listing_gid = int(scalar(conn, "SELECT galaxy_id FROM planets WHERE id=?", (int(listing["planet_id"]),)) or 0)
+    return listing_gid == int(scope.get("galaxy_id") or 0)
+
+
+def storage_listing_from_row(storage: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "origin": storage.get("item_type") or "inventory",
+        "item_code": storage.get("item_code"),
+        "item_name": storage.get("item_name"),
+        "item_type": storage.get("item_type") or "goods",
+        "category": storage.get("category") or "goods",
+        "legal": int(storage.get("legal", 1)),
+        "base_value": int(storage.get("base_value") or 0),
+        "mass": float(storage.get("mass") or 1),
+        "description": storage.get("description") or "Stored item.",
+        "rarity": storage.get("rarity") or "common",
+        "tier": clamp_tier(storage.get("tier", 1)),
+        "max_tier": clamp_tier(storage.get("max_tier", 3)),
+        "tier_source": storage.get("tier_source") or "storage",
+    }
+
+
+def store_item_at_current_planet(conn: sqlite3.Connection, player: Dict[str, Any], payload: Dict[str, Any], god: bool = False) -> Dict[str, Any]:
+    scope = player_location_scope(conn, player)
+    listing = listing_payload_from_inventory(conn, int(player["id"]), payload)
+    qty = int(listing["qty"])
+    remove_listing_source_item(conn, int(player["id"]), listing)
+    now = iso()
+    conn.execute(
+        """
+        INSERT INTO player_storage_items
+          (player_id,galaxy_id,planet_id,item_code,item_name,item_type,category,qty,legal,base_value,mass,description,rarity,tier,max_tier,tier_source,source_ref,metadata_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(player_id,planet_id,item_code,item_type,category,rarity,tier) DO UPDATE SET
+          qty=qty+excluded.qty,
+          item_name=excluded.item_name,
+          legal=excluded.legal,
+          base_value=excluded.base_value,
+          mass=excluded.mass,
+          description=excluded.description,
+          max_tier=max(max_tier, excluded.max_tier),
+          tier_source=excluded.tier_source,
+          metadata_json=excluded.metadata_json,
+          updated_at=excluded.updated_at
+        """,
+        (
+            int(player["id"]), int(scope["galaxy_id"]), int(scope["planet_id"]), listing["item_code"], listing["item_name"],
+            listing.get("item_type") or "goods", listing.get("category") or "goods", qty, int(listing.get("legal", 1)),
+            int(listing.get("base_value") or 0), float(listing.get("mass") or 1), listing.get("description") or "",
+            listing.get("rarity") or "common", clamp_tier(listing.get("tier", 1)), clamp_tier(listing.get("max_tier", 3)),
+            listing.get("tier_source") or "storage", listing.get("source_ref") or "", encode_json({"storedFrom": listing.get("origin") or "inventory"}),
+            now, now,
+        ),
+    )
+    add_event(conn, int(player["id"]), "storage", f"Stored {qty}x {listing['item_name']} at {scope['planet_name']} in {scope['galaxy_name']}.", {"scope": scope, "item": listing["item_code"], "qty": qty})
+    return {"message": f"Stored {qty}x {listing['item_name']} at {scope['planet_name']}.", "scope": scope}
+
+
+def withdraw_item_from_current_planet(conn: sqlite3.Connection, player: Dict[str, Any], storage_id: int, qty: int, god: bool = False) -> Dict[str, Any]:
+    scope = player_location_scope(conn, player)
+    storage = row(conn, "SELECT * FROM player_storage_items WHERE id=? AND player_id=?", (int(storage_id), int(player["id"])))
+    if not storage or int(storage.get("qty") or 0) <= 0:
+        raise HTTPException(404, "Stored item not found")
+    if int(storage.get("planet_id") or 0) != int(scope["planet_id"]):
+        raise HTTPException(400, "You can only remove storage from your current planet")
+    qty = max(1, min(int(qty), int(storage["qty"])))
+    mass = float(storage.get("mass") or 1) * qty
+    if storage.get("item_type") not in {"ship_module", "module"} and not god and not can_fit_cargo(conn, int(player["id"]), mass, cargo_exempt=False):
+        raise HTTPException(400, "Not enough cargo capacity to withdraw this storage")
+    add_listing_item_to_player(conn, int(player["id"]), storage_listing_from_row(storage), qty, "planet_storage_withdraw")
+    remaining = int(storage["qty"]) - qty
+    conn.execute("UPDATE player_storage_items SET qty=?, updated_at=? WHERE id=?", (remaining, iso(), int(storage_id)))
+    conn.execute("DELETE FROM player_storage_items WHERE id=? AND qty<=0", (int(storage_id),))
+    add_event(conn, int(player["id"]), "storage", f"Withdrew {qty}x {storage['item_name']} from {scope['planet_name']} storage.", {"scope": scope, "item": storage.get("item_code"), "qty": qty})
+    return {"message": f"Withdrew {qty}x {storage['item_name']} from storage.", "scope": scope}
+
+
+def build_player_storage_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    scope = player_location_scope(conn, player)
+    stored = rows(
+        conn,
+        """
+        SELECT psi.*, p.name as planet_name, g.name as galaxy_name, g.code as galaxy_code,
+               CASE WHEN psi.planet_id=? THEN 1 ELSE 0 END as can_modify
+        FROM player_storage_items psi
+        JOIN planets p ON p.id=psi.planet_id
+        JOIN galaxies g ON g.id=psi.galaxy_id
+        WHERE psi.player_id=? AND psi.qty>0
+        ORDER BY g.name, p.name, psi.category, psi.item_name
+        """,
+        (int(scope["planet_id"]), int(player["id"])),
+    )
+    for item in stored:
+        item["current_tier"] = clamp_tier(item.get("tier", 1))
+        item["tier_display"] = get_tier_display_data(item["current_tier"], item.get("max_tier", 3))
+        item["available_here"] = bool(item.get("can_modify"))
+        attach_item_visual(item, name_key="item_name", item_type_key="item_type", category_key="category", legal_key="legal")
+    deposit_candidates = [i for i in build_inventory_summary(conn, int(player["id"])) if int(i.get("available_qty") or i.get("qty") or 0) > 0 and i.get("source") != "equipped_module"]
+    galaxy_counts: Dict[str, Dict[str, Any]] = {}
+    for item in stored:
+        gid = str(item.get("galaxy_id"))
+        rec = galaxy_counts.setdefault(gid, {"galaxyId": item.get("galaxy_id"), "galaxyName": item.get("galaxy_name"), "qty": 0, "mass": 0.0})
+        rec["qty"] += int(item.get("qty") or 0)
+        rec["mass"] += float(item.get("mass") or 1) * int(item.get("qty") or 0)
+    return {
+        "scope": scope,
+        "stored": stored,
+        "depositCandidates": deposit_candidates,
+        "galaxies": list(galaxy_counts.values()),
+        "rules": {
+            "view": "All galaxy storage is visible.",
+            "modify": "Deposits and withdrawals require being on the item planet.",
+            "currentPlanetId": int(scope["planet_id"]),
+            "currentGalaxyId": int(scope["galaxy_id"]),
+        },
+    }
+
+
 def ensure_player_market_content(conn: sqlite3.Connection) -> None:
     if not scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='player_market_listings'"):
         return
@@ -9073,7 +11831,7 @@ def ensure_player_market_content(conn: sqlite3.Connection) -> None:
     if needed <= 0:
         return
     commodities = rows(conn, "SELECT * FROM commodities ORDER BY legal DESC, base_price DESC LIMIT 40")
-    planets = rows(conn, "SELECT id, name FROM planets ORDER BY id LIMIT 12")
+    planets = rows(conn, "SELECT id, name, galaxy_id FROM planets ORDER BY id LIMIT 24")
     if not commodities or not planets:
         return
     rng = random.Random(6606 + int(active or 0))
@@ -9087,11 +11845,11 @@ def ensure_player_market_content(conn: sqlite3.Connection) -> None:
         conn.execute(
             """
             INSERT INTO player_market_listings
-              (seller_player_id,seller_name,planet_id,origin,source_ref,item_code,item_name,item_type,category,qty,remaining_qty,unit_price,legal,base_value,mass,description,rarity,status,created_at,expires_at)
-            VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              (seller_player_id,seller_name,planet_id,galaxy_id,origin,source_ref,item_code,item_name,item_type,category,qty,remaining_qty,unit_price,legal,base_value,mass,description,rarity,status,created_at,expires_at)
+            VALUES (NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                rng.choice(seller_names), pl["id"], "npc_seed", "", c["code"], c["name"], c["category"],
+                rng.choice(seller_names), pl["id"], int(pl.get("galaxy_id") or 0), "npc_seed", "", c["code"], c["name"], c["category"],
                 inventory_category(c["category"], int(c.get("legal", 1))), qty, qty, unit, int(c.get("legal", 1)),
                 int(c["base_price"]), float(c.get("mass") or 1), c.get("description") or "Player-market supply.",
                 inventory_rarity(c.get("category", "goods"), int(c["base_price"]), int(c.get("legal", 1))), "active", now, iso(utcnow()+timedelta(days=7))
@@ -9181,37 +11939,48 @@ def add_listing_item_to_player(conn: sqlite3.Connection, player_id: int, listing
 
 def build_player_market_state(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
     ensure_player_market_content(conn)
+    scope = player_market_current_scope(conn, player_id)
+    # Backfill legacy listings that predate galaxy-aware market rules.
+    conn.execute("UPDATE player_market_listings SET galaxy_id=(SELECT galaxy_id FROM planets WHERE planets.id=player_market_listings.planet_id) WHERE galaxy_id IS NULL OR galaxy_id=0")
     active = rows(
         conn,
         """
-        SELECT pml.*, p.name as planet_name,
-               CASE WHEN pml.seller_player_id=? THEN 1 ELSE 0 END as own_listing
+        SELECT pml.*, p.name as planet_name, g.name as galaxy_name, g.code as galaxy_code,
+               CASE WHEN pml.seller_player_id=? THEN 1 ELSE 0 END as own_listing,
+               CASE WHEN COALESCE(pml.galaxy_id,p.galaxy_id)=? THEN 1 ELSE 0 END as can_trade_here
         FROM player_market_listings pml
         LEFT JOIN planets p ON p.id=pml.planet_id
+        LEFT JOIN galaxies g ON g.id=COALESCE(pml.galaxy_id,p.galaxy_id)
         WHERE pml.status='active' AND pml.remaining_qty>0
-        ORDER BY pml.legal DESC, pml.category, pml.unit_price, pml.id DESC
-        LIMIT 120
+        ORDER BY can_trade_here DESC, g.name, pml.legal DESC, pml.category, pml.unit_price, pml.id DESC
+        LIMIT 300
         """,
-        (player_id,),
+        (player_id, int(scope.get("galaxy_id") or 0)),
     )
     history = rows(
         conn,
         """
-        SELECT pml.*, p.name as planet_name,
-               CASE WHEN pml.seller_player_id=? THEN 1 ELSE 0 END as own_listing
+        SELECT pml.*, p.name as planet_name, g.name as galaxy_name, g.code as galaxy_code,
+               CASE WHEN pml.seller_player_id=? THEN 1 ELSE 0 END as own_listing,
+               CASE WHEN COALESCE(pml.galaxy_id,p.galaxy_id)=? THEN 1 ELSE 0 END as can_trade_here
         FROM player_market_listings pml
         LEFT JOIN planets p ON p.id=pml.planet_id
+        LEFT JOIN galaxies g ON g.id=COALESCE(pml.galaxy_id,p.galaxy_id)
         WHERE pml.status<>'active' OR pml.seller_player_id=?
         ORDER BY pml.id DESC
-        LIMIT 80
+        LIMIT 120
         """,
-        (player_id, player_id),
+        (player_id, int(scope.get("galaxy_id") or 0), player_id),
     )
     for listing in active + history:
+        listing["galaxy_id"] = int(listing.get("galaxy_id") or 0) or int(scalar(conn, "SELECT galaxy_id FROM planets WHERE id=?", (listing.get("planet_id"),)) or 0)
         listing["current_tier"] = clamp_tier(listing.get("tier", 1))
         listing["tier_display"] = get_tier_display_data(listing["current_tier"], listing.get("max_tier", 3))
+        listing["can_trade_here"] = bool(listing.get("can_trade_here"))
+        listing["remote_market"] = not listing["can_trade_here"]
         attach_item_visual(listing, name_key="item_name", item_type_key="item_type", category_key="category", legal_key="legal")
-    return {"active": active, "history": history, "balance": PLAYER_MARKET_BALANCE}
+    galaxy_rows = rows(conn, "SELECT id, name, code FROM galaxies ORDER BY name")
+    return {"active": active, "history": history, "balance": PLAYER_MARKET_BALANCE, "scope": scope, "galaxies": galaxy_rows, "rules": {"view": "All galaxy listings are visible.", "trade": "Buying, selling, listing, and cancelling are restricted to your current galaxy."}}
 
 
 def ensure_loop_set_module_templates(conn: sqlite3.Connection) -> None:
@@ -9621,7 +12390,8 @@ def crafting_cost_discount(conn: sqlite3.Connection, player_id: int) -> float:
 
 def effective_recipe_cost(conn: sqlite3.Connection, player_id: int, recipe: Dict[str, Any]) -> int:
     tier_factor = 0.88 + (0.12 * calculate_tier_crafting_difficulty(int(recipe.get("recipe_tier") or 1)))
-    return max(0, int(int(recipe.get("credits") or 0) * tier_factor * (1.0 - crafting_cost_discount(conn, player_id))))
+    base_cost = int(int(recipe.get("credits") or 0) * tier_factor * (1.0 - crafting_cost_discount(conn, player_id)))
+    return balanced_recipe_credit_cost(recipe, base_cost)
 
 
 def crafting_success_odds(conn: sqlite3.Connection, player_id: int, recipe: Dict[str, Any], planet: Optional[Dict[str, Any]], god: bool = False) -> float:
@@ -9843,7 +12613,8 @@ def crafting_duration_seconds(recipe: Dict[str, Any]) -> int:
 
     min_seconds = int(CRAFTING_BALANCE.get("min_seconds", 5))
     max_seconds = int((CRAFTING_BALANCE.get("max_seconds_by_output") or {}).get(output_key, 86400))
-    return max(min_seconds, min(max_seconds, seconds))
+    seconds = max(min_seconds, min(max_seconds, seconds))
+    return balanced_crafting_seconds(seconds, recipe)
 
 
 def craft_duration_label(seconds: int) -> str:
@@ -11013,7 +13784,7 @@ def ensure_progression_content(conn: sqlite3.Connection) -> None:
 def grant_skill_xp(conn: sqlite3.Connection, player_id: int, skill_key: str, amount: int) -> Dict[str, Any]:
     if skill_key not in PHASE16_SKILL_CATALOG:
         return {"skill": skill_key, "xp_added": 0, "level_before": 0, "level_after": 0}
-    amount = max(0, int(amount or 0))
+    amount = max(0, int((amount or 0) * eco_mult("reward_mult.pve_xp", 0.72)))
     if amount <= 0:
         return {"skill": skill_key, "xp_added": 0, "level_before": 0, "level_after": 0}
     node = row(conn, "SELECT * FROM skill_nodes WHERE key=?", (skill_key,))
@@ -11047,7 +13818,7 @@ def grant_career_xp_if_active(conn: sqlite3.Connection, player_id: int, action_k
     cfg = ACTION_PROGRESSION.get(action_key, {})
     if not active or active not in (cfg.get("careers") or {}):
         return {}
-    xp = max(1, int((cfg["careers"][active]) * multiplier))
+    xp = max(1, int((cfg["careers"][active]) * multiplier * eco_mult("reward_mult.pve_xp", 0.72)))
     conn.execute(
         "INSERT INTO player_jobs (player_id,job_code,xp,rank,active,last_active_at) VALUES (?,?,?,?,1,?) "
         "ON CONFLICT(player_id,job_code) DO UPDATE SET xp=player_jobs.xp+excluded.xp, last_active_at=excluded.last_active_at",
@@ -11273,10 +14044,245 @@ def ensure_action_allowed(conn: sqlite3.Connection, user: Dict[str,Any], player:
     station_allowed = {"admin_godmode", "update_profile", "send_chat_message", "pirate_station_move", "pirate_station_retreat", "pirate_station_start_battle", "pirate_station_resolve_battle", "pirate_station_close_battle"}
     if station_run and action.type not in station_allowed and not user["god_mode"]:
         raise HTTPException(409, "You are inside a pirate station assault. Finish, retreat, or close the battle screen before using normal planet/system actions.")
+    mission_run = active_planet_mission(conn, player["id"]) if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='planet_mission_runs'") else None
+    mission_allowed = {"admin_godmode", "update_profile", "send_chat_message", "cancel_planet_mission"}
+    if mission_run and action.type not in mission_allowed and not user["god_mode"]:
+        raise HTTPException(409, "Planet mission in progress. Cancel it or wait for completion before using normal actions.")
+
+
+def prune_admin_action_logs(conn: sqlite3.Connection) -> None:
+    # Keep the game-wide action feed bounded. Admin table displays the merged last 500.
+    conn.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 500)")
+    conn.execute("DELETE FROM npc_action_log WHERE id NOT IN (SELECT id FROM npc_action_log ORDER BY id DESC LIMIT 500)")
+    conn.execute("DELETE FROM market_transactions WHERE id NOT IN (SELECT id FROM market_transactions ORDER BY id DESC LIMIT 500)")
+    conn.execute("DELETE FROM combat_battles WHERE id NOT IN (SELECT id FROM combat_battles ORDER BY id DESC LIMIT 500)")
 
 
 def add_event(conn: sqlite3.Connection, player_id: int, category: str, message: str, meta: Optional[dict] = None) -> None:
     conn.execute("INSERT INTO events (player_id,category,message,meta_json,created_at) VALUES (?,?,?,?,?)", (player_id, category, message, encode_json(meta or {}), iso()))
+    prune_admin_action_logs(conn)
+
+
+def admin_actor_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    player_rows = rows(conn, """
+        SELECT
+            'player' AS actor_type,
+            p.id AS actor_id,
+            u.username,
+            p.callsign AS name,
+            p.level,
+            p.xp,
+            p.credits,
+            p.fuel,
+            p.max_fuel,
+            p.energy,
+            p.max_energy,
+            p.cargo,
+            p.max_cargo,
+            p.health,
+            p.max_health,
+            p.heat,
+            p.security_status,
+            pl.name AS location_name,
+            g.name AS galaxy_name,
+            s.id AS ship_id,
+            s.name AS ship_name,
+            s.hull,
+            s.max_hull,
+            s.shield,
+            s.max_shield,
+            s.armor,
+            s.destroyed,
+            st.class_name,
+            st.role AS ship_role,
+            st.ship_tier,
+            p.travel_mode,
+            p.travel_until,
+            p.hospital_until,
+            p.cargo_operation_summary,
+            p.cargo_operation_until,
+            COALESCE(u.god_mode,0) AS god_mode
+        FROM players p
+        JOIN users u ON u.id=p.user_id
+        LEFT JOIN planets pl ON pl.id=p.location_planet_id
+        LEFT JOIN galaxies g ON g.id=pl.galaxy_id
+        LEFT JOIN ships s ON s.id=p.active_ship_id
+        LEFT JOIN ship_templates st ON st.id=s.template_id
+        ORDER BY p.id
+    """)
+    out: List[Dict[str, Any]] = []
+    now = utcnow()
+    for r in player_rows:
+        action = "Docked"
+        if r.get("hospital_until") and parse_dt(r.get("hospital_until")) and parse_dt(r.get("hospital_until")) > now:
+            action = "Recovering"
+        elif r.get("cargo_operation_until") and parse_dt(r.get("cargo_operation_until")) and parse_dt(r.get("cargo_operation_until")) > now:
+            action = r.get("cargo_operation_summary") or "Cargo operation"
+        elif r.get("travel_until") and parse_dt(r.get("travel_until")) and parse_dt(r.get("travel_until")) > now:
+            action = f"{label_for_api(r.get('travel_mode') or 'travel')} in progress"
+        ship = {
+            "id": r.get("ship_id"),
+            "name": r.get("ship_name"),
+            "role": r.get("ship_role"),
+            "className": r.get("class_name"),
+            "tier": r.get("ship_tier"),
+            "hull": r.get("hull"),
+            "maxHull": r.get("max_hull"),
+            "shield": r.get("shield"),
+            "maxShield": r.get("max_shield"),
+            "armor": r.get("armor"),
+            "destroyed": bool(r.get("destroyed")),
+            "combatRating": get_ship_power(conn, r.get("ship_id")) if r.get("ship_id") else 0,
+        }
+        out.append({
+            "id": f"player:{r.get('actor_id')}",
+            "actorType": "player",
+            "actorId": r.get("actor_id"),
+            "username": r.get("username"),
+            "name": r.get("name"),
+            "level": r.get("level"),
+            "xp": r.get("xp"),
+            "location": r.get("location_name"),
+            "galaxy": r.get("galaxy_name"),
+            "currentAction": action,
+            "status": "God Mode" if r.get("god_mode") else r.get("security_status"),
+            "stats": {
+                "credits": r.get("credits"), "fuel": r.get("fuel"), "maxFuel": r.get("max_fuel"),
+                "energy": r.get("energy"), "maxEnergy": r.get("max_energy"), "cargo": r.get("cargo"),
+                "maxCargo": r.get("max_cargo"), "health": r.get("health"), "maxHealth": r.get("max_health"),
+                "heat": r.get("heat")
+            },
+            "ship": ship,
+            "profile": {"username": r.get("username"), "callsign": r.get("name"), "godMode": bool(r.get("god_mode"))},
+        })
+
+    npc_rows = rows(conn, """
+        SELECT
+            n.*,
+            p.name AS location_name,
+            g.name AS galaxy_name,
+            ns.objective,
+            ns.action_state,
+            ns.target_object_key,
+            ns.x_pct,
+            ns.y_pct,
+            ns.destination_x_pct,
+            ns.destination_y_pct,
+            ns.action_until,
+            ns.arrival_at,
+            ns.cargo_json,
+            ns.updated_at AS map_updated_at
+        FROM npc_agents n
+        LEFT JOIN planets p ON p.id=n.planet_id
+        LEFT JOIN galaxies g ON g.id=p.galaxy_id
+        LEFT JOIN npc_map_state ns ON ns.npc_id=n.id
+        ORDER BY COALESCE(n.alive,1) DESC, n.id
+    """)
+    for n in npc_rows:
+        cargo_meta = decode_json(n.get("cargo_json"), {}) or {}
+        action = cargo_meta.get("objectiveLabel") or label_for_api(n.get("objective") or "idle")
+        action_state = label_for_api(n.get("action_state") or ("alive" if n.get("alive") else "dead"))
+        ship = npc_combat_ship_profile(n)
+        out.append({
+            "id": f"npc:{n.get('id')}",
+            "actorType": "npc",
+            "actorId": n.get("id"),
+            "username": "",
+            "name": n.get("name"),
+            "level": n.get("level"),
+            "xp": n.get("xp"),
+            "location": n.get("location_name"),
+            "galaxy": n.get("galaxy_name"),
+            "currentAction": f"{action}: {action_state}",
+            "status": "Alive" if int(n.get("alive") or 0) else "Dead",
+            "stats": {
+                "power": n.get("power"), "credits": n.get("credits"), "aggression": n.get("aggression"),
+                "friendliness": n.get("friendliness"), "jobRank": n.get("job_rank"), "generation": n.get("generation"),
+                "deathCount": n.get("death_count"), "activityRate": n.get("activity_rate"),
+                "skills": decode_json(n.get("skills_json"), {}) or {},
+                "x": n.get("x_pct"), "y": n.get("y_pct"),
+            },
+            "ship": {
+                "name": ship.get("name"),
+                "role": ship.get("role"),
+                "className": n.get("ship_class"),
+                "tier": ship.get("tier"),
+                "hull": ship.get("hull"),
+                "maxHull": ship.get("hull"),
+                "shield": ship.get("shield"),
+                "maxShield": ship.get("shield"),
+                "armor": ship.get("armor"),
+                "combatRating": ship.get("combatRating"),
+            },
+            "profile": {
+                "career": n.get("career_code"), "role": n.get("role"), "disposition": n.get("disposition"),
+                "marketBias": n.get("market_bias"), "target": cargo_meta.get("objectiveTargetName") or n.get("target_object_key"),
+            },
+        })
+    return out
+
+
+def admin_game_action_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    rows_out: List[Dict[str, Any]] = []
+    for e in rows(conn, """
+        SELECT e.id, e.category, e.message, e.meta_json, e.created_at, p.callsign, u.username
+        FROM events e
+        LEFT JOIN players p ON p.id=e.player_id
+        LEFT JOIN users u ON u.id=p.user_id
+        ORDER BY e.id DESC LIMIT 500
+    """):
+        rows_out.append({
+            "id": f"event:{e.get('id')}",
+            "source": "event",
+            "actionType": e.get("category") or "event",
+            "actor": e.get("callsign") or e.get("username") or "System",
+            "message": e.get("message"),
+            "createdAt": e.get("created_at"),
+            "meta": decode_json(e.get("meta_json"), {}) or {},
+        })
+    for e in rows(conn, "SELECT * FROM npc_action_log ORDER BY id DESC LIMIT 500"):
+        rows_out.append({
+            "id": f"npc:{e.get('id')}",
+            "source": "npc_action",
+            "actionType": e.get("action_type") or "npc",
+            "actor": e.get("actor_name") or "NPC",
+            "message": e.get("message"),
+            "createdAt": e.get("created_at"),
+            "meta": decode_json(e.get("impact_json"), {}) or {},
+        })
+    for e in rows(conn, """
+        SELECT mt.*, p.callsign
+        FROM market_transactions mt
+        LEFT JOIN players p ON p.id=mt.player_id
+        ORDER BY mt.id DESC LIMIT 500
+    """):
+        action = e.get("action") or "market"
+        rows_out.append({
+            "id": f"market:{e.get('id')}",
+            "source": "market_transaction",
+            "actionType": action,
+            "actor": e.get("callsign") or e.get("source") or "Market",
+            "message": f"{label_for_api(action)} {e.get('qty')}x {e.get('item_name')} for {e.get('net')} credits.",
+            "createdAt": e.get("created_at"),
+            "meta": {"itemCode": e.get("item_code"), "qty": e.get("qty"), "gross": e.get("gross"), "fee": e.get("fee"), "net": e.get("net"), "legal": e.get("legal")},
+        })
+    for e in rows(conn, """
+        SELECT cb.*, p.callsign
+        FROM combat_battles cb
+        LEFT JOIN players p ON p.id=cb.player_id
+        ORDER BY cb.id DESC LIMIT 500
+    """):
+        rows_out.append({
+            "id": f"combat:{e.get('id')}",
+            "source": "combat",
+            "actionType": "combat",
+            "actor": e.get("callsign") or "Player",
+            "message": e.get("summary") or f"Combat vs {e.get('target_name')}",
+            "createdAt": e.get("completed_at") or e.get("started_at"),
+            "meta": {"target": e.get("target_name"), "targetType": e.get("target_type"), "status": e.get("status"), "outcome": e.get("outcome"), "winner": e.get("winner"), "legalState": e.get("legal_state")},
+        })
+    rows_out.sort(key=lambda x: x.get("createdAt") or "", reverse=True)
+    return rows_out[:500]
 
 
 def ship_size_class(ship: Dict[str, Any]) -> str:
@@ -11937,6 +14943,7 @@ def state(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -
     # NPCs and market restock are server-side, timestamp-backed world movement.
     simulate_npc_activity(conn, force=False)
     simulate_npc_vs_npc_salvage(conn, force=False)
+    ensure_server_world_control(conn, force=False)
     resolve_market_restock(conn, force=False)
     simulate_npc_market_arbitrage(conn, force=False)
     resolve_player_legal_state(conn, player["id"])
@@ -12085,21 +15092,90 @@ def combat_ship_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]
     }
 
 def npc_combat_ship_profile(npc: Dict[str, Any]) -> Dict[str, Any]:
-    level = max(1, int(npc.get("level") or 1)); power = max(80, int(npc.get("power") or level * 220))
-    role = str(npc.get("role") or npc.get("career_code") or "npc").lower(); ship_class = npc.get("ship_class") or "NPC Ship"
+    level = max(1, int(npc.get("level") or 1))
+    power = max(80, int(npc.get("power") or level * 220))
+    role = str(npc.get("role") or npc.get("career_code") or "npc").lower()
+    career = str(npc.get("career_code") or role).lower()
+    ship_class = npc.get("ship_class") or "NPC Ship"
+    rng = random.Random(f"npc-build:{npc.get('id') or npc.get('name')}:{role}:{career}:{level}:{power}")
     is_combat = role in COMBAT_LEGAL_ROLES or role in COMBAT_SECURITY_ROLES or int(npc.get("aggression") or 0) > 55
-    return {"name": ship_class, "class": ship_class, "role": role, "tier": max(1, min(7, level // 9 + (1 if is_combat else 0))),
-        "image_url": ship_visual_payload(ship_class, role), "hull": int(380 + power * (1.4 if is_combat else 0.95)),
-        "shield": int(160 + power * (0.55 if is_combat else 0.32)), "armor": int(8 + level * (1.1 if is_combat else 0.55)),
-        "energy": int(75 + level * 3), "combatRating": power, "accuracy": min(0.86, 0.48 + level * 0.009 + (0.06 if is_combat else 0)),
-        "evasion": min(0.42, 0.06 + level * 0.004 + (0.06 if role in {"smuggler", "scout"} else 0)),
-        "weapons": normalize_combat_weapons([
-            {"name": "Pirate Cannon" if role in {"pirate", "mercenary"} else "Patrol Laser" if role in COMBAT_SECURITY_ROLES else "Defensive Laser", "type":"laser", "damage": int(55 + power * (0.18 if is_combat else 0.09)), "accuracy": min(0.84, 0.52 + level * 0.008), "requiredEnergy": 3 if is_combat else 1},
-            {"name": "Heavy Torpedo Rack", "type":"missile", "damage": int(95 + power * 0.20), "accuracy": min(0.78, 0.46 + level * 0.006), "requiredEnergy": 5},
-            {"name": "Close Defense Blaster", "type":"projectile", "damage": int(38 + power * 0.08), "accuracy": min(0.88, 0.58 + level * 0.005), "requiredEnergy": 1},
-        ] if is_combat else [{"name": "Defensive Laser", "type":"laser", "damage": int(45 + power * 0.08), "accuracy": min(0.78, 0.50 + level * 0.006), "requiredEnergy": 1}], power, is_combat),
-        "utilities": [dict(UTILITY_ARCHETYPES[1]), dict(UTILITY_ARCHETYPES[5])] if is_combat else [dict(UTILITY_ARCHETYPES[7])],
-        "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)), "stats": {}}
+
+    build_styles = [
+        {"key": "balanced", "hull": 1.00, "shield": 1.00, "armor": 1.00, "accuracy": 0.00, "evasion": 0.00},
+        {"key": "brawler", "hull": 1.18, "shield": 0.82, "armor": 1.16, "accuracy": -0.02, "evasion": -0.01},
+        {"key": "shield_kite", "hull": 0.88, "shield": 1.24, "armor": 0.92, "accuracy": 0.02, "evasion": 0.03},
+        {"key": "glass_cannon", "hull": 0.76, "shield": 0.92, "armor": 0.84, "accuracy": 0.06, "evasion": 0.02},
+        {"key": "evasive", "hull": 0.86, "shield": 1.02, "armor": 0.82, "accuracy": 0.01, "evasion": 0.08},
+    ]
+    if career in {"miner", "trader", "dockmaster", "quartermaster"}:
+        build_styles.append({"key": "industrial_tank", "hull": 1.28, "shield": 0.95, "armor": 1.10, "accuracy": -0.03, "evasion": -0.03})
+    style = rng.choice(build_styles)
+
+    tier = max(1, min(int(WORLD_PROGRESSION_BALANCE.get("resource_tier_max", 5)), level // 9 + (1 if is_combat else 0)))
+    hull = int((380 + power * (1.4 if is_combat else 0.95)) * float(style["hull"]))
+    shield = int((160 + power * (0.55 if is_combat else 0.32)) * float(style["shield"]))
+    armor = int((8 + level * (1.1 if is_combat else 0.55)) * float(style["armor"]))
+
+    weapon_pool = [
+        {"name": "Pulse Laser Array", "type": "laser", "damage": int(50 + power * 0.13), "accuracy": min(0.86, 0.54 + level * 0.007), "requiredEnergy": 2},
+        {"name": "Rail Burst Cannon", "type": "projectile", "damage": int(64 + power * 0.15), "accuracy": min(0.80, 0.49 + level * 0.006), "requiredEnergy": 3},
+        {"name": "Close Defense Blaster", "type": "projectile", "damage": int(38 + power * 0.08), "accuracy": min(0.88, 0.58 + level * 0.005), "requiredEnergy": 1},
+        {"name": "Heavy Torpedo Rack", "type": "missile", "damage": int(95 + power * 0.20), "accuracy": min(0.78, 0.46 + level * 0.006), "requiredEnergy": 5},
+        {"name": "Ion Lance", "type": "laser", "damage": int(72 + power * 0.17), "accuracy": min(0.82, 0.50 + level * 0.007), "requiredEnergy": 4},
+        {"name": "Scatter Flak", "type": "projectile", "damage": int(42 + power * 0.10), "accuracy": min(0.90, 0.60 + level * 0.004), "requiredEnergy": 2},
+    ]
+    if role in {"pirate", "mercenary", "outlaw", "raider"}:
+        weapon_pool.extend([
+            {"name": "Pirate Cannon", "type": "projectile", "damage": int(70 + power * 0.18), "accuracy": min(0.82, 0.50 + level * 0.007), "requiredEnergy": 3},
+            {"name": "Scrambler Beam", "type": "laser", "damage": int(48 + power * 0.11), "accuracy": min(0.86, 0.55 + level * 0.006), "requiredEnergy": 2},
+        ])
+    if role in COMBAT_SECURITY_ROLES or career in {"security_pilot", "marshal", "bounty_hunter"}:
+        weapon_pool.extend([
+            {"name": "Patrol Laser", "type": "laser", "damage": int(58 + power * 0.16), "accuracy": min(0.86, 0.55 + level * 0.007), "requiredEnergy": 3},
+            {"name": "Interceptor Missile", "type": "missile", "damage": int(84 + power * 0.18), "accuracy": min(0.80, 0.49 + level * 0.006), "requiredEnergy": 4},
+        ])
+    if not is_combat:
+        weapon_pool = [
+            {"name": "Defensive Laser", "type": "laser", "damage": int(45 + power * 0.08), "accuracy": min(0.78, 0.50 + level * 0.006), "requiredEnergy": 1},
+            {"name": "Point Defense Burst", "type": "projectile", "damage": int(34 + power * 0.07), "accuracy": min(0.84, 0.56 + level * 0.004), "requiredEnergy": 1},
+        ]
+
+    rng.shuffle(weapon_pool)
+    weapon_count = 3 if is_combat else 1
+    if style["key"] == "glass_cannon" and is_combat:
+        weapon_count = 4
+    weapons = weapon_pool[:weapon_count]
+
+    utility_pool = [dict(UTILITY_ARCHETYPES[i]) for i in ([1, 5, 7, 8] if is_combat else [7, 1])]
+    if style["key"] in {"shield_kite", "industrial_tank"}:
+        utility_pool.insert(0, dict(UTILITY_ARCHETYPES[1]))
+    if style["key"] == "evasive":
+        utility_pool.insert(0, dict(UTILITY_ARCHETYPES[5]))
+    rng.shuffle(utility_pool)
+    utilities = utility_pool[:(2 if is_combat else 1)]
+
+    accuracy = min(0.89, 0.48 + level * 0.009 + (0.06 if is_combat else 0) + float(style["accuracy"]))
+    evasion = min(0.48, 0.06 + level * 0.004 + (0.06 if role in {"smuggler", "scout"} else 0) + float(style["evasion"]))
+
+    return {
+        "name": ship_class,
+        "class": ship_class,
+        "role": role,
+        "buildStyle": style["key"],
+        "tier": tier,
+        "image_url": ship_visual_payload(ship_class, role),
+        "hull": hull,
+        "shield": shield,
+        "armor": armor,
+        "energy": int(75 + level * 3),
+        "combatRating": power,
+        "accuracy": accuracy,
+        "evasion": evasion,
+        "weapons": normalize_combat_weapons(weapons, power, is_combat),
+        "utilities": utilities,
+        "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)),
+        "stats": {"buildStyle": style["key"]},
+    }
 
 def combat_target_legality(conn: sqlite3.Connection, player: Dict[str, Any], target: Dict[str, Any], mode: str = "attack") -> Dict[str, Any]:
     planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],)) or {}
@@ -13589,6 +16665,7 @@ def build_state(conn, user, player):
     apply_runtime_game_settings(conn)
     resolve_completed_crafting_jobs(conn, player["id"], bool(user.get("god_mode")))
     resolve_completed_cargo_operations(conn, player["id"])
+    resolve_completed_planet_missions(conn, player["id"])
     resolve_player_legal_state(conn, player["id"])
     resolve_market_restock(conn, force=False)
     simulate_npc_market_arbitrage(conn, force=False)
@@ -13597,6 +16674,7 @@ def build_state(conn, user, player):
         conn.execute("UPDATE players SET energy=max(energy,999999999), max_energy=max(max_energy,999999999), energy_updated_at=? WHERE id=?", (iso(), player["id"]))
     player = get_player(conn, player["id"])
     ensure_galaxy_faction_content(conn)
+    ensure_server_world_control(conn, force=False)
     process_planet_faction_wars(conn, player)
     process_guild_planet_xp_bonus(conn)
     player = get_player(conn, player["id"])
@@ -13681,6 +16759,7 @@ def build_state(conn, user, player):
     all_planets = rows(conn, "SELECT p.*, g.name as galaxy_name, g.code as galaxy_code FROM planets p JOIN galaxies g ON g.id=p.galaxy_id ORDER BY g.id, p.name")
     for pl in all_planets:
         pl["image_url"] = planet_visual_payload(pl)
+    prune_admin_action_logs(conn)
     activity_rows = rows(conn, "SELECT nal.*, p.name as planet_name, p.galaxy_id FROM npc_action_log nal LEFT JOIN planets p ON p.id=nal.planet_id ORDER BY nal.id DESC LIMIT 100")
     for ev in activity_rows:
         enrich_activity_event(ev)
@@ -13703,6 +16782,7 @@ def build_state(conn, user, player):
         "next_level_xp": level_xp_required(player["level"]),
         "location": planet,
         "planet_control": build_planet_control_state(conn, player["id"], planet),
+        "planet_missions": build_planet_missions_state(conn, player),
         "galaxies": rows(conn, "SELECT * FROM galaxies"),
         "planets": all_planets,
         "travel_state": travel_state,
@@ -13742,6 +16822,7 @@ def build_state(conn, user, player):
         "skills_catalog": PHASE16_SKILL_CATALOG,
         "progression_balance": SKILL_XP_BALANCE,
         "properties": rows(conn, "SELECT pp.*, pt.name, pt.type, pt.base_price, pt.storage, pt.income, pt.bonus_json, p.name as planet_name FROM player_properties pp JOIN property_templates pt ON pt.id=pp.property_template_id JOIN planets p ON p.id=pp.planet_id WHERE pp.player_id=?", (player["id"],)),
+        "base_state": base_state(conn, player),
         "property_templates": rows(conn, "SELECT * FROM property_templates ORDER BY base_price"),
         "establishments": rows(conn, "SELECT pe.*, p.name as planet_name FROM planet_establishments pe JOIN planets p ON p.id=pe.planet_id WHERE pe.planet_id=? ORDER BY service_type", (player["location_planet_id"],)),
         "ship_power": ship_power,
@@ -13753,9 +16834,12 @@ def build_state(conn, user, player):
         "npc_activity": activity_rows,
         "simulation": {"balance": SIMULATION_BALANCE, **(row(conn, "SELECT * FROM simulation_ticks WHERE id=1") or {})},
         "game_tuning": build_game_tuning_state(conn, user),
+        "ecosystem_balance": ecosystem_balance_summary(conn) if bool(user.get("god_mode")) else {},
+        "admin_console": {"actors": admin_actor_rows(conn), "actions": admin_game_action_rows(conn)} if bool(user.get("god_mode")) else {"actors": [], "actions": []},
         "market_history": rows(conn, "SELECT mh.*, c.name as commodity_name, p.name as planet_name FROM market_history mh JOIN commodities c ON c.id=mh.commodity_id JOIN planets p ON p.id=mh.planet_id ORDER BY mh.id DESC LIMIT 50"),
         "market_transactions": rows(conn, "SELECT mt.*, p.name as planet_name, COALESCE(c.name, mt.item_name) as commodity_name FROM market_transactions mt LEFT JOIN commodities c ON c.id=mt.commodity_id LEFT JOIN planets p ON p.id=mt.planet_id WHERE mt.player_id=? OR mt.player_id IS NULL ORDER BY mt.id DESC LIMIT 60", (player["id"],)),
         "player_market": build_player_market_state(conn, player["id"]),
+        "player_storage": build_player_storage_state(conn, player),
         "crafting_recipes": build_crafting_state(conn, player["id"], planet, bool(user["god_mode"])),
         "crafting_queue": crafting_queue_payload(conn, player["id"]),
         "crafting_history": rows(conn, "SELECT * FROM crafting_history WHERE player_id=? ORDER BY id DESC LIMIT 40", (player["id"],)),
@@ -13783,6 +16867,7 @@ def action(req: ActionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depend
         player = resolve_completed_travel(conn, get_player(conn, player["id"]))
         player = resolve_intercept_if_close(conn, get_player(conn, player["id"]))
         resolve_completed_cargo_operations(conn, player["id"])
+        resolve_completed_planet_missions(conn, player["id"])
         advance_pirate_station_run(conn, player["id"])
         player = get_player(conn, player["id"])
         ensure_action_allowed(conn, user, player, req)
@@ -13824,6 +16909,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         "upgrade_module", "upgrade_inventory_item", "equip_inventory_item",
         "salvage_inventory_item", "use_inventory_item", "pve_operation",
         "run_smuggling_route", "planet_control_action", "career_task",
+        "start_planet_mission", "cancel_planet_mission",
         "accept_bounty", "start_combat", "preview_combat", "mine", "salvage",
         "collect_property_income", "upgrade_property", "insure_ship",
     }
@@ -13948,6 +17034,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         now = utcnow()
         arrival = now + timedelta(seconds=seconds)
         clear_player_open_space(conn, pid)
+        conn.execute("UPDATE players SET player_base_docked_id=NULL WHERE id=?", (pid,))
         clear_player_intercept(conn, pid)
         clear_player_route(conn, pid)
         set_player_waypoint(conn, pid, {
@@ -14059,11 +17146,25 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             outcome = "jackpot"
         if not god:
             conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (payout, pid))
+        ultra_reward = roll_exploration_node_ultra_reward(f"{pid}:{site_id}:{tier}:{quality}")
+        if ultra_reward:
+            granted_ultra = grant_ultra_item_to_player(conn, pid, ultra_reward["code"], "exploration_ultra", god=god)
+            if granted_ultra:
+                ultra_reward = granted_ultra
         conn.execute("UPDATE map_objects SET qty_remaining=0, state='depleted', locked_by_player_id=NULL, operation_type='', operation_until=NULL, updated_at=? WHERE id=?", (iso(), obj["id"]))
-        map_op = start_player_map_operation(conn, player, site_id, "investigation", 14 + tier * 3, f"Investigated {site.get('realName') or site.get('name')} — {outcome}.", {"outcome": outcome, "payout": payout})
+        result_payload = {"outcome": outcome, "payout": payout}
+        if ultra_reward:
+            result_payload["ultraItem"] = ultra_reward
+        map_op = start_player_map_operation(conn, player, site_id, "investigation", 14 + tier * 3, f"Investigated {site.get('realName') or site.get('name')} — {outcome}.", result_payload)
         grant_action_progression(conn, pid, "exploration", max(2.0, tier * 2.2), True)
-        add_event(conn, pid, "exploration", f"Investigation {outcome}: {site.get('realName') or site.get('name')} yielded {payout:,} credits.", {"site_id": site_id, "outcome": outcome, "payout": payout})
-        return {"message": f"Investigation {outcome}: recovered {payout:,} credits. Factors: signal quality {quality}%, exploration {exploration_skill}, scanning {scan_skill}, risk {risk}%.", "mapOperation": map_op}
+        event_message = f"Investigation {outcome}: {site.get('realName') or site.get('name')} yielded {payout:,} credits."
+        if ultra_reward:
+            event_message += f" Ultra discovery: {ultra_reward['name']}."
+        add_event(conn, pid, "exploration", event_message, {"site_id": site_id, "outcome": outcome, "payout": payout, "ultraItem": ultra_reward})
+        message = f"Investigation {outcome}: recovered {payout:,} credits. Factors: signal quality {quality}%, exploration {exploration_skill}, scanning {scan_skill}, risk {risk}%."
+        if ultra_reward:
+            message += f" Ultra discovery: {ultra_reward['name']} — {ultra_reward.get('specialText') or ultra_reward.get('description')}."
+        return {"message": message, "mapOperation": map_op, "ultraItem": ultra_reward}
 
     if t == "resolve_intercept_now":
         player_now = get_player(conn, pid)
@@ -14162,9 +17263,16 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         code = str(obj.get("code") or site.get("oreCode") or "ore")
         spend(conn, pid, energy=energy, fuel=max(1, int(site.get("tier") or 1)), god=god)
         seconds = max(8, min(90, int(16 + int(site.get("tier") or 1) * 7)))
-        map_op = start_player_map_operation(conn, player, site_id, "mining", seconds, f"Mining {site.get('name')} — extracting {qty} units.", {"qty": qty, "ore_code": code})
+        ultra_reward = roll_mining_ultra_reward(f"{pid}:{site_id}:{qty}:{code}:{seconds}")
+        result_payload = {"qty": qty, "ore_code": code}
+        if ultra_reward:
+            result_payload["ultraItem"] = ultra_reward
+        map_op = start_player_map_operation(conn, player, site_id, "mining", seconds, f"Mining {site.get('name')} — extracting {qty} units.", result_payload)
         conn.execute("UPDATE map_objects SET state='being_mined', locked_by_player_id=?, operation_type='mining', operation_until=?, updated_at=? WHERE id=?", (pid, map_op["ends_at"], iso(), obj["id"]))
-        op = begin_cargo_operation(conn, pid, player["location_planet_id"], "mine_ore_site", code, site.get("name") or label_for_api(code), qty, float(site.get("massEach") or 1) * qty, 0, 0, 0, 1, {"ore_code": code, "ore_name": site.get("name"), "tier": int(site.get("tier") or 1), "unit_value": int(site.get("unitValue") or 60), "mass_each": float(site.get("massEach") or 1), "map_object_key": site_id, "location_name": "open space"}, god)
+        cargo_payload = {"ore_code": code, "ore_name": site.get("name"), "tier": int(site.get("tier") or 1), "unit_value": int(site.get("unitValue") or 60), "mass_each": float(site.get("massEach") or 1), "map_object_key": site_id, "location_name": "open space"}
+        if ultra_reward:
+            cargo_payload["ultra_item_code"] = ultra_reward.get("code")
+        op = begin_cargo_operation(conn, pid, player["location_planet_id"], "mine_ore_site", code, site.get("name") or label_for_api(code), qty, float(site.get("massEach") or 1) * qty, 0, 0, 0, 1, cargo_payload, god)
         remaining = max(0, int(obj.get("qty_remaining") or 0) - qty)
         conn.execute("UPDATE map_objects SET qty_remaining=?, state=?, locked_by_player_id=NULL, operation_type='', operation_until=NULL, updated_at=? WHERE id=?", (remaining, "depleted" if remaining <= 0 else "available", iso(), obj["id"]))
         op["mapOperation"] = map_op
@@ -14212,6 +17320,50 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message":"Combat preview ready.", "preview": preview}
 
 
+    if t == "admin_refresh_console":
+        if not user["god_mode"] or not DEV_MODE:
+            raise HTTPException(403, "Admin only")
+        prune_admin_action_logs(conn)
+        add_event(conn, player["id"], "admin", "Admin console manually refreshed.", {"source": "admin_console"})
+        return {"message": "Admin console refreshed."}
+
+
+    if t == "admin_recalculate_economy":
+        if not user["god_mode"] or not DEV_MODE:
+            raise HTTPException(403, "Admin only")
+        changed = 0
+        for mp in rows(conn, "SELECT planet_id, commodity_id, supply, demand FROM market_prices"):
+            recalc_market_price(conn, int(mp["planet_id"]), int(mp["commodity_id"]), source="admin_ecosystem_recalc")
+            changed += 1
+        ensure_crafting_content(conn)
+        add_event(conn, pid, "admin", f"Recalculated ecosystem economy prices for {changed} market rows.", {"rows": changed})
+        return {"message": f"Recalculated {changed} market rows and refreshed crafting content.", "summary": ecosystem_balance_summary(conn)}
+
+
+    if t == "admin_apply_planet_mission_balance":
+        if not user["god_mode"] or not DEV_MODE:
+            raise HTTPException(403, "Admin only")
+        normalize_all_planet_classes(conn)
+        add_event(conn, player["id"], "admin", "Admin reapplied planet/station/uninhabitable mission balance.", {})
+        return {"message": "Planet mission balance reapplied."}
+
+    if t == "admin_run_world_server_check":
+        if not user["god_mode"] or not DEV_MODE:
+            raise HTTPException(403, "Admin only")
+        result = ensure_server_world_control(conn, force=True)
+        return {"message": f"World server check applied {result.get('changeCount', 0)} changes.", "worldServer": result}
+
+
+    if t == "admin_apply_world_progression":
+        if not user["god_mode"] or not DEV_MODE:
+            raise HTTPException(403, "Admin only")
+        ensure_galaxy_faction_content(conn)
+        adjusted_npcs = rebalance_existing_npcs_for_world_progression(conn)
+        conn.execute("DELETE FROM map_objects WHERE kind IN ('ore','exploration')")
+        add_event(conn, player["id"], "admin", "Applied world progression tuning: galaxy/planet expansion checked, NPC levels rebanded, and ore/exploration nodes regenerated on next map load.", {"source": "world_progression", "adjustedNpcs": adjusted_npcs})
+        return {"message": f"World progression applied. Rebalanced {adjusted_npcs} NPCs. Ore/exploration nodes will regenerate using the current tier bands on next map load."}
+
+
     if t == "admin_save_game_config":
         if not user["god_mode"] or not DEV_MODE:
             raise HTTPException(403, "Game tuning is dev/admin only")
@@ -14220,7 +17372,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if not isinstance(value, dict):
             raise HTTPException(400, "Config value must be a JSON object")
         save_game_config_override(conn, key, value, user.get("username") or str(user.get("id")))
-        if key in {"RANKED_CRAFTING_BALANCE", "RECIPE_DROP_BALANCE"}:
+        if key in {"RANKED_CRAFTING_BALANCE", "RECIPE_DROP_BALANCE", "ECOSYSTEM_BALANCE", "CRAFTING_BALANCE", "TIER_BALANCE"}:
             ensure_crafting_content(conn)
         add_event(conn, pid, "admin", f"Updated game tuning group {key}.", {"key": key})
         return {"message": f"Saved {key}."}
@@ -14230,7 +17382,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             raise HTTPException(403, "Game tuning is dev/admin only")
         key = str(payload.get("key") or "").strip()
         reset_game_config_override(conn, key)
-        if key in {"RANKED_CRAFTING_BALANCE", "RECIPE_DROP_BALANCE"}:
+        if key in {"RANKED_CRAFTING_BALANCE", "RECIPE_DROP_BALANCE", "ECOSYSTEM_BALANCE", "CRAFTING_BALANCE", "TIER_BALANCE"}:
             ensure_crafting_content(conn)
         add_event(conn, pid, "admin", f"Reset game tuning group {key}.", {"key": key})
         return {"message": f"Reset {key} to defaults."}
@@ -14325,7 +17477,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
                 range_status = action_range_status(conn, player, target_point, "system")
                 if not god and not range_status.get("inRange"):
                     return start_docking_approach(conn, player, target_point, god)
-                clear_player_open_space(conn, pid); clear_player_waypoint(conn, pid); clear_player_intercept(conn, pid); clear_player_route(conn, pid)
+                clear_player_open_space(conn, pid); conn.execute("UPDATE players SET player_base_docked_id=NULL WHERE id=?", (pid,)); clear_player_waypoint(conn, pid); clear_player_intercept(conn, pid); clear_player_route(conn, pid)
                 add_event(conn, pid, "travel", f"Docked at {target['name']}. Ship left open space and is no longer visible as a map object.")
                 return {"message": f"Docked at {target['name']}.", "docked": True}
             raise HTTPException(400, "Already docked at this location")
@@ -14517,7 +17669,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             unit_price = int(mp["sell_price"])
         else:
             tier_value = int(attach_tier_metadata(dict(inv)).get("tier_value") or inv.get("base_value") or 0)
-            base_mult = ECONOMY_BALANCE["raw_ore_sell_mult"] if str(inv.get("item_type") or "").lower() == "ore" or str(inv.get("category") or "").lower() == "raw_materials" else ECONOMY_BALANCE["non_market_item_sell_mult"]
+            base_mult = direct_vendor_sell_multiplier(inv)
             unit_price = max(1, int(tier_value * base_mult))
         gross_revenue = unit_price * qty
         sale_fee = 0 if god else int(gross_revenue * (ECONOMY_BALANCE["legal_sell_fee"] if legal else ECONOMY_BALANCE["illegal_sell_fee"]))
@@ -14618,6 +17770,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
 
 
     if t == "create_player_listing":
+        market_scope = player_market_current_scope(conn, pid)
         listing = listing_payload_from_inventory(conn, pid, payload)
         qty = int(listing["qty"])
         unit_price = max(1, int(payload.get("unit_price") or listing["base_value"] or 1))
@@ -14633,17 +17786,17 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         conn.execute(
             """
             INSERT INTO player_market_listings
-              (seller_player_id,seller_name,planet_id,origin,source_ref,item_code,item_name,item_type,category,qty,remaining_qty,unit_price,legal,base_value,mass,description,rarity,status,created_at,expires_at,tier,max_tier,tier_source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+              (seller_player_id,seller_name,planet_id,galaxy_id,origin,source_ref,item_code,item_name,item_type,category,qty,remaining_qty,unit_price,legal,base_value,mass,description,rarity,status,created_at,expires_at,tier,max_tier,tier_source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                pid, player["callsign"], player["location_planet_id"], listing["origin"], listing["source_ref"], listing["item_code"], listing["item_name"],
+                pid, player["callsign"], int(market_scope["planet_id"]), int(market_scope["galaxy_id"]), listing["origin"], listing["source_ref"], listing["item_code"], listing["item_name"],
                 listing["item_type"], listing["category"], qty, qty, unit_price, int(listing["legal"]), int(listing["base_value"]), float(listing["mass"]),
                 listing["description"], listing["rarity"], "active", now, iso(utcnow()+timedelta(days=7)), clamp_tier(listing.get("tier", 1)), clamp_tier(listing.get("max_tier", 3)), listing.get("tier_source") or "listed"
             ),
         )
         log_market_transaction(conn, pid, player["location_planet_id"], None, listing["item_code"], listing["item_name"], "player_market_list", qty, unit_price, gross, listing_fee, -listing_fee, int(listing["legal"]), "player_market")
-        add_event(conn, pid, "player_market", f"Listed {qty}x {listing['item_name']} for {unit_price:,} credits each. Fee {listing_fee:,}.")
+        add_event(conn, pid, "player_market", f"Listed {qty}x {listing['item_name']} in {market_scope['galaxy_name']} for {unit_price:,} credits each. Fee {listing_fee:,}.", {"scope": market_scope, "item": listing["item_code"], "qty": qty})
         return {"message": f"Listed {qty}x {listing['item_name']} on the player market.", "listing_fee": listing_fee}
 
     if t == "cancel_player_listing":
@@ -14653,6 +17806,8 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             raise HTTPException(404, "Active listing not found")
         if listing.get("seller_player_id") != pid and not god:
             raise HTTPException(403, "You can only cancel your own listings")
+        if not can_trade_player_market_listing(conn, pid, listing) and not god:
+            raise HTTPException(400, "You can only cancel player-market listings from your current galaxy")
         qty = int(listing.get("remaining_qty") or 0)
         if qty > 0 and listing.get("seller_player_id"):
             add_listing_item_to_player(conn, int(listing["seller_player_id"]), listing, qty, "player_market_cancel")
@@ -14669,6 +17824,8 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             raise HTTPException(404, "Active listing not found")
         if listing.get("seller_player_id") == pid and not god:
             raise HTTPException(400, "You cannot buy your own listing")
+        if not can_trade_player_market_listing(conn, pid, listing) and not god:
+            raise HTTPException(400, "You can view remote galaxy listings, but you can only buy from your current galaxy")
         qty = min(requested_qty, int(listing["remaining_qty"]))
         mass = int(math.ceil(float(listing.get("mass") or 1) * qty))
         usage = build_cargo_usage(conn, pid)
@@ -14693,6 +17850,16 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         add_event(conn, pid, "player_market", f"Bought {qty}x {listing['item_name']} from {listing['seller_name']} for {gross:,} credits.")
         return {"message": f"Bought {qty}x {listing['item_name']} from player market.", "gross": gross, "qty": qty}
 
+    if t == "store_item":
+        result = store_item_at_current_planet(conn, player, payload, god)
+        return result
+
+    if t == "withdraw_storage_item":
+        storage_id = int(payload.get("storage_id") or payload.get("storageId") or 0)
+        qty = max(1, int(payload.get("qty") or 1))
+        return withdraw_item_from_current_planet(conn, player, storage_id, qty, god)
+
+
     if t == "run_smuggling_route":
         illegal = row(conn, "SELECT c.*, mp.buy_price, mp.sell_price FROM commodities c JOIN market_prices mp ON mp.commodity_id=c.id WHERE c.legal=0 AND mp.planet_id=? ORDER BY (mp.sell_price-mp.buy_price) DESC LIMIT 1", (player["location_planet_id"],))
         if not illegal: raise HTTPException(400,"No contraband route here")
@@ -14716,6 +17883,83 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         add_xp(conn, pid, 850)
         add_event(conn, pid, "smuggling", f"Smuggling success: {illegal['name']} moved for {profit:,} credits.")
         return {"message":"Smuggling success against NPC customs.", "profit":profit}
+
+    if t == "start_planet_mission":
+        mission_key = str(payload.get("mission_key") or "").strip()
+        planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
+        result = start_planet_mission_run(conn, player, planet, mission_key, god)
+        return result
+
+    if t == "start_planet_mission_travel":
+        mission_key = str(payload.get("mission_key") or "").strip()
+        dest = int(payload.get("planet_id") or payload.get("planetId") or 0)
+        target = row(conn, "SELECT * FROM planets WHERE id=?", (dest,))
+        if not target:
+            raise HTTPException(404, "Planet not found")
+        if not is_uninhabitable_planet_type(str(target.get("type") or "")):
+            raise HTTPException(400, "Remote mission landing is only for uninhabitable planets.")
+        if active_planet_mission(conn, pid):
+            raise HTTPException(409, "A planet mission is already active")
+        cooldown = player_planet_mission_cooldown_info(conn, pid)
+        if cooldown.get("active") and not god:
+            raise HTTPException(409, f"Planet mission cooldown active for {cooldown.get('minutesRemaining')} more minutes")
+        current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
+        if int(target.get("galaxy_id") or 0) != int(current.get("galaxy_id") or 0):
+            raise HTTPException(400, "Planet missions require traveling inside the current galaxy first.")
+        # Validate the mission exists before starting travel.
+        contract = next((c for c in mission_contracts_for_planet(conn, player, target) if c["key"] == mission_key), None)
+        if not contract:
+            raise HTTPException(404, "Mission contract not available on that planet.")
+        ship = row(conn, "SELECT * FROM ships WHERE id=?", (player["active_ship_id"],))
+        if not ship or ship["destroyed"]:
+            raise HTTPException(400, "No usable active ship")
+        open_space_before_travel = get_player_open_space(conn, pid)
+        origin_point = current_player_map_position(conn, player, "system")
+        target_point = system_planet_map_point(conn, int(target["id"]))
+        active_map = build_system_map(conn, player)
+        target_node = next((n for n in active_map.get("nodes", []) if str(n.get("id")) == str(dest)), None)
+        if target_node:
+            target_point = {"x_pct": float(target_node.get("x_pct") or target_point.get("x_pct") or 50), "y_pct": float(target_node.get("y_pct") or target_point.get("y_pct") or 50)}
+        map_distance = pct_distance(origin_point, target_point)
+        seconds = map_route_seconds_for_distance(conn, ship, map_distance, god)
+        route_danger = int((planet_control_effects(current).get("travel_danger", 20) + planet_control_effects(target).get("travel_danger", 20)) / 2)
+        fuel_cost = 0 if god else max(1, int(map_distance / 14))
+        spend(conn, pid, fuel=fuel_cost, god=god)
+        now = utcnow()
+        arrival = now + timedelta(seconds=seconds)
+        clear_player_open_space(conn, pid)
+        conn.execute("UPDATE players SET player_base_docked_id=NULL WHERE id=?", (pid,))
+        clear_player_waypoint(conn, pid)
+        clear_player_intercept(conn, pid)
+        clear_player_route(conn, pid)
+        set_player_route(conn, pid, {
+            "map_type": "system",
+            "origin_x_pct": float(origin_point.get("x_pct") or 50),
+            "origin_y_pct": float(origin_point.get("y_pct") or 50),
+            "destination_x_pct": float(target_point.get("x_pct") or 50),
+            "destination_y_pct": float(target_point.get("y_pct") or 50),
+            "label": f"Mission landing approach to {target['name']}",
+            "route_target_type": "planet_mission",
+            "route_target_id": int(target["id"]),
+            "started_at": iso(now),
+            "arrival_at": iso(arrival),
+        })
+        set_planet_mission_travel_intent(conn, pid, {"planet_id": int(target["id"]), "mission_key": mission_key, "god": bool(god), "created_at": iso(now)})
+        conn.execute("""UPDATE players SET travel_until=?, travel_destination_id=?, travel_mode='planet_mission', travel_started_at=?, travel_origin_planet_id=?, travel_origin_galaxy_id=?, travel_destination_galaxy_id=? WHERE id=?""", (iso(arrival), dest, iso(now), current["id"], current["galaxy_id"], current["galaxy_id"], pid))
+        grant_action_progression(conn, pid, "travel", max(1.0, seconds / 60 / 6), True)
+        add_event(conn, pid, "planet_mission", f"Mission landing started to {target['name']} for {contract['name']}. ETA {seconds} seconds.", {"planetId": target["id"], "missionKey": mission_key})
+        return {"message": f"Mission landing started to {target['name']} for {contract['name']}.", "seconds": seconds, "minutes": max(1, int(math.ceil(seconds / 60))), "fuel_cost": fuel_cost, "route_danger": route_danger, "openPage": "Map"}
+
+    if t == "cancel_planet_mission":
+        mission = active_planet_mission(conn, pid)
+        if not mission:
+            return {"message": "No active planet mission."}
+        accrued_minutes = mission_cooldown_minutes_from_events(mission.get("eventLog") or [], float(mission.get("progress") or 0))
+        cooldown_minutes = max(int(WORLD_MISSION_BALANCE.get("mission_cancel_cooldown_min_minutes", 10) or 10), accrued_minutes)
+        cooldown = set_player_planet_mission_cooldown(conn, pid, cooldown_minutes, f"Mission aborted: recovery time {cooldown_minutes} minutes.")
+        conn.execute("UPDATE planet_mission_runs SET status='cancelled', completed_at=?, message=? WHERE id=?", (iso(), f"Cancelled. Returned to ship with no rewards or XP. Cooldown {cooldown_minutes} minutes.", mission["id"]))
+        add_event(conn, pid, "planet_mission", f"Cancelled {mission.get('mission_name')} and returned to ship with no rewards.", {"missionId": mission["id"], "cooldownMinutes": cooldown_minutes})
+        return {"message": f"Mission cancelled. You returned to your ship and left rewards behind. Cooldown {cooldown_minutes} min.", "openPage": "Map", "cooldown": cooldown}
 
     if t == "pve_operation":
         op = row(conn, "SELECT * FROM pve_operations WHERE code=?", (payload.get("code"),))
@@ -15076,13 +18320,14 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         existing = row(conn, "SELECT s.id FROM ships s WHERE s.player_id=? AND s.template_id=?", (pid, template["id"]))
         if existing and not god:
             raise HTTPException(400, "You already own this ship class")
-        spend(conn,pid,credits=template["price"],god=god)
+        ship_price = balanced_ship_purchase_price(template)
+        spend(conn,pid,credits=ship_price,god=god)
         conn.execute("""INSERT INTO ships (player_id,template_id,name,hull,max_hull,shield,max_shield,armor,cargo_capacity,fuel_capacity,drive_speed,size_class,mass,insured,insurance_tier,destroyed,starter)
                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (pid,template["id"],template["name"],template["hull"],template["hull"],template["shield"],template["shield"],template["armor"],template["cargo_capacity"],template["fuel_capacity"],template["drive_speed"],template.get("size_class","M"),template.get("mass",340),0,"none",0,template["starter"]))
         new_ship_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         conn.execute("UPDATE ships SET current_tier=?, max_tier=?, tier_source='purchased' WHERE id=?", (clamp_tier(template.get("ship_tier", 1)), max(clamp_tier(template.get("ship_tier", 1)), clamp_tier(template.get("ship_tier", 1))+2), new_ship_id))
         create_ship_parts(conn, new_ship_id)
-        add_event(conn, pid, "hangar", f"Purchased ship: {template['name']}.")
+        add_event(conn, pid, "hangar", f"Purchased ship: {template['name']} for {ship_price:,} credits.", {"price": ship_price})
         return {"message":f"Purchased ship: {template['name']}"}
 
     if t == "set_active_ship":
@@ -15142,9 +18387,10 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         usage = build_cargo_usage(conn, pid)
         if int(usage.get("free") or 0) < 3 and not god:
             raise HTTPException(400, "Not enough cargo capacity to store another module")
-        spend(conn,pid,credits=mt["price"],god=god)
+        module_price = balanced_module_purchase_price(mt)
+        spend(conn,pid,credits=module_price,god=god)
         conn.execute("INSERT INTO ship_modules (player_id,ship_id,module_template_id,slot_type,equipped,durability,current_tier,max_tier,tier_source) VALUES (?,?,?,?,?,?,?,?,?)", (pid,None,mt["id"],mt["slot_type"],0,100,clamp_tier(mt.get("tier",1)),clamp_tier(mt.get("max_tier",5)),"purchased"))
-        add_event(conn, pid, "hangar", f"Purchased module: {mt['name']}.")
+        add_event(conn, pid, "hangar", f"Purchased module: {mt['name']} for {module_price:,} credits.", {"price": module_price})
         return {"message":f"Purchased module: {mt['name']}"}
 
     if t == "unequip_module":
@@ -15314,6 +18560,107 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         conn.execute("INSERT INTO player_skills (player_id,skill_key,level) VALUES (?,?,1) ON CONFLICT(player_id,skill_key) DO UPDATE SET level=level+1", (pid,key))
         return {"message":f"Unlocked {node['name']} level {lvl+1}."}
 
+    if t == "place_player_base":
+        if row(conn, "SELECT id FROM player_bases WHERE player_id=? AND status='active'", (pid,)):
+            raise HTTPException(400, "You can only build one base.")
+        map_type = str(payload.get("map_type") or "system").lower()
+        if map_type != "system":
+            raise HTTPException(400, "Bases must be placed on the local system map, not the galaxy map.")
+        x_pct = clamp_pct(float(payload.get("x_pct") or 50), 3, 97)
+        y_pct = clamp_pct(float(payload.get("y_pct") or 50), 3, 97)
+        current = row(conn, "SELECT p.*, g.id as galaxy_id, g.name as galaxy_name FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player["location_planet_id"],))
+        if not current:
+            raise HTTPException(400, "Current galaxy unknown")
+        ok, nearest, distance = map_point_is_clear(conn, int(current["galaxy_id"]), x_pct, y_pct, min_spaces=BASE_BUILD_CLEARANCE_SPACES)
+        if not ok and not god:
+            raise HTTPException(409, f"Base placement too close to {nearest}. Need {BASE_BUILD_CLEARANCE_SPACES:g} icon-spaces of clearance; current distance {distance}%.")
+        placement_cost = balanced_base_placement_cost()
+        spend(conn, pid, credits=placement_cost, god=god)
+        if not god:
+            log_money_sink(conn, pid, "base_placement", placement_cost, "Player base foundation and anchoring sink")
+        name = str(payload.get("name") or f"{player.get('callsign') or 'Player'} Base")[:44]
+        conn.execute("INSERT INTO player_bases (player_id,galaxy_id,anchor_planet_id,name,x_pct,y_pct,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)", (pid, int(current["galaxy_id"]), int(current["id"]), name, x_pct, y_pct, "active", iso(), iso()))
+        base_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+        add_event(conn, pid, "base", f"Established private base {name} in {current['galaxy_name']}.", {"baseId": base_id, "x_pct": x_pct, "y_pct": y_pct})
+        return {"message": f"Base established: {name}. Research first, then build modules.", "baseId": base_id}
+
+    if t == "dock_player_base":
+        base_id = int(payload.get("base_id") or payload.get("baseId") or 0)
+        base = row(conn, "SELECT * FROM player_bases WHERE id=? AND player_id=? AND status='active'", (base_id, pid))
+        if not base:
+            raise HTTPException(404, "Base not found. You can only dock with your own base.")
+        range_status = action_range_status(conn, player, base, "system")
+        if not god and not range_status.get("inRange"):
+            raise HTTPException(409, f"Base docking requires close range. Distance {range_status['distancePct']}%, allowed {range_status['actionRangePct']}%. Use Go Here near the base first.")
+        clear_player_open_space(conn, pid); clear_player_waypoint(conn, pid); clear_player_intercept(conn, pid); clear_player_route(conn, pid)
+        conn.execute("UPDATE players SET player_base_docked_id=? WHERE id=?", (base_id, pid))
+        add_event(conn, pid, "base", f"Docked at private base {base['name']}.", {"baseId": base_id})
+        return {"message": f"Docked at {base['name']}. Your ship is inside the private base and hidden from the map."}
+
+    if t == "start_base_research":
+        code = str(payload.get("research_code") or payload.get("code") or "").strip()
+        cfg_raw = BASE_RESEARCH_BY_CODE.get(code)
+        cfg = balanced_base_research_cfg(cfg_raw) if cfg_raw else None
+        if not cfg:
+            raise HTTPException(404, "Research project not found")
+        if row(conn, "SELECT id FROM player_base_research WHERE player_id=? AND status='researching'", (pid,)):
+            raise HTTPException(409, "Only one base research project can run at a time.")
+        if row(conn, "SELECT id FROM player_base_research WHERE player_id=? AND research_code=?", (pid, code)):
+            raise HTTPException(400, "Research already started or completed")
+        spend(conn, pid, credits=int(cfg["cost"]), god=god)
+        if not god:
+            log_money_sink(conn, pid, "base_research", int(cfg["cost"]), f"Research project: {cfg['name']}")
+        start = utcnow(); complete = start + timedelta(hours=int(cfg["hours"]))
+        conn.execute("INSERT INTO player_base_research (player_id,research_code,status,cost,started_at,complete_at) VALUES (?,?,?,?,?,?)", (pid, code, "researching", int(cfg["cost"]), iso(start), iso(complete)))
+        add_event(conn, pid, "base_research", f"Started research: {cfg['name']}.", {"researchCode": code, "hours": cfg["hours"], "cost": cfg["cost"]})
+        return {"message": f"Research started: {cfg['name']} ({int(cfg['hours'])}h)."}
+
+    if t == "start_base_building":
+        code = str(payload.get("building_code") or payload.get("code") or "").strip()
+        cfg_raw = BASE_BUILDING_BY_CODE.get(code)
+        cfg = balanced_base_building_cfg(cfg_raw) if cfg_raw else None
+        if not cfg:
+            raise HTTPException(404, "Building not found")
+        base = row(conn, "SELECT * FROM player_bases WHERE player_id=? AND status='active'", (pid,))
+        if not base:
+            raise HTTPException(400, "Build a base before constructing modules.")
+        if row(conn, "SELECT id FROM player_base_buildings WHERE player_id=? AND status='building'", (pid,)):
+            raise HTTPException(409, "Only one base construction project can run at a time.")
+        if row(conn, "SELECT id FROM player_base_buildings WHERE player_id=? AND building_code=?", (pid, code)):
+            raise HTTPException(400, "Building already started or completed")
+        if not row(conn, "SELECT id FROM player_base_research WHERE player_id=? AND research_code=? AND status='complete'", (pid, cfg["requires_research"])):
+            raise HTTPException(400, "Required research is not complete.")
+        spend(conn, pid, credits=int(cfg["cost"]), god=god)
+        if not god:
+            log_money_sink(conn, pid, "base_building", int(cfg["cost"]), f"Base construction: {cfg['name']}")
+        start = utcnow(); complete = start + timedelta(hours=int(cfg["hours"]))
+        conn.execute("INSERT INTO player_base_buildings (player_id,base_id,building_code,status,level,cost,started_at,complete_at,last_collected_at) VALUES (?,?,?,?,?,?,?,?,?)", (pid, int(base["id"]), code, "building", int(cfg["tier"]), int(cfg["cost"]), iso(start), iso(complete), iso(start)))
+        add_event(conn, pid, "base_building", f"Started base construction: {cfg['name']}.", {"buildingCode": code, "hours": cfg["hours"], "cost": cfg["cost"]})
+        return {"message": f"Construction started: {cfg['name']} ({int(cfg['hours'])}h)."}
+
+    if t == "collect_base_output":
+        resolve_completed_base_jobs(conn, pid)
+        total_items = 0
+        details = []
+        now = utcnow()
+        for rec in rows(conn, "SELECT * FROM player_base_buildings WHERE player_id=? AND status='complete'", (pid,)):
+            cfg = BASE_BUILDING_BY_CODE.get(rec.get("building_code"), {})
+            if not cfg:
+                continue
+            last = parse_dt(rec.get("last_collected_at")) or now
+            hours = min(168, max(0, int((now - last).total_seconds() // 3600)))
+            qty = int((hours / 24.0) * int(cfg.get("passive_qty_per_day") or 1))
+            if qty <= 0:
+                continue
+            code = str(cfg.get("passive_item_code") or "base_parts")
+            name = label_for_api(code)
+            add_inventory_item(conn, pid, code, name, "base_output", qty, 1, 250 * int(cfg.get("tier") or 1), 0.25, f"Passive output from {cfg.get('name')}", "base", category="base_outputs", rarity="uncommon" if int(cfg.get("tier") or 1) >= 2 else "common", sellable=1, craftable_material=1, tier=int(cfg.get("tier") or 1), max_tier=int(cfg.get("tier") or 1))
+            conn.execute("UPDATE player_base_buildings SET last_collected_at=? WHERE id=?", (iso(now), rec["id"]))
+            total_items += qty
+            details.append({"code": code, "name": name, "qty": qty})
+        add_event(conn, pid, "base", f"Collected {total_items} passive base materials.", {"items": details})
+        return {"message": f"Collected {total_items} passive base materials.", "items": details}
+
     if t == "buy_property":
         pt = row(conn,"SELECT * FROM property_templates WHERE code=?", (payload.get("code"),))
         if not pt: raise HTTPException(404,"Property not found")
@@ -15460,9 +18807,15 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if not user["god_mode"] or not DEV_MODE: raise HTTPException(403,"Admin only")
         # Adds fresh bounties and NPC agents at every planet for testing.
         planet_ids = [r["id"] for r in rows(conn,"SELECT id FROM planets")]
+        created = []
         for i in range(20):
             planet_id = random.choice(planet_ids)
-            conn.execute("INSERT INTO bounties (name,target_type,planet_id,threat,reward,status) VALUES (?,?,?,?,?,?)", (f"NPC Raider {uuid.uuid4().hex[:5]}","npc",planet_id,random.randint(10,95),random.randint(25000,250000),"open"))
+            name = f"NPC Raider {uuid.uuid4().hex[:5]}"
+            threat = random.randint(10,95)
+            reward = random.randint(25000,250000)
+            conn.execute("INSERT INTO bounties (name,target_type,planet_id,threat,reward,status) VALUES (?,?,?,?,?,?)", (name,"npc",planet_id,threat,reward,"open"))
+            created.append({"name": name, "planetId": planet_id, "threat": threat, "reward": reward})
+        add_event(conn, player["id"], "admin", f"Admin spawned {len(created)} NPC bounty records.", {"created": created[:20]})
         simulated = simulate_npc_activity(conn, force=True)
         return {"message":f"Spawned NPC bounties and ran {simulated} simulated human-like NPC actions."}
 

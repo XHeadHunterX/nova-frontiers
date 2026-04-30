@@ -620,6 +620,11 @@ function Dashboard({state,act,setPage,clock}) {
       <button onClick={()=>setPage('Market')}>View Market</button>
     </Panel>
 
+    <Panel title="Local Planet Contracts" help="Planet-side/station-side missions. Each mission levels separately for each planet; higher local mission level takes slightly longer but pays much better.">
+      <PlanetMissionContracts state={state} act={act} compact />
+      <button onClick={()=>setPage('Map')}>Open Mission Map Screen</button>
+    </Panel>
+
     <Panel title="PvE Operations" help="Dashboard operations are limited to basic credit/XP work plus current-career jobs. Bosses, raids, wars, and galaxy-scale content stay off this quick panel.">
       <h3 className="panelSubhead">Basic Work</h3>
       <div className="opList detailed">{basicOps.map(o=><OperationRow key={o.code} item={o} actionLabel="Run" onRun={()=>act('pve_operation',{code:o.code})} />)}</div>
@@ -828,6 +833,7 @@ function SystemMap({state,act,clock,mapMode,onMapModeChange}) {
     <TravelStatus state={state} clock={clock} />
     <CargoOperationPanel state={state} />
     <MapOperationPanel state={state} clock={clock} />
+    <MissionScreen state={state} act={act} clock={clock} />
     <Panel title={`${state.location?.galaxy_name || 'Current Galaxy'} Local Map`} help="Planet/station nodes expose security, stability, faction control, market strength, operation count, and route danger.">
       <MapView type="system" map={map} travel={travel}
         onTravel={(node)=>node.kind === 'gate' ? act('galaxy_travel',{galaxy_id:node.target_galaxy_id}) : act('travel',{planet_id:node.id,dock:true})}
@@ -841,6 +847,9 @@ function SystemMap({state,act,clock,mapMode,onMapModeChange}) {
         onScanSite={(site)=>act('scan_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onInvestigate={(site)=>act('investigate_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onEnterPirateStation={(station)=>act('enter_pirate_station',{station_id:station.stationId || station.id})}
+        onPlaceBase={(pos)=>act('place_player_base',{...pos,map_type:'system',name:prompt('Base name','Private Base') || 'Private Base'})}
+        onDockBase={(base)=>act('dock_player_base',{base_id:base.baseId || base.id})}
+        onMissionTravel={(node,mission)=>act('start_planet_mission_travel',{planet_id:node.id,mission_key:mission.key})}
         currentId={map.current_planet_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} publicProfiles={state.public_profiles || []} />
       <div className="routeLegend"><span className="solid">Visited local route</span><span className="dash">Available local route</span><span className="activeLine">Active local travel</span></div>
     </Panel>
@@ -856,6 +865,14 @@ function Market({state,act}) {
   const [tab,setTab] = useState('legal');
   const [category,setCategory] = useState('all');
   const [query,setQuery] = useState('');
+  const [listingQuery,setListingQuery] = useState('');
+  const [listingGalaxy,setListingGalaxy] = useState('all');
+  const [listingCategory,setListingCategory] = useState('all');
+  const [storageQuery,setStorageQuery] = useState('');
+  const [storageGalaxy,setStorageGalaxy] = useState('all');
+  const [storagePlanet,setStoragePlanet] = useState('all');
+  const [depositQuery,setDepositQuery] = useState('');
+  const [depositCategory,setDepositCategory] = useState('all');
   const legalGoods = state.market.filter(m=>m.legal);
   const illicitGoods = state.market.filter(m=>!m.legal);
   const inventory = state.inventory_summary || [];
@@ -874,17 +891,57 @@ function Market({state,act}) {
     const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice };
     act('create_player_listing', payload);
   };
+  const storeItem = (item, defaultQty=1) => {
+    const maxQty = Math.max(1, item.available_qty || item.qty || 1);
+    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to store at current planet for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty };
+    act('store_item', payload);
+  };
   const buyListing = (listing, qty=1) => {
+    if (!listing.can_trade_here) return;
     const safeQty = Math.max(1, Math.min(qty, listing.remaining_qty || 1));
     act('buy_player_listing', {listing_id:listing.id, qty:safeQty});
   };
-  const playerMarket = state.player_market || {active:[], history:[], balance:{}};
-  return <Page title="Commodities Market" sub="Legal trade is safe. Illicit trade uses real heat, jail, bribe, breakout, cooldown, demand, stock, and restock state.">
+  const withdrawStorage = (item, defaultQty=1) => {
+    if (!item.can_modify) return;
+    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(prompt(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)))) || 1));
+    act('withdraw_storage_item', {storage_id:item.id, qty});
+  };
+
+  const playerMarket = state.player_market || {active:[], history:[], balance:{}, scope:{}, galaxies:[], rules:{}};
+  const storage = state.player_storage || {stored:[], depositCandidates:[], galaxies:[], scope:{}, rules:{}};
+  const currentGalaxyId = Number(playerMarket.scope?.galaxy_id || storage.scope?.galaxy_id || 0);
+  const marketGalaxies = playerMarket.galaxies || [];
+  const listingCategories = useMemo(() => ['all', ...Array.from(new Set((playerMarket.active || []).map(x=>x.category).filter(Boolean))).sort()], [playerMarket.active]);
+  const storageGalaxies = useMemo(() => ['all', ...Array.from(new Map((storage.stored || []).map(x=>[String(x.galaxy_id), x.galaxy_name || `Galaxy ${x.galaxy_id}`])).entries())], [storage.stored]);
+  const storagePlanets = useMemo(() => ['all', ...Array.from(new Map((storage.stored || []).map(x=>[String(x.planet_id), x.planet_name || `Planet ${x.planet_id}`])).entries())], [storage.stored]);
+  const filteredListings = useMemo(() => {
+    const q = listingQuery.trim().toLowerCase();
+    return (playerMarket.active || []).filter(l => {
+      if (listingGalaxy !== 'all' && String(l.galaxy_id) !== String(listingGalaxy)) return false;
+      if (listingCategory !== 'all' && l.category !== listingCategory) return false;
+      if (!q) return true;
+      return `${l.item_name || ''} ${l.item_code || ''} ${l.seller_name || ''} ${l.planet_name || ''} ${l.galaxy_name || ''} ${l.category || ''}`.toLowerCase().includes(q);
+    });
+  }, [playerMarket.active, listingQuery, listingGalaxy, listingCategory]);
+  const filteredStorage = useMemo(() => {
+    const q = storageQuery.trim().toLowerCase();
+    return (storage.stored || []).filter(s => {
+      if (storageGalaxy !== 'all' && String(s.galaxy_id) !== String(storageGalaxy)) return false;
+      if (storagePlanet !== 'all' && String(s.planet_id) !== String(storagePlanet)) return false;
+      if (!q) return true;
+      return `${s.item_name || ''} ${s.item_code || ''} ${s.planet_name || ''} ${s.galaxy_name || ''} ${s.category || ''}`.toLowerCase().includes(q);
+    });
+  }, [storage.stored, storageQuery, storageGalaxy, storagePlanet]);
+  const depositCandidates = (storage.depositCandidates || []).filter(i => i.sellable !== false && (depositCategory === 'all' || i.category === depositCategory) && `${i.name} ${i.item_code} ${i.category_label}`.toLowerCase().includes(depositQuery.toLowerCase()));
+
+  return <Page title="Commodities Market" sub="Station trade is local. Player-to-player market listings are galaxy-scoped. Storage is planet-specific and visible across galaxies.">
     <div className="tabBar">
       <button className={tab==='legal'?'active':''} onClick={()=>setTab('legal')}>Legal Goods</button>
       <button className={tab==='illicit'?'active':''} onClick={()=>setTab('illicit')}>Illicit Goods</button>
       <button className={tab==='sell'?'active':''} onClick={()=>setTab('sell')}>Sell Inventory</button>
-      <button className={tab==='player'?'active':''} onClick={()=>setTab('player')}>Player Market</button>
+      <button className={tab==='player'?'active':''} onClick={()=>setTab('player')}>Galaxy Player Market</button>
+      <button className={tab==='storage'?'active':''} onClick={()=>setTab('storage')}>Planet Storage</button>
       <button className={tab==='activity'?'active':''} onClick={()=>setTab('activity')}>Market Activity</button>
     </div>
 
@@ -910,7 +967,7 @@ function Market({state,act}) {
           <div className="chipRow">{categories.map(([key,name])=><button key={key} className={category===key?'active':''} onClick={()=>setCategory(key)}>{name}</button>)}</div>
         </div>
       </Panel>
-      <Panel title="Sell Inventory" help="Selling legal items restocks the local market with no risk. Selling illicit inventory rolls heat/jail risk and can seize cargo.">
+      <Panel title="Sell Inventory" help="Selling legal items restocks the local market with no risk. Listing on the player market creates a current-galaxy listing.">
         <table><thead><tr><th>Item</th><th>Category</th><th>Status</th><th>Qty</th><th>Mass</th><th>Value</th><th>Risk</th><th></th></tr></thead><tbody>
           {sellable.map(i=><tr key={`${i.source}-${i.id}-${i.item_code}`}>
             <td><div className="itemNameCell"><ItemVisual item={i} /><div><b>{i.name}</b><br/><small>{i.description || i.item_code}</small></div></div></td>
@@ -920,31 +977,97 @@ function Market({state,act}) {
             <td>{fmt(i.cargo_mass)}</td>
             <td>{fmt(i.market_sell_estimate?.unit || i.base_value)}</td>
             <td>{i.legal ? <span className="safeTrade">No risk</span> : <span className="heatText">{label(i.illegal_risk?.level || 'risk')} • {fmt(i.illegal_risk?.score || 0)}%</span>}</td>
-            <td><button disabled={state.heat_jail?.jailed} onClick={()=>sellItem(i,1)}>Sell 1</button><button disabled={state.heat_jail?.jailed} onClick={()=>sellItem(i,Math.min(5,i.available_qty || i.qty))}>Sell 5</button><button onClick={()=>listItem(i,1)}>List 1</button><button onClick={()=>listItem(i,Math.min(5,i.available_qty || i.qty))}>List Qty</button></td>
+            <td><button disabled={state.heat_jail?.jailed} onClick={()=>sellItem(i,1)}>Sell 1</button><button disabled={state.heat_jail?.jailed} onClick={()=>sellItem(i,Math.min(5,i.available_qty || i.qty))}>Sell 5</button><button onClick={()=>listItem(i,1)}>List 1</button><button onClick={()=>listItem(i,Math.min(5,i.available_qty || i.qty))}>List Qty</button><button onClick={()=>storeItem(i,1)}>Store</button></td>
           </tr>)}
         </tbody></table>
       </Panel>
     </>}
 
     {tab === 'player' && <>
-      <Panel title="Player Market Rules" help="Listings remove items into exchange custody. Cancelling returns remaining inventory. Successful sales pay the seller after exchange fees.">
-        <Stats pairs={{ActiveListings:playerMarket.active.length, ListingFee:`${Math.round((playerMarket.balance?.listing_fee_rate || 0)*1000)/10}%`, SaleFee:`${Math.round((playerMarket.balance?.sale_fee_rate || 0)*1000)/10}%`, MaxPriceMult:`${playerMarket.balance?.max_unit_price_mult || 12}x`}} />
+      <Panel title="Galaxy Player Market Rules" help="You can browse all galaxy markets, but buying, creating, and cancelling listings only works in your current galaxy.">
+        <Stats pairs={{CurrentGalaxy:playerMarket.scope?.galaxy_name || 'Unknown', CurrentPlanet:playerMarket.scope?.planet_name || state.location?.name, ActiveListings:playerMarket.active.length, LocalListings:(playerMarket.active || []).filter(x=>x.can_trade_here).length, RemoteListings:(playerMarket.active || []).filter(x=>!x.can_trade_here).length, ListingFee:`${Math.round((playerMarket.balance?.listing_fee_rate || 0)*1000)/10}%`, SaleFee:`${Math.round((playerMarket.balance?.sale_fee_rate || 0)*1000)/10}%`}} />
+        <div className="marketScopeNotice">Remote galaxy listings are read-only until you travel to that galaxy.</div>
+      </Panel>
+      <Panel title="Search Player Listings">
+        <div className="inventoryToolbar galaxyMarketFilters">
+          <input value={listingQuery} onChange={e=>setListingQuery(e.target.value)} placeholder="Search item, seller, planet, galaxy..." />
+          <select value={listingGalaxy} onChange={e=>setListingGalaxy(e.target.value)}>
+            <option value="all">All galaxies</option>
+            {marketGalaxies.map(g=><option key={g.id} value={g.id}>{g.name}{Number(g.id)===currentGalaxyId ? ' (current)' : ''}</option>)}
+          </select>
+          <select value={listingCategory} onChange={e=>setListingCategory(e.target.value)}>
+            {listingCategories.map(c=><option key={c} value={c}>{label(c)}</option>)}
+          </select>
+        </div>
       </Panel>
       <Panel title="Active Player Listings">
-        <table><thead><tr><th>Item</th><th>Seller</th><th>Status</th><th>Qty</th><th>Unit</th><th>Total</th><th></th></tr></thead><tbody>
-          {(playerMarket.active || []).map(l=><tr key={l.id}>
+        <table><thead><tr><th>Item</th><th>Seller</th><th>Galaxy / Planet</th><th>Status</th><th>Qty</th><th>Unit</th><th>Total</th><th></th></tr></thead><tbody>
+          {filteredListings.map(l=><tr key={l.id} className={!l.can_trade_here ? 'rowMuted remoteMarketRow' : ''}>
             <td><div className="itemNameCell"><ItemVisual item={l} /><div><b>{l.item_name}</b><br/><small>{l.description || l.item_code}</small></div></div></td>
-            <td>{l.seller_name}<br/><small>{l.planet_name || 'Unknown origin'}</small></td>
+            <td>{l.seller_name}<br/><small>{l.own_listing ? 'Your listing' : 'Player listing'}</small></td>
+            <td><b>{l.galaxy_name || 'Unknown Galaxy'}</b><br/><small>{l.planet_name || 'Unknown origin'} {l.can_trade_here ? '• Current galaxy' : '• Remote view only'}</small></td>
             <td className={l.legal?'ok':'bad'}>{l.legal?'Legal':'Illegal'} • {label(l.category)} • {label(l.rarity || 'common')} <TierBadge item={l}/></td>
             <td>{fmt(l.remaining_qty)} / {fmt(l.qty)}</td>
             <td>{fmt(l.unit_price)}</td>
             <td>{fmt((l.remaining_qty || 0) * (l.unit_price || 0))}</td>
-            <td>{l.own_listing ? <button onClick={()=>act('cancel_player_listing',{listing_id:l.id})}>Cancel</button> : <><button onClick={()=>buyListing(l,1)}>Buy 1</button><button onClick={()=>buyListing(l,Math.min(5,l.remaining_qty || 1))}>Buy 5</button><button onClick={()=>buyListing(l,l.remaining_qty || 1)}>Buy All</button></>}</td>
+            <td>{l.own_listing ? <button disabled={!l.can_trade_here} title={!l.can_trade_here ? 'Travel to this listing galaxy to cancel it.' : ''} onClick={()=>act('cancel_player_listing',{listing_id:l.id})}>Cancel</button> : <><button disabled={!l.can_trade_here} title={!l.can_trade_here ? 'Remote galaxy listing. Travel there to buy.' : ''} onClick={()=>buyListing(l,1)}>Buy 1</button><button disabled={!l.can_trade_here} onClick={()=>buyListing(l,Math.min(5,l.remaining_qty || 1))}>Buy 5</button><button disabled={!l.can_trade_here} onClick={()=>buyListing(l,l.remaining_qty || 1)}>Buy All</button></>}</td>
           </tr>)}
+          {!filteredListings.length && <tr><td colSpan="8">No player listings match the current filters.</td></tr>}
         </tbody></table>
       </Panel>
       <Panel title="My Listing History">
-        <div className="feedList compactFeed">{(playerMarket.history || []).slice(0,30).map(l=><div key={l.id}><b>{label(l.status)}: {l.item_name}</b><span>{fmt(l.remaining_qty)} / {fmt(l.qty)} left • {fmt(l.unit_price)} each • {l.seller_name}</span><small>{l.planet_name || 'Unknown'} • {new Date(l.created_at).toLocaleString()}</small></div>)}</div>
+        <div className="feedList compactFeed">{(playerMarket.history || []).slice(0,30).map(l=><div key={l.id}><b>{label(l.status)}: {l.item_name}</b><span>{fmt(l.remaining_qty)} / {fmt(l.qty)} left • {fmt(l.unit_price)} each • {l.seller_name}</span><small>{l.galaxy_name || 'Unknown Galaxy'} • {l.planet_name || 'Unknown'} • {new Date(l.created_at).toLocaleString()}</small></div>)}</div>
+      </Panel>
+    </>}
+
+    {tab === 'storage' && <>
+      <Panel title="Planet Storage Rules" help="Storage is visible across all galaxies. You can only deposit into and withdraw from storage on your current planet.">
+        <Stats pairs={{CurrentGalaxy:storage.scope?.galaxy_name || 'Unknown', CurrentPlanet:storage.scope?.planet_name || state.location?.name, StoredStacks:(storage.stored || []).length, StoredQty:(storage.stored || []).reduce((a,b)=>a+Number(b.qty||0),0), LocalStacks:(storage.stored || []).filter(x=>x.can_modify).length}} />
+        <div className="marketScopeNotice">Travel to another planet to access that planet’s storage. Remote storage stays visible for planning.</div>
+      </Panel>
+      <Panel title="Search Stored Items">
+        <div className="inventoryToolbar galaxyMarketFilters">
+          <input value={storageQuery} onChange={e=>setStorageQuery(e.target.value)} placeholder="Search stored item, planet, galaxy..." />
+          <select value={storageGalaxy} onChange={e=>setStorageGalaxy(e.target.value)}>
+            <option value="all">All galaxies</option>
+            {storageGalaxies.filter(x=>x!=='all').map(([id,name])=><option key={id} value={id}>{name}{Number(id)===Number(storage.scope?.galaxy_id) ? ' (current)' : ''}</option>)}
+          </select>
+          <select value={storagePlanet} onChange={e=>setStoragePlanet(e.target.value)}>
+            <option value="all">All planets</option>
+            {storagePlanets.filter(x=>x!=='all').map(([id,name])=><option key={id} value={id}>{name}{Number(id)===Number(storage.scope?.planet_id) ? ' (current)' : ''}</option>)}
+          </select>
+        </div>
+      </Panel>
+      <Panel title="Stored Items">
+        <table><thead><tr><th>Item</th><th>Galaxy / Planet</th><th>Status</th><th>Qty</th><th>Mass</th><th>Value</th><th></th></tr></thead><tbody>
+          {filteredStorage.map(s=><tr key={s.id} className={!s.can_modify ? 'rowMuted remoteMarketRow' : ''}>
+            <td><div className="itemNameCell"><ItemVisual item={s} /><div><b>{s.item_name}</b><br/><small>{s.description || s.item_code}</small></div></div></td>
+            <td><b>{s.galaxy_name}</b><br/><small>{s.planet_name} {s.can_modify ? '• accessible here' : '• remote view only'}</small></td>
+            <td className={s.legal?'ok':'bad'}>{s.legal?'Legal':'Illegal'} • {label(s.category)} • {label(s.rarity || 'common')} <TierBadge item={s}/></td>
+            <td>{fmt(s.qty)}</td>
+            <td>{fmt(Number(s.mass || 1) * Number(s.qty || 0))}</td>
+            <td>{fmt(s.base_value)}</td>
+            <td><button disabled={!s.can_modify} title={!s.can_modify ? 'Travel to this planet to withdraw.' : ''} onClick={()=>withdrawStorage(s,1)}>Withdraw</button><button disabled={!s.can_modify} onClick={()=>withdrawStorage(s,Math.min(5,s.qty || 1))}>Withdraw 5</button></td>
+          </tr>)}
+          {!filteredStorage.length && <tr><td colSpan="7">No stored items match the current filters.</td></tr>}
+        </tbody></table>
+      </Panel>
+      <Panel title={`Deposit At Current Planet: ${storage.scope?.planet_name || state.location?.name || ''}`}>
+        <div className="inventoryToolbar">
+          <input value={depositQuery} onChange={e=>setDepositQuery(e.target.value)} placeholder="Search inventory to store..." />
+          <div className="chipRow">{categories.map(([key,name])=><button key={key} className={depositCategory===key?'active':''} onClick={()=>setDepositCategory(key)}>{name}</button>)}</div>
+        </div>
+        <table><thead><tr><th>Item</th><th>Category</th><th>Qty</th><th>Mass</th><th>Value</th><th></th></tr></thead><tbody>
+          {depositCandidates.slice(0,80).map(i=><tr key={`deposit-${i.source}-${i.id}-${i.item_code}`}>
+            <td><div className="itemNameCell"><ItemVisual item={i} /><div><b>{i.name}</b><br/><small>{i.description || i.item_code}</small></div></div></td>
+            <td>{i.category_label || label(i.category)} <TierBadge item={i}/></td>
+            <td>{fmt(i.available_qty || i.qty)}</td>
+            <td>{fmt(i.cargo_mass)}</td>
+            <td>{fmt(i.base_value || i.avg_cost || 0)}</td>
+            <td><button onClick={()=>storeItem(i,1)}>Store 1</button><button onClick={()=>storeItem(i,Math.min(5,i.available_qty || i.qty || 1))}>Store Qty</button></td>
+          </tr>)}
+          {!depositCandidates.length && <tr><td colSpan="6">No inventory matches the current deposit filters.</td></tr>}
+        </tbody></table>
       </Panel>
     </>}
 
@@ -956,6 +1079,7 @@ function Market({state,act}) {
     </>}
   </Page>
 }
+
 
 function MarketTable({rows,act,illegal}) {
   const heat = rows?.[0]?.illicitRisk?.heat;
@@ -1605,12 +1729,47 @@ function Skills({state,act}) {
 }
 
 function Properties({state,act}) {
-  return <Page title="Properties & Holdings" sub="Small passive bonuses and income. Homes, warehouses, hangars, shops, refineries, and stalls are long-term investments.">
-    <Panel title="My Properties"><button onClick={()=>act('collect_property_income')}>Collect Income</button>{state.properties.map(p=><div className="itemLine" key={p.id}><b>{p.name}</b><span>{p.planet_name} • Lv {p.level} • +{fmt(p.income*p.level)}/hr</span><button onClick={()=>act('upgrade_property',{property_id:p.id})}>Upgrade</button></div>)}</Panel>
-    <Panel title="Property Marketplace">{state.property_templates.map(p=><div className="itemLine" key={p.code}><b>{p.name}</b><span>{p.type} • {fmt(p.base_price)} Cr • Storage {p.storage}</span><button onClick={()=>act('buy_property',{code:p.code})}>Buy</button></div>)}</Panel>
-    <Panel title="Local Establishments">{state.establishments.map(e=><div className="itemLine" key={e.id}><b>{e.name}</b><span>{e.service_type} • Price {fmt(e.price)}</span></div>)}</Panel>
+  const [tab,setTab] = useState('base');
+  const [researchQ,setResearchQ] = useState('');
+  const [buildingQ,setBuildingQ] = useState('');
+  const baseState = state.base_state || {research:{projects:[]}, buildings:[], placement:{}, summary:{}};
+  const base = baseState.base;
+  const research = baseState.research || {projects:[]};
+  const buildings = baseState.buildings || [];
+  const filteredResearch = (research.projects || []).filter(r => `${r.name} ${r.category} ${r.description}`.toLowerCase().includes(researchQ.toLowerCase()));
+  const filteredBuildings = buildings.filter(b => `${b.name} ${b.category} ${b.description} ${b.bonus}`.toLowerCase().includes(buildingQ.toLowerCase()));
+  const activeResearch = (research.projects || []).find(r=>r.status==='researching');
+  const activeBuilding = buildings.find(b=>b.status==='building');
+  return <Page title="Properties, Research & Bases" sub="Mid-game private bases. Research costs credits/time; construction costs more credits/time. One private base per player. Other players cannot dock or attack it.">
+    <div className="tabs"><button className={tab==='base'?'active':''} onClick={()=>setTab('base')}>Private Base</button><button className={tab==='research'?'active':''} onClick={()=>setTab('research')}>Research</button><button className={tab==='buildings'?'active':''} onClick={()=>setTab('buildings')}>Buildings</button><button className={tab==='property'?'active':''} onClick={()=>setTab('property')}>Old Properties</button></div>
+
+    {tab === 'base' && <>
+      <div className="cards3">
+        <Panel title="Private Base Status" help="Build from a blank point on the System Map. Clearance requires two icon-spaces from planets, stations, nodes, pirate bases, and other bases.">
+          {base ? <div className="baseStatusCard"><b>{base.name}</b><span>{base.galaxy_name} • anchored near {base.anchor_planet_name || 'open space'} • {Number(base.x_pct).toFixed(1)} / {Number(base.y_pct).toFixed(1)}</span><button onClick={()=>act('collect_base_output')}>Collect Passive Output</button></div> : <div className="baseStatusCard"><b>No Base Built</b><span>Open the System Map, click an empty area, then use Build Base Here. Placement cost: {fmt(baseState.placement?.cost || 2500000)} credits.</span><button onClick={()=>act('place_player_base',{x_pct:50,y_pct:50,map_type:'system',name:prompt('Base name','Private Base') || 'Private Base'})}>Emergency Place Near Center</button></div>}
+        </Panel>
+        <Panel title="Long-Term Completion"><Stats pairs={{Research:`${fmt(baseState.summary?.research_complete || 0)} / ${fmt(baseState.summary?.research_total || 0)}`, Buildings:`${fmt(baseState.summary?.complete_buildings || 0)} / ${fmt(baseState.summary?.total_buildings || 0)}`, Clearance:`${baseState.placement?.clearance_spaces || 2} spaces`, Rule:'One base only'}} /></Panel>
+        <Panel title="Active Work">{activeResearch ? <div className="itemLine"><b>{activeResearch.name}</b><span>Researching • {clockTimeLeft(activeResearch.complete_at)}</span></div> : <p className="muted">No active research.</p>}{activeBuilding ? <div className="itemLine"><b>{activeBuilding.name}</b><span>Building • {clockTimeLeft(activeBuilding.complete_at)}</span></div> : <p className="muted">No active construction.</p>}</Panel>
+      </div>
+      <Panel title="Why Build A Base"><div className="adminHintGrid"><div><b>No combat power spike</b><span>Buildings focus on passive materials, convenience, and long-tail economy.</span></div><div><b>Research first</b><span>Every building requires its matching research project before construction.</span></div><div><b>Private docking</b><span>You can dock at your own base. Other players cannot dock or attack.</span></div><div><b>Grindy max-out path</b><span>Maxing research and construction takes hundreds of real-time days and heavy credits.</span></div></div></Panel>
+    </>}
+
+    {tab === 'research' && <>
+      <Panel title="Research Projects" help="One research project at a time. Research only costs credits and time; it unlocks matching base construction."><div className="inventoryToolbar"><input value={researchQ} onChange={e=>setResearchQ(e.target.value)} placeholder="Search research..." /></div><div className="baseTechGrid">{filteredResearch.map(r=><div className={`baseTechCard ${r.status}`} key={r.code}><div><b>{r.name}</b><span>{r.category} • T{r.tier} • {fmt(r.cost)} credits • {fmt(Math.round(r.hours/24*10)/10)} days</span></div><p>{r.description}</p>{r.status==='researching' && <Progress value={Math.max(0, 100 - (r.remaining_seconds / Math.max(1, r.hours*3600))*100)} />}{r.status==='complete' ? <button disabled>Complete</button> : r.status==='researching' ? <button disabled>{clockTimeLeft(r.complete_at)}</button> : <button disabled={!r.can_start} onClick={()=>act('start_base_research',{research_code:r.code})}>Purchase + Research</button>}</div>)}</div></Panel>
+    </>}
+
+    {tab === 'buildings' && <>
+      <Panel title="Base Buildings" help="One construction project at a time. Buildings are private and provide slow passive outputs or small quality-of-life bonuses."><div className="inventoryToolbar"><input value={buildingQ} onChange={e=>setBuildingQ(e.target.value)} placeholder="Search buildings, outputs, bonuses..." /></div><div className="baseTechGrid">{filteredBuildings.map(b=><div className={`baseTechCard ${b.status}`} key={b.code}><div><b>{b.name}</b><span>{b.category} • T{b.tier} • {fmt(b.cost)} credits • {fmt(Math.round(b.hours/24*10)/10)} days</span></div><p>{b.description}</p><small>{b.bonus} • Passive: {fmt(b.passive_qty_per_day)} {label(b.passive_item_code)} / day</small>{b.status==='building' && <Progress value={Math.max(0, 100 - (b.remaining_seconds / Math.max(1, b.hours*3600))*100)} />}{b.status==='complete' ? <button disabled>Built</button> : b.status==='building' ? <button disabled>{clockTimeLeft(b.complete_at)}</button> : b.status==='locked' ? <button disabled>Research Required</button> : <button disabled={!b.can_build} onClick={()=>act('start_base_building',{building_code:b.code})}>Purchase + Build</button>}</div>)}</div></Panel>
+    </>}
+
+    {tab === 'property' && <>
+      <Panel title="My Properties"><button onClick={()=>act('collect_property_income')}>Collect Income</button>{state.properties.map(p=><div className="itemLine" key={p.id}><b>{p.name}</b><span>{p.planet_name} • Lv {p.level} • +{fmt(p.income*p.level)}/hr</span><button onClick={()=>act('upgrade_property',{property_id:p.id})}>Upgrade</button></div>)}</Panel>
+      <Panel title="Property Marketplace">{state.property_templates.map(p=><div className="itemLine" key={p.code}><b>{p.name}</b><span>{p.type} • {fmt(p.base_price)} Cr • Storage {p.storage}</span><button onClick={()=>act('buy_property',{code:p.code})}>Buy</button></div>)}</Panel>
+      <Panel title="Local Establishments">{state.establishments.map(e=><div className="itemLine" key={e.id}><b>{e.name}</b><span>{e.service_type} • Price {fmt(e.price)}</span></div>)}</Panel>
+    </>}
   </Page>
 }
+
 
 function Medical({state,act}) {
   return <Page title="Medical Bay" sub="No permanent death. Serious defeat causes hospital time; ship can be lost. Payments speed surgery but minimum hospital time is 10 minutes.">
@@ -1978,8 +2137,20 @@ function Leaderboards({state}) { return <Page title="Leaderboards"><Panel title=
 function Admin({state,act}) {
   const tuning = state.game_tuning || {};
   const groups = tuning.groups || [];
-  const [selectedKey,setSelectedKey] = useState(groups[0]?.key || 'NPC_OBJECTIVE_BALANCE');
+  const adminConsole = state.admin_console || {actors:[], actions:[]};
+  const [adminTab,setAdminTab] = useState('console');
+  const [selectedKey,setSelectedKey] = useState(groups[0]?.key || 'WORLD_PROGRESSION_BALANCE');
   const selected = groups.find(g => g.key === selectedKey) || groups[0];
+  const worldConfig = groups.find(g => g.key === 'WORLD_PROGRESSION_BALANCE');
+  const serverConfig = groups.find(g => g.key === 'WORLD_SERVER_BALANCE');
+  const missionConfig = groups.find(g => g.key === 'WORLD_MISSION_BALANCE');
+  const ecosystemConfig = groups.find(g => g.key === 'ECOSYSTEM_BALANCE');
+  const economyConfig = groups.find(g => g.key === 'ECONOMY_BALANCE');
+  const craftingConfig = groups.find(g => g.key === 'CRAFTING_BALANCE');
+  const playerMarketConfig = groups.find(g => g.key === 'PLAYER_MARKET_BALANCE');
+  const pveConfig = groups.find(g => g.key === 'PVE_BALANCE');
+  const tierConfig = groups.find(g => g.key === 'TIER_BALANCE');
+  const skillXpConfig = groups.find(g => g.key === 'SKILL_XP_BALANCE');
   const [draft,setDraft] = useState('');
   const [jsonError,setJsonError] = useState('');
 
@@ -2011,6 +2182,26 @@ function Admin({state,act}) {
     await act('admin_reset_all_game_configs', {});
   };
 
+  const refreshAdminTables = async () => {
+    await act('admin_refresh_console', {});
+  };
+
+  const saveWorldConfig = async (value) => {
+    await act('admin_save_game_config', {key:'WORLD_PROGRESSION_BALANCE', value});
+  };
+
+  const saveServerConfig = async (value) => {
+    await act('admin_save_game_config', {key:'WORLD_SERVER_BALANCE', value});
+  };
+
+  const saveMissionConfig = async (value) => {
+    await act('admin_save_game_config', {key:'WORLD_MISSION_BALANCE', value});
+  };
+
+  const saveEconomyConfigGroup = async (key, value) => {
+    await act('admin_save_game_config', {key, value});
+  };
+
   return <Page title="Admin Game Tuning">
     <Panel title="Runtime Balance Controls" help="Godmode/dev admin only. Values persist in SQLite game_settings and apply immediately without rebuilding. Edit JSON carefully.">
       <div className="adminHeroGrid">
@@ -2026,56 +2217,738 @@ function Admin({state,act}) {
         <button onClick={()=>act('launch_starter_ship')}>Launch Starter</button>
         <button className="dangerBtn" onClick={resetAll}>Reset All Tuning Overrides</button>
       </div>
-    </Panel>
-
-    <div className="adminTuningLayout">
-      <Panel title="Config Groups" help="Changed groups have a LIVE OVERRIDE badge. Defaults stay in code; overrides live in DB.">
-        <div className="adminConfigList">
-          {groups.map(g => <button key={g.key} className={selected?.key===g.key ? 'active' : ''} onClick={()=>setSelectedKey(g.key)}>
-            <b>{g.key}</b>
-            <span>{g.description}</span>
-            <small>{g.changed ? `LIVE OVERRIDE • ${g.updated_by || ''}` : 'default'}</small>
-          </button>)}
-        </div>
-      </Panel>
-
-      <Panel title={selected?.key || 'Game Config'} help={selected?.description || 'Select a group.'}>
-        {selected ? <div className="adminJsonEditor">
-          <div className="adminConfigMeta">
-            <span>Status <b>{selected.changed ? 'Live Override' : 'Default'}</b></span>
-            <span>Updated <b>{selected.updated_at ? new Date(selected.updated_at).toLocaleString() : 'Never'}</b></span>
-            <span>By <b>{selected.updated_by || 'System'}</b></span>
-          </div>
-          <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
-          {jsonError && <div className="error">{jsonError}</div>}
-          <div className="buttonRow">
-            <button className="primary" onClick={saveConfig}>Save JSON Override</button>
-            <button onClick={()=>setDraft(JSON.stringify(selected.default || {}, null, 2))}>Load Defaults Into Editor</button>
-            <button onClick={()=>setDraft(JSON.stringify(selected.value || {}, null, 2))}>Reload Current</button>
-            <button className="dangerBtn" onClick={resetConfig}>Delete Override / Reset Group</button>
-          </div>
-          <details className="defaultConfigPreview">
-            <summary>Default JSON</summary>
-            <pre>{JSON.stringify(selected.default || {}, null, 2)}</pre>
-          </details>
-        </div> : <p>No game tuning config loaded.</p>}
-      </Panel>
-    </div>
-
-    <Panel title="NPC Life Quick Targets">
-      <div className="adminHintGrid">
-        <div><b>NPC objective behavior</b><code>NPC_OBJECTIVE_BALANCE</code><span>Adjust role weights, bad/good thresholds, radar contact bonuses, and search behavior.</span></div>
-        <div><b>Radar ranges</b><code>RADAR_BALANCE</code><span>Adjust base/final radar ranges, tier scaling, NPC role radar ranges.</span></div>
-        <div><b>Map traffic / ore / sites</b><code>OPEN_WORLD_BALANCE</code><span>Adjust NPC traffic count, ore/site counts, map timers, open-world behavior.</span></div>
-        <div><b>Server/NPC ticks</b><code>SIMULATION_BALANCE / NPC_MARKET_BALANCE</code><span>Adjust simulation cadence, market restock, NPC economy and arbitrage behavior.</span></div>
+      <div className="adminTabBar">
+        <button className={adminTab==='console'?'active':''} onClick={()=>setAdminTab('console')}>Actors + Action Log</button>
+        <button className={adminTab==='world'?'active':''} onClick={()=>setAdminTab('world')}>World Progression</button>
+        <button className={adminTab==='server'?'active':''} onClick={()=>setAdminTab('server')}>Server World Control</button>
+        <button className={adminTab==='missions'?'active':''} onClick={()=>setAdminTab('missions')}>Planet Missions</button>
+        <button className={adminTab==='economy'?'active':''} onClick={()=>setAdminTab('economy')}>Economy Balance</button>
+        <button className={adminTab==='tuning'?'active':''} onClick={()=>setAdminTab('tuning')}>Raw Tuning JSON</button>
       </div>
     </Panel>
 
-    <Panel title="Recent NPC Actions">{(state.npc_activity || []).slice(0,20).map(a=><div className="itemLine" key={a.id}><b>{label(a.action_type)}</b><span>{a.message}</span></div>)}</Panel>
-    <Panel title="Local NPC Roster">{(state.npc_agents||[]).slice(0,35).map(n=><div className="itemLine" key={n.id}><b>{n.name}</b><span>{label(n.career_code || n.role)} • Rank {n.job_rank} • Lvl {n.level} • {n.ship_class} • {n.disposition}</span></div>)}</Panel>
-    <Panel title="Accounts"><code>godmode / godmode123</code><code>pilot / pilot123</code></Panel>
+    {adminTab === 'console' && <AdminConsoleTables actors={adminConsole.actors || []} actions={adminConsole.actions || []} onRefresh={refreshAdminTables} />}
+
+    {adminTab === 'world' && <AdminWorldProgressionTab
+      group={worldConfig}
+      onSave={saveWorldConfig}
+      onApply={()=>act('admin_apply_world_progression', {})}
+    />}
+
+    {adminTab === 'server' && <AdminServerWorldControlTab
+      group={serverConfig}
+      onSave={saveServerConfig}
+      onRun={()=>act('admin_run_world_server_check', {})}
+    />}
+
+    {adminTab === 'missions' && <AdminMissionControlTab
+      group={missionConfig}
+      state={state}
+      onSave={saveMissionConfig}
+      onApply={()=>act('admin_apply_planet_mission_balance', {})}
+    />}
+
+    {adminTab === 'economy' && <AdminEconomyBalanceTab
+      state={state}
+      groups={{
+        ECOSYSTEM_BALANCE: ecosystemConfig,
+        ECONOMY_BALANCE: economyConfig,
+        CRAFTING_BALANCE: craftingConfig,
+        PLAYER_MARKET_BALANCE: playerMarketConfig,
+        PVE_BALANCE: pveConfig,
+        TIER_BALANCE: tierConfig,
+        SKILL_XP_BALANCE: skillXpConfig,
+        WORLD_MISSION_BALANCE: missionConfig,
+      }}
+      onSave={saveEconomyConfigGroup}
+      onRecalc={()=>act('admin_recalculate_economy', {})}
+    />}
+
+    {adminTab === 'tuning' && <>
+      <div className="adminTuningLayout">
+        <Panel title="Config Groups" help="Changed groups have a LIVE OVERRIDE badge. Defaults stay in code; overrides live in DB.">
+          <div className="adminConfigList">
+            {groups.map(g => <button key={g.key} className={selected?.key===g.key ? 'active' : ''} onClick={()=>setSelectedKey(g.key)}>
+              <b>{g.key}</b>
+              <span>{g.description}</span>
+              <small>{g.changed ? `LIVE OVERRIDE • ${g.updated_by || ''}` : 'default'}</small>
+            </button>)}
+          </div>
+        </Panel>
+
+        <Panel title={selected?.key || 'Game Config'} help={selected?.description || 'Select a group.'}>
+          {selected ? <div className="adminJsonEditor">
+            <div className="adminConfigMeta">
+              <span>Status <b>{selected.changed ? 'Live Override' : 'Default'}</b></span>
+              <span>Updated <b>{selected.updated_at ? new Date(selected.updated_at).toLocaleString() : 'Never'}</b></span>
+              <span>By <b>{selected.updated_by || 'System'}</b></span>
+            </div>
+            <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
+            {jsonError && <div className="error">{jsonError}</div>}
+            <div className="buttonRow">
+              <button className="primary" onClick={saveConfig}>Save JSON Override</button>
+              <button onClick={()=>setDraft(JSON.stringify(selected.default || {}, null, 2))}>Load Defaults Into Editor</button>
+              <button onClick={()=>setDraft(JSON.stringify(selected.value || {}, null, 2))}>Reload Current</button>
+              <button className="dangerBtn" onClick={resetConfig}>Delete Override / Reset Group</button>
+            </div>
+            <details className="defaultConfigPreview">
+              <summary>Default JSON</summary>
+              <pre>{JSON.stringify(selected.default || {}, null, 2)}</pre>
+            </details>
+          </div> : <p>No game tuning config loaded.</p>}
+        </Panel>
+      </div>
+
+      <Panel title="NPC Life Quick Targets">
+        <div className="adminHintGrid">
+          <div><b>World progression</b><code>WORLD_PROGRESSION_BALANCE</code><span>Galaxy expansion, planets per galaxy, resource bands, and NPC level bands.</span></div>
+          <div><b>NPC objective behavior</b><code>NPC_OBJECTIVE_BALANCE</code><span>Adjust role weights, bad/good thresholds, radar contact bonuses, and search behavior.</span></div>
+          <div><b>Radar ranges</b><code>RADAR_BALANCE</code><span>Adjust base/final radar ranges, tier scaling, NPC role radar ranges.</span></div>
+          <div><b>Map traffic / ore / sites</b><code>OPEN_WORLD_BALANCE</code><span>Adjust NPC traffic count, ore/site counts, map timers, open-world behavior.</span></div>
+          <div><b>Server/NPC ticks</b><code>SIMULATION_BALANCE / NPC_MARKET_BALANCE</code><span>Adjust simulation cadence, market restock, NPC economy and arbitrage behavior.</span></div>
+        </div>
+      </Panel>
+
+      <Panel title="Recent NPC Actions">{(state.npc_activity || []).slice(0,20).map(a=><div className="itemLine" key={a.id}><b>{label(a.action_type)}</b><span>{a.message}</span></div>)}</Panel>
+      <Panel title="Local NPC Roster">{(state.npc_agents||[]).slice(0,35).map(n=><div className="itemLine" key={n.id}><b>{n.name}</b><span>{label(n.career_code || n.role)} • Rank {n.job_rank} • Lvl {n.level} • {n.ship_class} • {n.disposition}</span></div>)}</Panel>
+      <Panel title="Accounts"><code>godmode / godmode123</code><code>pilot / pilot123</code></Panel>
+    </>}
   </Page>
 }
+
+function AdminWorldProgressionTab({group,onSave,onApply}) {
+  const current = group?.value || group?.default || {};
+  const [draft,setDraft] = useState(JSON.stringify(current, null, 2));
+  const [error,setError] = useState('');
+  useEffect(() => {
+    setDraft(JSON.stringify(group?.value || group?.default || {}, null, 2));
+    setError('');
+  }, [group?.updated_at, group?.changed]);
+
+  const parsed = useMemo(() => {
+    try { return JSON.parse(draft || '{}'); } catch { return current || {}; }
+  }, [draft, current]);
+  const bands = parsed?.bands || [];
+
+  const save = async () => {
+    try {
+      const value = JSON.parse(draft || '{}');
+      setError('');
+      await onSave(value);
+    } catch (ex) {
+      setError(ex.message);
+    }
+  };
+
+  return <div className="adminConsoleStack">
+    <Panel title="World Progression Control" help="Controls galaxy count, planets per galaxy, faction balance, resource tier distribution, and NPC level bands from each faction home toward center space.">
+      <div className="adminHeroGrid">
+        <div><b>Target planets / galaxy</b><span>{fmt(parsed.target_planets_per_galaxy || 8)}</span></div>
+        <div><b>Galaxy multiplier</b><span>{fmt(parsed.target_galaxy_multiplier || 1.5)}x</span></div>
+        <div><b>Faction expansion</b><span>{fmt(parsed.extra_galaxies_per_faction || 2)} extra per faction</span></div>
+      </div>
+      <div className="buttonRow">
+        <button className="primary" onClick={save}>Save World Progression JSON</button>
+        <button onClick={onApply}>Apply Expansion + Regenerate Resource Nodes</button>
+        <button onClick={()=>setDraft(JSON.stringify(group?.default || {}, null, 2))}>Load Defaults</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+    </Panel>
+
+    <Panel title="Distance Bands">
+      <div className="adminTableWrap">
+        <table className="adminDataTable">
+          <thead><tr><th>Band</th><th>Distance From Home Toward Center</th><th>Tier Weights</th><th>NPC / Pirate Level</th></tr></thead>
+          <tbody>
+            {bands.map(b => <tr key={b.key || b.name}>
+              <td><b>{b.name || b.key}</b><small>{b.key}</small></td>
+              <td>{fmt(Math.round(Number(b.min_progress || 0)*100))}% - {fmt(Math.round(Number(b.max_progress || 0)*100))}%</td>
+              <td>{Object.entries(b.tier_weights || {}).map(([k,v]) => <span className="adminTierWeight" key={k}>T{k}: {v}%</span>)}</td>
+              <td>{fmt(b.npc_level_min)} - {fmt(b.npc_level_max)}</td>
+            </tr>)}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+
+    <Panel title="Raw World Progression JSON">
+      <div className="adminJsonEditor">
+        <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
+      </div>
+    </Panel>
+  </div>
+}
+
+
+const MISSION_SCENE_VARIANTS = {
+  survey: [
+    { className:'survey-v0', accent:'Aqua Ridge', subtitle:'Clear scans and soft blue atmospheric glow.' },
+    { className:'survey-v1', accent:'Amber Dune', subtitle:'Warm survey light with drifting dust lanes.' },
+    { className:'survey-v2', accent:'Crystal Shelf', subtitle:'Cold survey shelf cut by reflective shards.' },
+    { className:'survey-v3', accent:'Emerald Canyon', subtitle:'Deep canyon survey route with soft auroras.' },
+  ],
+  salvage: [
+    { className:'salvage-v0', accent:'Wreck Yard', subtitle:'Collapsed plating fields and neon scrap glints.' },
+    { className:'salvage-v1', accent:'Rust Flats', subtitle:'Industrial salvage lane under orange haze.' },
+    { className:'salvage-v2', accent:'Debris Trench', subtitle:'Hard-shadow trench with derelict silhouettes.' },
+    { className:'salvage-v3', accent:'Relay Grave', subtitle:'Signal-torn salvage stretch with sparks overhead.' },
+  ],
+  hazard: [
+    { className:'hazard-v0', accent:'Storm Basin', subtitle:'Blue electric stormfront and volatile ridgelines.' },
+    { className:'hazard-v1', accent:'Toxic Bloom', subtitle:'Green hazard fog rolling through cracked rock.' },
+    { className:'hazard-v2', accent:'Inferno Shelf', subtitle:'Lava-lit hazard shelf with hard red glare.' },
+    { className:'hazard-v3', accent:'Ion Frost', subtitle:'Frozen hazard plain rippling with ion arcs.' },
+  ],
+};
+
+function missionHash(value='') {
+  const str = String(value || '0');
+  let out = 0;
+  for (let i = 0; i < str.length; i += 1) out = ((out << 5) - out) + str.charCodeAt(i);
+  return Math.abs(out);
+}
+
+function missionThemeFor(mission) {
+  const type = String(mission?.mission_key || mission?.missionKey || 'survey').toLowerCase();
+  const key = type.includes('salvage') ? 'salvage' : type.includes('hazard') ? 'hazard' : 'survey';
+  const variants = MISSION_SCENE_VARIANTS[key] || MISSION_SCENE_VARIANTS.survey;
+  const index = missionHash(`${mission?.id || mission?.planet_name || ''}:${mission?.planet_type || ''}:${key}`) % variants.length;
+  return { key, index, ...(variants[index] || variants[0]) };
+}
+
+function missionAvatarArt(state) {
+  return resolveAsset('avatar', state?.player?.avatar || '', state?.player?.job_name || state?.player?.job || '', state?.player?.callsign || 'explorer');
+}
+
+function missionPlanetArt(mission) {
+  return resolveAsset('planet', '', mission?.planet_type || '', mission?.planet_name || 'planet');
+}
+
+function missionEncounterArt(event) {
+  return resolveAsset(event?.sceneAssetType || 'material', '', event?.sceneAssetHint || event?.itemCode || event?.kind || 'relic', event?.sceneObjectName || event?.itemName || event?.kind || 'event');
+}
+
+function missionSceneEncounters(visibleLogs) {
+  return (visibleLogs || []).slice(-5);
+}
+
+function PlanetMissionContracts({state,act,compact=false}) {
+  const pm = state.planet_missions || {};
+  const contracts = pm.contracts || [];
+  const active = pm.active;
+  const cooldown = pm.cooldown || {};
+  if (active) {
+    return <div className="missionActiveMini">
+      <div className="missionActiveMiniTop">
+        <div>
+          <b>{active.mission_name}</b>
+          <span>{active.planet_name} • {clockTimeLeft(active.completes_at)} remaining</span>
+        </div>
+        <div className="missionMiniBadges">
+          <span>{Math.round((active.progress || 0) * 100)}%</span>
+          <span>Cooldown on return {fmt(active.cooldownProjectedMinutes || 0)}m</span>
+        </div>
+      </div>
+      <Progress value={(active.progress || 0) * 100} />
+    </div>;
+  }
+  return <div className={compact ? "missionContractList compact" : "missionContractList"}>
+    {cooldown.active && <div className="missionCooldownBanner">
+      <div>
+        <b>Mission Cooldown Active</b>
+        <span>{clockTimeLeft(cooldown.until)} remaining • {cooldown.reason || 'Failures and cancellations add to this timer.'}</span>
+      </div>
+      <small>{fmt(cooldown.minutesRemaining || 0)} min</small>
+    </div>}
+    {contracts.map(c => <div className="missionContractCard" key={c.key}>
+      <div className="missionCardHeader"><b>{c.name}</b><span>{c.planetName} • {c.tierLabel || `Lvl ${fmt(c.level)}`} • {fmt(c.minutes)} min</span></div>
+      <small>{c.description}</small>
+      <div className="tagCloud">
+        <span>{fmt(c.rewardXp)} XP</span>
+        <span>Diff {fmt(c.difficulty)}</span>
+        {(c.rewardItems||[]).map(i=><span key={i.code}>{fmt(i.qty)}x {i.name}</span>)}
+        {(c.tags||[]).map(t=><span key={t}>{label(t)}</span>)}
+      </div>
+      <button disabled={!c.canStart} onClick={()=>act('start_planet_mission',{mission_key:c.key})}>{c.canStart ? 'Start Mission' : c.blockedReason}</button>
+    </div>)}
+    {!contracts.length && <p className="muted">No local planet contracts available.</p>}
+  </div>;
+}
+
+function MissionScreen({state,act,clock}) {
+  const mission = state.planet_missions?.active;
+  if (!mission) return null;
+  const progress = Math.max(0, Math.min(1, Number(mission.progress || 0)));
+  const logs = mission.eventLog || [];
+  const visibleLogs = logs.filter(e => Number(e.atPct || 0) <= progress + 0.02);
+  const encounters = missionSceneEncounters(visibleLogs);
+  const theme = missionThemeFor(mission);
+  const avatarArt = missionAvatarArt(state);
+  const planetArt = missionPlanetArt(mission);
+  const cancel = () => {
+    if (window.confirm('You will expedite returning to your ship and leaving your rewards behind, continue?')) {
+      act('cancel_planet_mission', {});
+    }
+  };
+  return <Panel title="Active Planet Mission" help="Your ship is docked off-map during the run. Failures and early cancellations add to the visible cooldown timer.">
+    <div className={`missionScreen ${theme.className}`}>
+      <div className="missionSceneCard">
+        <div className="missionSceneHeader">
+          <div>
+            <h2>{mission.mission_name}</h2>
+            <p>{mission.planet_name} • {mission.galaxy_name} • {label(mission.planet_type)} • {theme.accent}</p>
+          </div>
+          <div className="missionHeaderBadges">
+            <span>{Math.round(progress * 100)}% complete</span>
+            <span>{clockTimeLeft(mission.completes_at)} remaining</span>
+            <span>Cooldown on return {fmt(mission.cooldownProjectedMinutes || 0)}m</span>
+          </div>
+        </div>
+
+        <div className={`missionAdventureStage ${theme.className}`}>
+          <div className="missionSkyGlow"></div>
+          <img className="missionBackdropPlanet" src={planetArt} alt="" />
+          <div className="missionSceneParallax p1"></div>
+          <div className="missionSceneParallax p2"></div>
+          <div className="missionSceneParallax p3"></div>
+          <div className="missionGroundLine"></div>
+          <div className="missionRunnerWrap">
+            <img className="missionRunnerArt" src={avatarArt} alt="" />
+            <div className="missionRunnerLabel">{state?.player?.callsign || 'Explorer'}</div>
+          </div>
+          {encounters.map((e,i)=> <div key={`${e.atPct}-${i}`} className={`missionEncounter ${e.kind || 'event'} e${i}`} style={{ left: `${50 + i * 10}%`, bottom: `${16 + (i % 3) * 6}%` }}>
+            <div className="missionEncounterPulse"></div>
+            <img src={missionEncounterArt(e)} alt="" />
+            <small>{e.sceneObjectName || e.itemName || label(e.kind || 'event')}</small>
+          </div>)}
+          <div className="missionStageHud">
+            <span>{theme.subtitle}</span>
+            <b>{mission.rewardText || `${fmt(mission.reward_xp)} XP`}</b>
+          </div>
+        </div>
+
+        <div className="missionProgressShell">
+          <div className="missionProgressMeta">
+            <span>Mission Progress</span>
+            <span>{Math.round(progress * 100)}%</span>
+          </div>
+          <Progress value={progress * 100} />
+        </div>
+
+        <div className="missionBottomGrid">
+          <div className="missionSummaryStrip">
+            <div className="missionSummaryCard"><b>Level</b><span>{fmt(mission.level)}</span></div>
+            <div className="missionSummaryCard"><b>Reward</b><span>{mission.rewardText || `${fmt(mission.reward_xp)} XP`}</span></div>
+            <div className="missionSummaryCard"><b>Cooldown So Far</b><span>{fmt(mission.cooldownAccruedMinutes || 0)} min</span></div>
+            <div className="missionSummaryCard"><b>Projected Cooldown</b><span>{fmt(mission.cooldownProjectedMinutes || 0)} min</span></div>
+          </div>
+          {!!(mission.rewardItems||[]).length && <div className="tagCloud missionRewardItems">{(mission.rewardItems||[]).map(i=><span key={i.code}>{fmt(i.qty)}x {i.name}</span>)}</div>}
+          <div className="missionFeedWrap">
+            <div className="missionFeedHeader">
+              <b>Action Result Stream</b>
+              <span>{visibleLogs.length} / {logs.length} events resolved</span>
+            </div>
+            <div className="missionEventFeed">
+              {visibleLogs.length ? visibleLogs.map((e,i)=><div key={i} className={`missionFeedItem ${e.kind || 'event'}`}>
+                <div className="missionFeedItemTop">
+                  <b>{e.resultLabel || label(e.kind || 'event')}</b>
+                  {!!e.cooldownAddMinutes && <span>+{fmt(e.cooldownAddMinutes)}m cooldown</span>}
+                </div>
+                <span>{e.text}</span>
+              </div>) : <div className="missionFeedItem"><div className="missionFeedItemTop"><b>Deploying</b></div><span>Landing team is leaving the ship and setting up mission instruments.</span></div>}
+            </div>
+          </div>
+        </div>
+
+        <button className="dangerBtn" onClick={cancel}>Cancel Mission / Return To Ship</button>
+      </div>
+    </div>
+  </Panel>;
+}
+
+
+function AdminMissionControlTab({group,state,onSave,onApply}) {
+  const current = group?.value || group?.default || {};
+  const [draft,setDraft] = useState(JSON.stringify(current, null, 2));
+  const [error,setError] = useState('');
+  useEffect(() => {
+    setDraft(JSON.stringify(group?.value || group?.default || {}, null, 2));
+    setError('');
+  }, [group?.updated_at, group?.changed]);
+  const parsed = useMemo(() => { try { return JSON.parse(draft || '{}'); } catch { return current || {}; } }, [draft, current]);
+  const save = async () => {
+    try {
+      const value = JSON.parse(draft || '{}');
+      setError('');
+      await onSave(value);
+    } catch (ex) { setError(ex.message); }
+  };
+  const planets = state.planets || [];
+  const stationCount = planets.filter(p=>String(p.type||'').toLowerCase().includes('station') || String(p.type||'').toLowerCase().includes('freeport')).length;
+  const wildCount = planets.filter(p=>String(p.type||'').toLowerCase().includes('uninhabitable')).length;
+  return <div className="adminConsoleStack">
+    <Panel title="Planet / Mission Balance" help="Controls station conversion, uninhabitable planets, landed contracts, mission timers, per-planet mission XP, event logs, and rewards.">
+      <div className="adminHeroGrid">
+        <div><b>Stations</b><span>{fmt(Math.round(Number(parsed.station_ratio_per_galaxy || .25)*100))}% target • current {fmt(stationCount)}</span></div>
+        <div><b>Uninhabitable</b><span>{fmt(Math.round(Number(parsed.uninhabitable_ratio_per_galaxy || .40)*100))}% target • current {fmt(wildCount)}</span></div>
+        <div><b>Mission time</b><span>{fmt(parsed.mission_base_minutes_min || 30)}-{fmt(parsed.mission_base_minutes_max || 60)} min</span></div>
+        <div><b>Scaling</b><span>+{fmt(Math.round(Number(parsed.mission_time_growth_pct_per_level || .10)*100))}% time / +{fmt(Math.round(Number(parsed.mission_reward_growth_pct_per_level || .20)*100))}% reward per level</span></div>
+      </div>
+      <div className="buttonRow">
+        <button className="primary" onClick={save}>Save Mission JSON</button>
+        <button onClick={onApply}>Apply Planet Conversion</button>
+        <button onClick={()=>setDraft(JSON.stringify(group?.default || {}, null, 2))}>Load Defaults</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+    </Panel>
+    <Panel title="Mission Types">
+      <div className="cards3">{Object.entries(parsed.mission_types || {}).map(([k,v])=><div className="missionContractCard" key={k}><b>{v.name || label(k)}</b><span>{fmt(v.baseCredits || 0)} base cr • {fmt(v.xp || 0)} XP</span><small>{(v.tags||[]).map(label).join(' • ')}</small></div>)}</div>
+    </Panel>
+    <Panel title="Raw Mission JSON">
+      <div className="adminJsonEditor"><textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} /></div>
+    </Panel>
+  </div>
+}
+
+function AdminServerWorldControlTab({group,onSave,onRun}) {
+  const current = group?.value || group?.default || {};
+  const [draft,setDraft] = useState(JSON.stringify(current, null, 2));
+  const [error,setError] = useState('');
+  useEffect(() => {
+    setDraft(JSON.stringify(group?.value || group?.default || {}, null, 2));
+    setError('');
+  }, [group?.updated_at, group?.changed]);
+
+  const parsed = useMemo(() => {
+    try { return JSON.parse(draft || '{}'); } catch { return current || {}; }
+  }, [draft, current]);
+
+  const save = async () => {
+    try {
+      const value = JSON.parse(draft || '{}');
+      setError('');
+      await onSave(value);
+    } catch (ex) {
+      setError(ex.message);
+    }
+  };
+
+  return <div className="adminConsoleStack">
+    <Panel title="Server World Authority" help="Server-owned population/resource controller. Checks are throttled; each due pass spawns or trims one item per category per galaxy until configured ranges are met.">
+      <div className="adminHeroGrid">
+        <div><b>NPC check</b><span>{fmt(parsed.npc_check_min_seconds || 60)}-{fmt(parsed.npc_check_max_seconds || 120)} sec</span></div>
+        <div><b>Resource check</b><span>{fmt(Math.round((parsed.resource_check_min_seconds || 900)/60))}-{fmt(Math.round((parsed.resource_check_max_seconds || 1800)/60))} min</span></div>
+        <div><b>NPCs / galaxy</b><span>{fmt(parsed.npcs_per_galaxy_min || 15)}-{fmt(parsed.npcs_per_galaxy_max || 30)}</span></div>
+        <div><b>Patrols / galaxy</b><span>{fmt(parsed.patrols_per_galaxy_min || 4)}-{fmt(parsed.patrols_per_galaxy_max || 6)}</span></div>
+        <div><b>Patrol strength</b><span>{fmt(Math.round(Number(parsed.patrol_strength_mult || 2.0) * 100))}% of top pirate</span></div>
+        <div><b>Mining nodes</b><span>{fmt(parsed.mining_nodes_per_galaxy_min || 5)}-{fmt(parsed.mining_nodes_per_galaxy_max || 15)}</span></div>
+        <div><b>Exploration nodes</b><span>{fmt(parsed.exploration_nodes_per_galaxy_min || 5)}-{fmt(parsed.exploration_nodes_per_galaxy_max || 15)}</span></div>
+        <div><b>Pirate bases</b><span>{fmt(parsed.pirate_bases_per_galaxy_min ?? 0)}-{fmt(parsed.pirate_bases_per_galaxy_max ?? 2)}</span></div>
+        <div><b>Pirate strength</b><span>{fmt(Math.round(Number(parsed.pirate_base_strength_mult || 1.25) * 100))}% of galaxy band</span></div>
+        <div><b>Mode</b><span>{parsed.enabled === false ? 'Disabled' : 'Enabled'} • server controls NPC/resources</span></div>
+      </div>
+      <div className="buttonRow">
+        <button className="primary" onClick={save}>Save Server Control JSON</button>
+        <button onClick={onRun}>Run Server Check Now</button>
+        <button onClick={()=>setDraft(JSON.stringify(group?.default || {}, null, 2))}>Load Defaults</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+    </Panel>
+
+    <Panel title="Control Rules">
+      <div className="adminHintGrid">
+        <div><b>NPC pass</b><code>{fmt(parsed.npc_check_min_seconds || 60)}-{fmt(parsed.npc_check_max_seconds || 120)} sec</code><span>Each galaxy rolls a target between {fmt(parsed.npcs_per_galaxy_min || 15)} and {fmt(parsed.npcs_per_galaxy_max || 30)}. If short, the server spawns one NPC. If over target, it trims one.</span></div>
+        <div><b>Faction patrol pass</b><code>{fmt(parsed.patrol_check_min_seconds || 60)}-{fmt(parsed.patrol_check_max_seconds || 120)} sec</code><span>Each galaxy rolls {fmt(parsed.patrols_per_galaxy_min || 4)}-{fmt(parsed.patrols_per_galaxy_max || 6)} own-faction patrols. Missing patrols spawn one at a time, away from existing patrols, and avoid grouping while navigating.</span></div>
+        <div><b>Resource pass</b><code>{fmt(Math.round((parsed.resource_check_min_seconds || 900)/60))}-{fmt(Math.round((parsed.resource_check_max_seconds || 1800)/60))} min</code><span>Each galaxy independently rolls mining, exploration, and pirate-base targets. It spawns one of each missing category per due pass.</span></div>
+        <div><b>Pirate bases</b><code>{fmt(Math.round(Number(parsed.pirate_base_strength_mult || 1.25) * 100))}% strength</code><span>Base tier and defender power are derived from the galaxy progression level band, then multiplied stronger than normal local pirates.</span></div>
+        <div><b>Faction patrol behavior</b><code>{fmt(Math.round(Number(parsed.patrol_strength_mult || 2.0) * 100))}% top pirate</code><span>Patrols belong to their galaxy faction, ignore same-faction traffic, attack other-faction contacts on sight, and only patrol their own galaxy.</span></div>
+        <div><b>Server authority</b><code>Request-triggered throttle</code><span>The check runs during state/action processing, but each galaxy has its own next-run timestamp so normal player polling does not spam spawns.</span></div>
+      </div>
+    </Panel>
+
+    <Panel title="Raw Server Control JSON">
+      <div className="adminJsonEditor">
+        <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
+      </div>
+    </Panel>
+  </div>
+}
+
+
+
+function AdminEconomyBalanceTab({state,groups,onSave,onRecalc}) {
+  const summary = state.ecosystem_balance || {};
+  const [selected,setSelected] = useState('ECOSYSTEM_BALANCE');
+  const group = groups[selected];
+  const [draft,setDraft] = useState('');
+  const [error,setError] = useState('');
+  useEffect(() => {
+    setDraft(JSON.stringify(group?.value || group?.default || {}, null, 2));
+    setError('');
+  }, [selected, group?.updated_at, group?.changed]);
+
+  const save = async () => {
+    try {
+      const value = JSON.parse(draft || '{}');
+      setError('');
+      await onSave(selected, value);
+    } catch (ex) {
+      setError(ex.message);
+    }
+  };
+
+  const quickGroups = [
+    ['ECOSYSTEM_BALANCE','Top-level ecosystem'],
+    ['ECONOMY_BALANCE','Direct vendor / market spread'],
+    ['PLAYER_MARKET_BALANCE','Player market fees'],
+    ['CRAFTING_BALANCE','Crafting cost/time'],
+    ['TIER_BALANCE','Tier/upgrade curve'],
+    ['PVE_BALANCE','Rewards + success'],
+    ['SKILL_XP_BALANCE','Skill XP curve'],
+    ['WORLD_MISSION_BALANCE','Planet mission rewards'],
+  ];
+
+  return <div className="adminConsoleStack">
+    <Panel title="Whole Ecosystem Balance" help="The target is easy start, painful completion. These controls apply instantly through runtime config; use Recalculate Markets after price changes.">
+      <div className="adminHeroGrid ecosystemHero">
+        <div><b>Ships</b><span>{fmt(summary.ships?.count || 0)} templates • median {fmt(summary.ships?.median || 0)} cr • max {fmt(summary.ships?.max || 0)} cr</span></div>
+        <div><b>Modules</b><span>{fmt(summary.modules?.count || 0)} templates • median {fmt(summary.modules?.median || 0)} cr • max {fmt(summary.modules?.max || 0)} cr</span></div>
+        <div><b>Commodities</b><span>{fmt(summary.commodities?.count || 0)} goods • median {fmt(summary.commodities?.median || 0)} cr</span></div>
+        <div><b>Vendor Floor</b><span>Raw {Math.round(Number(summary.vendorSell?.rawOre || 0)*100)}% • Item {Math.round(Number(summary.vendorSell?.defaultItem || 0)*100)}%</span></div>
+        <div><b>Fees</b><span>Legal {Math.round(Number(summary.vendorSell?.legalFee || 0)*100)}% • Illegal {Math.round(Number(summary.vendorSell?.illegalFee || 0)*100)}%</span></div>
+        <div><b>Goal</b><span>Market pays best, vendor pays worst, bases/ships/crafting sink credits.</span></div>
+        <div><b>1000-run Sim</b><span>Median {fmt(summary.simulation?.median_days || 0)}d • mean {fmt(summary.simulation?.mean_days || 0)}d • P90 {fmt(summary.simulation?.p90_days || 0)}d</span></div>
+      </div>
+      <div className="adminHintGrid ecosystemSimGrid">
+        <div><b>Skills</b><code>{fmt(summary.simulation?.component_mean_days?.skills || 0)}d avg</code><span>15 finite skill tracks to level cap under targeted no-lifer loop rotation.</span></div>
+        <div><b>Credits</b><code>{fmt(summary.simulation?.component_mean_days?.credits || 0)}d avg</code><span>Finite sink model covers ships, modules, recipes, failed crafting, fees, base placement, research, and buildings.</span></div>
+        <div><b>Base</b><code>{fmt(summary.simulation?.component_mean_days?.base_research_build || 0)}d avg</code><span>One active research and one active construction path with dependencies.</span></div>
+        <div><b>Crafting</b><code>{fmt(summary.simulation?.component_mean_days?.crafting_recipes || 0)}d avg</code><span>Recipe mastery, material grind, ranked crafting, and queue pressure.</span></div>
+        <div><b>Achievements</b><code>{fmt(summary.simulation?.component_mean_days?.achievements_loops || 0)}d avg</code><span>Major finite loop achievements and system mastery tracks.</span></div>
+        <div><b>Baseline</b><code>{fmt(summary.simulation?.active_hours_per_day || 12)}h/day</code><span>{summary.simulation?.note || 'Simulation report loaded from backend balance tooling.'}</span></div>
+      </div>
+      <div className="buttonRow">
+        <button className="primary" onClick={save}>Save Selected Balance Group</button>
+        <button onClick={onRecalc}>Recalculate Markets + Crafting</button>
+        <button onClick={()=>setDraft(JSON.stringify(group?.default || {}, null, 2))}>Load Defaults</button>
+        <button onClick={()=>setDraft(JSON.stringify(group?.value || {}, null, 2))}>Reload Current</button>
+      </div>
+      {error && <div className="error">{error}</div>}
+    </Panel>
+
+    <div className="adminTuningLayout economyTuningLayout">
+      <Panel title="Balance Tabs" help="Edit one group, save it, then recalc markets if pricing changed.">
+        <div className="adminConfigList">
+          {quickGroups.map(([key,desc]) => <button key={key} className={selected===key?'active':''} onClick={()=>setSelected(key)}>
+            <b>{key}</b>
+            <span>{desc}</span>
+            <small>{groups[key]?.changed ? `LIVE OVERRIDE • ${groups[key]?.updated_by || ''}` : 'default'}</small>
+          </button>)}
+        </div>
+      </Panel>
+      <Panel title={selected} help={groups[selected]?.description || 'Runtime balance JSON.'}>
+        <div className="adminJsonEditor">
+          <div className="adminConfigMeta">
+            <span>Status <b>{groups[selected]?.changed ? 'Live Override' : 'Default'}</b></span>
+            <span>Updated <b>{groups[selected]?.updated_at ? new Date(groups[selected].updated_at).toLocaleString() : 'Never'}</b></span>
+            <span>By <b>{groups[selected]?.updated_by || 'System'}</b></span>
+          </div>
+          <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
+        </div>
+      </Panel>
+    </div>
+
+    <Panel title="Balance Rules Applied">
+      <div className="adminHintGrid">
+        <div><b>Recipes</b><code>CRAFTING_BALANCE + ECOSYSTEM_BALANCE</code><span>Recipe credit cost and craft time scale upward for modules, weapons, armor, ships, and higher tiers.</span></div>
+        <div><b>Crafting mats</b><code>ECOSYSTEM_BALANCE commodity/direct vendor maps</code><span>Raw mats sell low to vendors, refined mats sell better, mission-only mats sell poorly to vendors but matter in recipes.</span></div>
+        <div><b>Vendor sales</b><code>direct_vendor_sell_mult_by_category</code><span>Direct selling is the emergency floor. Player market and planet markets should beat vendor dumps.</span></div>
+        <div><b>Ships/modules</b><code>progression_cost_mult</code><span>Purchase prices are multiplied live at buy time so mid-game and late-game purchases remain meaningful sinks.</span></div>
+        <div><b>Rewards</b><code>PVE_BALANCE / WORLD_MISSION_BALANCE</code><span>Credits are restrained; XP/materials remain useful. Planet missions avoid direct credits.</span></div>
+        <div><b>XP</b><code>SKILL_XP_BALANCE</code><span>Skill curves are steeper; early levels move, maxing everything is long-term.</span></div>
+      </div>
+    </Panel>
+  </div>
+}
+
+
+function AdminConsoleTables({actors=[], actions=[], onRefresh}) {
+  const [actorQuery,setActorQuery] = useState('');
+  const [actorType,setActorType] = useState('all');
+  const [actorPage,setActorPage] = useState(1);
+  const [selectedActor,setSelectedActor] = useState(null);
+  const [actionQuery,setActionQuery] = useState('');
+  const [actionType,setActionType] = useState('all');
+  const [actionPage,setActionPage] = useState(1);
+  const pageSize = 50;
+
+  const actorTypes = useMemo(() => ['all', ...Array.from(new Set((actors || []).map(a => a.actorType).filter(Boolean))).sort()], [actors]);
+  const actionTypes = useMemo(() => ['all', ...Array.from(new Set((actions || []).map(a => a.actionType).filter(Boolean))).sort()], [actions]);
+
+  const filteredActors = useMemo(() => {
+    const q = actorQuery.trim().toLowerCase();
+    return (actors || []).filter(a => {
+      if (actorType !== 'all' && a.actorType !== actorType) return false;
+      if (!q) return true;
+      return `${a.name || ''} ${a.username || ''} ${a.location || ''} ${a.galaxy || ''} ${a.currentAction || ''} ${a.status || ''} ${a.ship?.name || ''} ${a.ship?.role || ''}`.toLowerCase().includes(q);
+    });
+  }, [actors, actorQuery, actorType]);
+
+  const filteredActions = useMemo(() => {
+    const q = actionQuery.trim().toLowerCase();
+    return (actions || []).filter(a => {
+      if (actionType !== 'all' && a.actionType !== actionType) return false;
+      if (!q) return true;
+      return `${a.actor || ''} ${a.actionType || ''} ${a.source || ''} ${a.message || ''}`.toLowerCase().includes(q);
+    });
+  }, [actions, actionQuery, actionType]);
+
+  useEffect(() => setActorPage(1), [actorQuery, actorType, actors.length]);
+  useEffect(() => setActionPage(1), [actionQuery, actionType, actions.length]);
+
+  const actorSlice = paginate(filteredActors, actorPage, pageSize);
+  const actionSlice = paginate(filteredActions, actionPage, pageSize);
+
+  return <div className="adminConsoleStack">
+    <Panel title="Admin Actor Monitor" help="All players and NPCs. Page size is fixed at 50. Filters are client-side against the admin snapshot.">
+      <div className="adminTableToolbar">
+        <button className="primary" onClick={onRefresh}>Manual Refresh</button>
+        <input value={actorQuery} onChange={e=>setActorQuery(e.target.value)} placeholder="Filter actors, locations, actions, ships..." />
+        <select value={actorType} onChange={e=>setActorType(e.target.value)}>{actorTypes.map(x=><option key={x} value={x}>{label(x)}</option>)}</select>
+        <span>{fmt(filteredActors.length)} actors</span>
+      </div>
+      <AdminPager page={actorPage} setPage={setActorPage} total={filteredActors.length} pageSize={pageSize} />
+      <div className="adminTableWrap">
+        <table className="adminDataTable">
+          <thead><tr><th>Type</th><th>Name</th><th>Location</th><th>Current Action</th><th>Level</th><th>Ship</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {actorSlice.map(a => <tr key={a.id}>
+              <td><span className={`adminTypePill ${a.actorType}`}>{label(a.actorType)}</span></td>
+              <td><b>{a.name}</b><small>{a.username ? `@${a.username}` : `#${a.actorId}`}</small></td>
+              <td>{a.location || '—'}<small>{a.galaxy || ''}</small></td>
+              <td>{a.currentAction || '—'}</td>
+              <td>{fmt(a.level)}<small>XP {fmt(a.xp || 0)}</small></td>
+              <td>{a.ship?.name || '—'}<small>{label(a.ship?.role || a.ship?.className || '')} • CMB {fmt(a.ship?.combatRating || 0)}</small></td>
+              <td>{a.status || '—'}</td>
+              <td><button onClick={()=>setSelectedActor(a)}>Open Profile</button></td>
+            </tr>)}
+            {!actorSlice.length && <tr><td colSpan="8">No actors match the filter.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <AdminPager page={actorPage} setPage={setActorPage} total={filteredActors.length} pageSize={pageSize} />
+    </Panel>
+
+    <Panel title="Global Game Action Log" help="Merged admin feed. Displays the newest 500 events from player events, NPC actions, combat, and market transactions.">
+      <div className="adminTableToolbar">
+        <button className="primary" onClick={onRefresh}>Manual Refresh</button>
+        <input value={actionQuery} onChange={e=>setActionQuery(e.target.value)} placeholder="Filter action log..." />
+        <select value={actionType} onChange={e=>setActionType(e.target.value)}>{actionTypes.map(x=><option key={x} value={x}>{label(x)}</option>)}</select>
+        <span>{fmt(filteredActions.length)} actions</span>
+      </div>
+      <AdminPager page={actionPage} setPage={setActionPage} total={filteredActions.length} pageSize={pageSize} />
+      <div className="adminTableWrap">
+        <table className="adminDataTable">
+          <thead><tr><th>Time</th><th>Type</th><th>Actor</th><th>Source</th><th>Message</th></tr></thead>
+          <tbody>
+            {actionSlice.map(a => <tr key={a.id}>
+              <td>{a.createdAt ? new Date(a.createdAt).toLocaleString() : '—'}</td>
+              <td><span className="adminTypePill action">{label(a.actionType)}</span></td>
+              <td>{a.actor || 'System'}</td>
+              <td>{label(a.source || 'event')}</td>
+              <td>{a.message || '—'}</td>
+            </tr>)}
+            {!actionSlice.length && <tr><td colSpan="5">No actions match the filter.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      <AdminPager page={actionPage} setPage={setActionPage} total={filteredActions.length} pageSize={pageSize} />
+    </Panel>
+
+    {selectedActor && <AdminActorProfileModal actor={selectedActor} onClose={()=>setSelectedActor(null)} />}
+  </div>
+}
+
+function paginate(items, page, pageSize) {
+  const maxPage = Math.max(1, Math.ceil((items || []).length / pageSize));
+  const safePage = Math.max(1, Math.min(maxPage, page));
+  return (items || []).slice((safePage - 1) * pageSize, safePage * pageSize);
+}
+
+function AdminPager({page,setPage,total,pageSize}) {
+  const maxPage = Math.max(1, Math.ceil((total || 0) / pageSize));
+  const safePage = Math.max(1, Math.min(maxPage, page));
+  return <div className="adminPager">
+    <button disabled={safePage <= 1} onClick={()=>setPage(1)}>First</button>
+    <button disabled={safePage <= 1} onClick={()=>setPage(safePage - 1)}>Prev</button>
+    <span>Page {fmt(safePage)} / {fmt(maxPage)} • Show 50</span>
+    <button disabled={safePage >= maxPage} onClick={()=>setPage(safePage + 1)}>Next</button>
+    <button disabled={safePage >= maxPage} onClick={()=>setPage(maxPage)}>Last</button>
+  </div>
+}
+
+function AdminActorProfileModal({actor,onClose}) {
+  const stats = actor.stats || {};
+  const ship = actor.ship || {};
+  const profile = actor.profile || {};
+  return <div className="modalBackdrop">
+    <div className="adminActorModal panel">
+      <button className="modalClose" onClick={onClose}>Close</button>
+      <h2>{actor.name}</h2>
+      <div className="adminProfileGrid">
+        <div className="adminProfileHero">
+          <GameImage src="" assetType="ship" category={ship.role || ship.className || actor.actorType} alt={ship.name || actor.name} />
+          <div><b>{label(actor.actorType)} #{actor.actorId}</b><span>{actor.location || 'Unknown location'} • {actor.galaxy || 'Unknown galaxy'}</span><small>{actor.currentAction || 'Idle'}</small></div>
+        </div>
+        <div>
+          <h3>Profile</h3>
+          <Stats pairs={{
+            Username: actor.username || '—',
+            Role: profile.role || profile.career || actor.actorType,
+            Status: actor.status || '—',
+            Level: fmt(actor.level || 0),
+            XP: fmt(actor.xp || 0),
+            Target: profile.target || '—',
+            Disposition: profile.disposition || '—',
+            MarketBias: profile.marketBias || '—'
+          }} />
+        </div>
+        <div>
+          <h3>Ship</h3>
+          <Stats pairs={{
+            Name: ship.name || '—',
+            Class: ship.className || '—',
+            Role: label(ship.role || 'ship'),
+            Tier: ship.tier ? `T${ship.tier}` : '—',
+            Combat: fmt(ship.combatRating || 0),
+            Hull: `${fmt(ship.hull || 0)} / ${fmt(ship.maxHull || ship.hull || 0)}`,
+            Shield: `${fmt(ship.shield || 0)} / ${fmt(ship.maxShield || ship.shield || 0)}`,
+            Armor: fmt(ship.armor || 0)
+          }} />
+        </div>
+        <div>
+          <h3>Stats</h3>
+          <Stats pairs={{
+            Credits: fmt(stats.credits || 0),
+            Fuel: stats.maxFuel ? `${fmt(stats.fuel || 0)} / ${fmt(stats.maxFuel)}` : fmt(stats.fuel || 0),
+            Energy: stats.maxEnergy ? `${fmt(stats.energy || 0)} / ${fmt(stats.maxEnergy)}` : fmt(stats.energy || 0),
+            Cargo: stats.maxCargo ? `${fmt(stats.cargo || 0)} / ${fmt(stats.maxCargo)}` : fmt(stats.cargo || 0),
+            Health: stats.maxHealth ? `${fmt(stats.health || 0)} / ${fmt(stats.maxHealth)}` : fmt(stats.health || 0),
+            Heat: fmt(stats.heat || 0),
+            Power: fmt(stats.power || 0),
+            Aggression: fmt(stats.aggression || 0)
+          }} />
+        </div>
+      </div>
+      {stats.skills && <details className="defaultConfigPreview" open>
+        <summary>NPC Skills JSON</summary>
+        <pre>{JSON.stringify(stats.skills, null, 2)}</pre>
+      </details>}
+    </div>
+  </div>
+}
+
+
 
 function CargoOperationPanel({state}) {
   const c = state.cargo_operation || {};
@@ -2212,7 +3085,7 @@ function PirateStation({state,act,clock,setPage}) {
   </Page>;
 }
 
-function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanSite, onInvestigate, onEnterPirateStation, currentId, clock, mapMode, onMapModeChange, publicProfiles=[]}) {
+function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanSite, onInvestigate, onEnterPirateStation, onPlaceBase, onDockBase, onMissionTravel, currentId, clock, mapMode, onMapModeChange, publicProfiles=[]}) {
   const MAP_W = 12000;
   const MAP_H = 7800;
   const nodes = map.nodes || [];
@@ -2222,6 +3095,7 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
   const salvageIcons = map.salvage_icons || [];
   const explorationSites = map.exploration_sites || [];
   const pirateStations = map.pirate_stations || [];
+  const playerBases = map.player_bases || [];
   const warZones = map.war_zones || [];
   const summary = map.summary || {};
   const [zoom,setZoom] = useState(0.32);
@@ -2229,7 +3103,7 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
   const [selectedObject,setSelectedObject] = useState(null);
   const [profileModal,setProfileModal] = useState(null);
   const [context,setContext] = useState(null);
-  const [layers,setLayers] = useState({ships:true, hostiles:true, patrols:true, ore:true, wrecks:true, exploration:true, pirates:true, routes:true, danger:true, market:true});
+  const [layers,setLayers] = useState({ships:true, hostiles:true, patrols:true, ore:true, wrecks:true, exploration:true, pirates:true, bases:true, routes:true, danger:true, market:true});
   const viewportRef = useRef(null);
   const dragRef = useRef(null);
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
@@ -2269,9 +3143,25 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
   const objectKey = (obj) => obj?.objectKey || obj?.id || obj?.siteId || obj?.salvageSiteId || obj?.explorationSiteId || `${obj?.kind || 'object'}:${obj?.name || obj?.label || 'unknown'}`;
 
   const objectDisplayName = (obj) => obj?.realName || obj?.name || obj?.label || obj?.ship_name || 'Map target';
-  const targetPayload = (obj) => ({x_pct:obj.x_pct, y_pct:obj.y_pct, label:objectDisplayName(obj), map_type:type});
+  const isUninhabitableNode = (obj) => type === 'system' && !!obj && (obj.isUninhabitable || obj.is_uninhabitable || /uninhab|barren|toxic|frozen|volcanic|irradiated|gas giant|desert tomb/i.test(String(obj.type || '')));
   const needsApproach = (obj) => !!obj && obj.inActionRange === false;
-  const isSystemDockTarget = (obj) => type === 'system' && ['node','planet','station'].includes(String(obj?.kind || '').toLowerCase());
+  const approachPointFor = (obj) => {
+    if (!obj || !shipPoint || !needsApproach(obj)) return {x_pct:Number(obj?.x_pct ?? 50), y_pct:Number(obj?.y_pct ?? 50)};
+    const tx = Number(obj.x_pct ?? 50);
+    const ty = Number(obj.y_pct ?? 50);
+    const sx = Number(shipPoint.x ?? shipPoint.x_pct ?? 50);
+    const sy = Number(shipPoint.y ?? shipPoint.y_pct ?? 50);
+    const dx = sx - tx;
+    const dy = sy - ty;
+    const dist = Math.sqrt(dx*dx + dy*dy) || 0.0001;
+    const stopRadius = Math.max(1.85, Math.min(3.25, Number(obj.actionRangePct || 2.4))) * 0.88;
+    return {x_pct:clampNum(tx + (dx / dist) * stopRadius, 1, 99), y_pct:clampNum(ty + (dy / dist) * stopRadius, 1, 99)};
+  };
+  const targetPayload = (obj) => {
+    const pt = approachPointFor(obj);
+    return {x_pct:pt.x_pct, y_pct:pt.y_pct, label:objectDisplayName(obj), map_type:type};
+  };
+  const isSystemDockTarget = (obj) => type === 'system' && ['node','planet','station'].includes(String(obj?.kind || '').toLowerCase()) && !isUninhabitableNode(obj);
   const trafficForView = traffic
     .filter(t => t?.id !== 'player:self' && t?.kind !== 'self' && !t?.self)
     .map(t => {
@@ -2286,7 +3176,7 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
       const pt = lerpPoint(origin, dest, pct);
       return {...t, x_pct:pt.x, y_pct:pt.y, progress:Math.round(pct * 1000) / 10, label:t.npcObjectiveLabel ? `${t.npcObjectiveLabel}: moving smoothly to objective.` : t.label};
     });
-  const allObjects = [...nodes.map(n => ({...n, kind:n.kind || 'node'})), ...trafficForView, ...oreSites, ...salvageIcons, ...explorationSites, ...pirateStations, ...warZones];
+  const allObjects = [...nodes.map(n => ({...n, kind:n.kind || 'node'})), ...trafficForView, ...oreSites, ...salvageIcons, ...explorationSites, ...pirateStations, ...playerBases, ...warZones];
   const selectedLiveObject = selectedObject && selectedObject.kind !== 'blank' ? allObjects.find(o => objectKey(o) === objectKey(selectedObject)) : selectedObject;
 
   useEffect(() => {
@@ -2336,7 +3226,27 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
   };
   const closeContext = () => setContext(null);
   const run = (fn, arg) => { closeContext(); if (fn) fn(arg); };
+  const clampPanForZoom = (candidate, nextZoom) => ({
+    x: clampNum(candidate.x, -(MAP_W * nextZoom) + 340, 260),
+    y: clampNum(candidate.y, -(MAP_H * nextZoom) + 260, 220)
+  });
   const resetView = () => { setZoom(0.32); setPan({x:20,y:18}); };
+  const zoomToAnchor = (nextZoom, clientX, clientY) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    const ax = Number.isFinite(clientX) && rect ? clientX - rect.left : (rect?.width || 1200) / 2;
+    const ay = Number.isFinite(clientY) && rect ? clientY - rect.top : (rect?.height || 760) / 2;
+    const mapX = (ax - pan.x) / Math.max(zoom, 0.001);
+    const mapY = (ay - pan.y) / Math.max(zoom, 0.001);
+    const z = clampNum(+Number(nextZoom).toFixed(3), .10, 1.75);
+    setZoom(z);
+    setPan(clampPanForZoom({x:ax - mapX * z, y:ay - mapY * z}, z));
+  };
+  const zoomBy = (delta, anchor='center', event=null) => {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    const cx = anchor === 'mouse' && event ? event.clientX : (rect ? rect.left + rect.width / 2 : undefined);
+    const cy = anchor === 'mouse' && event ? event.clientY : (rect ? rect.top + rect.height / 2 : undefined);
+    zoomToAnchor(zoom + delta, cx, cy);
+  };
   const centerOnPct = (pt, nextZoom = 1.0) => {
     const rect = viewportRef.current?.getBoundingClientRect();
     const vw = rect?.width || 1200;
@@ -2344,10 +3254,10 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
     const x = (Number(pt?.x_pct ?? pt?.x ?? 50) / 100) * MAP_W;
     const y = (Number(pt?.y_pct ?? pt?.y ?? 50) / 100) * MAP_H;
     setZoom(nextZoom);
-    setPan({
-      x: clampNum(vw / 2 - x * nextZoom, -(MAP_W * nextZoom) + 340, 260),
-      y: clampNum(vh / 2 - y * nextZoom, -(MAP_H * nextZoom) + 260, 220)
-    });
+    setPan(clampPanForZoom({
+      x: vw / 2 - x * nextZoom,
+      y: vh / 2 - y * nextZoom
+    }, nextZoom));
   };
   const centerMyShip = (select = false) => {
     if (shipPoint) {
@@ -2376,18 +3286,11 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
     if (d.moved) setPan({x:clampNum(d.panX + dx, -(MAP_W * zoom) + 340, 260), y:clampNum(d.panY + dy, -(MAP_H * zoom) + 260, 220)});
   };
   const onMouseUp = (e) => { const d = dragRef.current; dragRef.current = null; if (!d?.moved) openBlankContext(e); };
-  const onWheel = (e) => { e.preventDefault(); e.stopPropagation(); const delta = e.deltaY < 0 ? 0.05 : -0.05; setZoom(z => clampNum(+(z + delta).toFixed(2), .10, 1.75)); };
-
-  useEffect(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const stopWheel = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-    };
-    el.addEventListener('wheel', stopWheel, {passive:false});
-    return () => el.removeEventListener('wheel', stopWheel);
-  }, []);
+  const onWheel = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    zoomBy(e.deltaY < 0 ? 0.075 : -0.075, 'mouse', e);
+  };
 
   const isPatrol = (t) => ['patrol','security_pilot','marshal'].includes(String(t.role || '').toLowerCase());
   const visibleTraffic = trafficForView.filter(t => layers.ships && (layers.hostiles || !t.hostile) && (layers.patrols || !isPatrol(t)));
@@ -2402,20 +3305,20 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
     <div className="mapToolbar enhancedMapToolbar">
       <button className={type==='system' ? 'active' : ''} onClick={()=>onMapModeChange && onMapModeChange('system')}>System</button>
       <button className={type==='galaxy' ? 'active' : ''} onClick={()=>onMapModeChange && onMapModeChange('galaxy')}>Galaxy</button>
-      <button onClick={()=>setZoom(z=>clampNum(+(z-0.05).toFixed(2),.10,1.75))}>Zoom -</button>
+      <button onClick={()=>zoomBy(-0.075, 'center')}>Zoom -</button>
       <button onClick={resetView}>Reset</button>
       <button className="findShipBtn" onClick={findMyShip}>Find My Ship</button>
-      <button onClick={()=>setZoom(z=>clampNum(+(z+0.05).toFixed(2),.10,1.75))}>Zoom +</button>
-      <span>{summary.ships_in_transit ?? traffic.length} ships • {summary.ore_signatures ?? oreSites.length} ore • {summary.wrecks ?? salvageIcons.length} wrecks • {summary.ancient_sites ?? explorationSites.length} ancient • {summary.pirate_stations ?? pirateStations.length} pirate stations • {summary.hostile_contacts ?? traffic.filter(t=>t.hostile).length} hostile</span>
+      <button onClick={()=>zoomBy(0.075, 'center')}>Zoom +</button>
+      <span>{summary.ships_in_transit ?? traffic.length} ships • {summary.ore_signatures ?? oreSites.length} ore • {summary.wrecks ?? salvageIcons.length} wrecks • {summary.ancient_sites ?? explorationSites.length} ancient • {summary.pirate_stations ?? pirateStations.length} pirate stations • {playerBases.length} bases • {summary.hostile_contacts ?? traffic.filter(t=>t.hostile).length} hostile</span>
       <span>Activity: {label(travel?.active ? travel.mode : 'idle')} {travel?.active ? `• ${clockTimeLeft(travel.arrival_at)}` : ''}</span>{travel?.route_final_galaxy_name && <span>Route: segment {fmt((travel.route_segment_index || 0) + 1)} / {fmt((travel.route_segments || []).length || 1)} → {travel.route_final_galaxy_name}</span>}
       <span>Risk: {summary.risk_band || label(summary.route_risk || 'unknown')} • Security {fmt(summary.security_level ?? 0)}</span>
       <span>Radar: {fmt(summary.radar_range_pct || 0)}% radius • Hidden {fmt(summary.hidden_by_radar || 0)}</span>
       <span>NPCs: weighted objectives, radar-limited awareness</span>
     </div>
     <div className="mapInsightStrip"><b>{type === 'galaxy' ? 'Galaxy Overview' : 'System Opportunities'}</b><span>{regionSummary}</span>{(summary.nearby_opportunities || []).slice(0,4).map(x=><em key={x}>{x}</em>)}</div>
-    <div className="mapLayerToggles phase23bLayers">{layerButton('ships','Ships')}{layerButton('hostiles','Hostiles')}{layerButton('patrols','Patrols')}{layerButton('ore','Ore')}{layerButton('wrecks','Wrecks')}{layerButton('exploration','Ancient Sites')}{layerButton('pirates','Pirate Stations')}{layerButton('routes','Routes')}{layerButton('danger','Danger')}{layerButton('market','Market')}</div>
+    <div className="mapLayerToggles phase23bLayers">{layerButton('ships','Ships')}{layerButton('hostiles','Hostiles')}{layerButton('patrols','Patrols')}{layerButton('ore','Ore')}{layerButton('wrecks','Wrecks')}{layerButton('exploration','Ancient Sites')}{layerButton('pirates','Pirate Stations')}{layerButton('bases','Bases')}{layerButton('routes','Routes')}{layerButton('danger','Danger')}{layerButton('market','Market')}</div>
     <div className={`mapViewport ${zoomClass}`} ref={viewportRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={()=>{dragRef.current=null}} onWheel={onWheel} onWheelCapture={onWheel} onClick={()=>{}}>
-      <div className={`infoMap ${type}Map openWorldMap mapWorld`} style={{width:MAP_W, height:MAP_H, minWidth:MAP_W, minHeight:MAP_H, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`}}>
+      <div className={`infoMap ${type}Map openWorldMap mapWorld`} style={{width:MAP_W, height:MAP_H, minWidth:MAP_W, minHeight:MAP_H, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin:'0 0'}}>
         {type === 'system' && layers.danger && nodes.map(n => Number(n.risk_level || 0) >= 45 ? <span key={`danger-${n.id}`} className={`dangerZone ${Number(n.risk_level || 0) >= 70 ? 'extreme' : 'high'}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} /> : null)}
         {type === 'system' && layers.market && nodes.map(n => <span key={`market-${n.id}`} className="marketPulse" style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} title={`Legal ${n.legal_market_strength || 0} / Illicit ${n.illicit_market_strength || 0}`} />)}
         {radarRange > 0 && <span className="playerRadarRing" style={{left:`${radarCenter.x}%`, top:`${radarCenter.y}%`, width:`${radarDiameterPx}px`, height:`${radarDiameterPx}px`}} title={`Your radar range: ${radarRange}% map radius`} />}
@@ -2425,13 +3328,14 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
         {nodes.map(n => {
           const isCurrentNode = !!(n.current || n.id===currentId);
           const isDockedNode = isCurrentNode && !travel?.open_space;
-          return <button key={n.id} className={`mapNode ${n.kind === 'gate' ? 'gateNode' : ''} ${isCurrentNode ? 'current' : ''} ${isDockedNode ? 'dockedCurrent' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} title={`${n.name} • ${type === 'galaxy' ? `${n.faction_name || 'Neutral'} control` : n.kind === 'gate' ? 'Galaxy gate' : `Risk ${n.risk_level}`}`}><GameImage src={n.image_url} assetType={n.kind === 'gate' ? 'item' : type === 'galaxy' ? 'galaxy' : (n.type === 'station' ? 'station' : 'planet')} category={n.economy_type || n.type || n.kind} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : n.kind === 'gate' ? <span>Jump lane • adjacent galaxy</span> : <span>SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>
+          return <button key={n.id} className={`mapNode ${n.kind === 'gate' ? 'gateNode' : ''} ${isUninhabitableNode(n) ? 'uninhabitableNode' : ''} ${isCurrentNode ? 'current' : ''} ${isDockedNode ? 'dockedCurrent' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} title={`${n.name} • ${type === 'galaxy' ? `${n.faction_name || 'Neutral'} control` : n.kind === 'gate' ? 'Galaxy gate' : `Risk ${n.risk_level}`}`}><GameImage src={n.image_url} assetType={n.kind === 'gate' ? 'item' : type === 'galaxy' ? 'galaxy' : (String(n.type || '').toLowerCase().includes('station') || String(n.type || '').toLowerCase().includes('freeport') ? 'station' : 'planet')} category={n.economy_type || n.type || n.kind} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : n.kind === 'gate' ? <span>Jump lane • adjacent galaxy</span> : isUninhabitableNode(n) ? <span>Uninhabitable planet • Missions only • RISK {n.risk_level}</span> : <span>SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>
         })}
         {shipPoint && <button className={`shipMarker selfShip ${travel?.mode === 'intercept' ? 'intercepting' : ''} ${!travel?.active && travel?.open_space ? 'parkedOpenSpace' : ''}`} style={{left:`${shipPoint.x}%`, top:`${shipPoint.y}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,{kind:'self', name:travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label:travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : (travel?.open_space ? 'Holding position in open space.' : 'You are traveling in open space.'), progress:Math.round(progress*100)})}><GameImage className="selfShipImg" src="" assetType="ship" category={travel?.mode === 'intercept' ? 'interceptor combat' : 'player explorer'} alt="Your ship" /><span>{travel?.active ? `${Math.round(progress*100)}%` : 'YOU'}</span></button>}
         {visibleTraffic.map(t => <button key={t.id} className={`trafficShip ${t.kind || 'npc'} ${t.hostile ? 'hostile' : ''} ${isPatrol(t) ? 'patrol' : ''}`} style={{left:`${t.x_pct}%`, top:`${t.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,t)} title={t.label}><GameImage src="" assetType="ship" category={t.role || t.kind || t.name || (t.hostile ? 'combat' : 'exploration')} alt={t.name || t.label || 'Transit ship'} /><em>{t.npcObjective ? label(t.npcObjective).slice(0,7) : `${Math.round(t.progress || 0)}%`}</em></button>)}
         {layers.ore && oreSites.map(o => <button key={o.id} className="resourceNode oreNode" style={{left:`${o.x_pct}%`, top:`${o.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,o)} title={o.label}><GameImage src={o.image_url} assetType="material" category={o.kind || o.resource_type || 'ore'} alt={o.name || 'Ore signature'} /><em>T{o.tier}</em></button>)}
         {layers.wrecks && salvageIcons.map(w => <button key={w.id} className="resourceNode salvageNode" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} title={w.label}><GameImage src={w.image_url} assetType="material" category={w.kind || 'salvage wreck'} alt={w.ship_name || 'Wreck'} /><em>T{w.ship_tier}</em></button>)}
         {layers.exploration && explorationSites.map(site => <button key={site.id} className={`resourceNode explorationNode ${site.signalState || 'unknown'} ${Number(site.signalQuality || 0) >= 70 ? 'highQuality' : ''}`} style={{left:`${site.x_pct}%`, top:`${site.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,site)} title={site.label}><GameImage src={site.image_url} assetType="material" category={site.kind || 'ancient exploration'} alt={site.realName || site.name || 'Ancient site'} /><em>Q{fmt(site.signalQuality ?? site.rewardTier)}</em></button>)}
+        {layers.bases && playerBases.map(b => <button key={b.id} className={`resourceNode playerBaseNode ${b.ownBase ? 'ownBase' : ''}`} style={{left:`${b.x_pct}%`, top:`${b.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,b)} title={b.label}><GameImage src={b.image_url} assetType="station" category="player base" alt={b.name || 'Player base'} /><em>{b.ownBase ? 'BASE' : 'PRIV'}</em></button>)}
         {layers.pirates && pirateStations.map(st => <button key={st.id} className={`resourceNode pirateStationNode ${st.locked ? 'locked' : ''}`} style={{left:`${st.x_pct}%`, top:`${st.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,st)} title={st.label}><GameImage src={st.image_url} assetType="station" category="pirate station" alt={st.name || 'Pirate station'} /><em>{fmt(st.resourcePct ?? st.resource_pct)}%</em></button>)}
       </div>
     </div>
@@ -2439,31 +3343,35 @@ function MapView({type, map, travel, onTravel, onCancelTravel, onIntercept, onRe
       {context.kind === 'blank' && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:'Open-space waypoint',map_type:type})}>Go Here</button>}
       {context.kind === 'blank' && travel?.active && <button className="dangerBtn" disabled={!onCancelTravel} onClick={()=>run(onCancelTravel,{})}>Cancel Current Travel</button>}
       {context.kind === 'blank' && <button disabled={travelBlocked || !onScanArea} onClick={()=>run(onScanArea,{x_pct:context.x_pct,y_pct:context.y_pct,map_type:type})}>Scan Area</button>}
+      {type === 'system' && context.kind === 'blank' && <button disabled={travelBlocked || !onPlaceBase} onClick={()=>run(onPlaceBase,{x_pct:context.x_pct,y_pct:context.y_pct})}>Build Base Here</button>}
       {isSystemDockTarget(context) && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect</button>}
       {type === 'galaxy' && context.kind === 'node' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect</button>}
+      {isUninhabitableNode(context) && <div className="missionContextGroup"><b>Uninhabitable Planet Missions</b>{(context.mission_contracts || []).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>run(()=>onMissionTravel(context,m),{})}>{m.name} • {fmt(m.minutes)}m</button>)}{!(context.mission_contracts || []).length && <button disabled>No missions available</button>}</div>}
       {isSystemDockTarget(context) && (context.current || context.id===currentId) && travel?.open_space && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:context.kind || 'planet'})}>Dock Here</button>}
       {isSystemDockTarget(context) && !(context.current || context.id===currentId) && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:context.kind || 'planet'})}>Dock Here</button>}
       {type === 'galaxy' && context.kind === 'node' && !(context.current || context.id===currentId) && <button disabled={travelBlocked} onClick={()=>run(onTravel,context)}>Jump Here</button>}
       {type === 'system' && context.kind === 'gate' && (context.current || context.id===currentId) && travel?.open_space && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:'planet'})}>Dock Here</button>}
       {context.kind === 'gate' && <button disabled={travelBlocked} onClick={()=>run(onTravel,context)}>Jump Gate</button>}
+      {context.kind === 'player_base' && context.ownBase && <button disabled={travelBlocked || !onDockBase} onClick={()=>run(onDockBase,context)}>Dock At My Base</button>}
+      {context.kind === 'player_base' && !context.ownBase && <button disabled title="Private player base. Cannot dock or attack.">Private Base</button>}
       {(context.kind === 'npc' || context.kind === 'player' || context.attackable) && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Ship</button>}
       {context.attackable && context.canAttack !== false && <button className="dangerBtn" onClick={()=>run(onIntercept,context)}>Intercept / Attack</button>}
       {context.kind === 'ore' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Ore</button>}
       {context.kind === 'ore' && <button disabled={travelBlocked} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.name || 'Ore signature'})}>{needsApproach(context) ? 'Approach Ore' : 'Plot Course to Node'}</button>}
-      {context.kind === 'ore' && context.canMine !== false && <button disabled={travelBlocked} onClick={()=>run(onMine,context)}>Mine</button>}
+      {context.kind === 'ore' && context.canMine !== false && <button disabled={travelBlocked} onClick={()=>needsApproach(context) ? run(onGoHere,targetPayload(context)) : run(onMine,context)}>{needsApproach(context) ? 'Approach to Mine' : 'Mine'}</button>}
       {context.kind === 'salvage' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Wreck</button>}
       {context.kind === 'salvage' && <button disabled={travelBlocked} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.ship_name || 'Wreck'})}>{needsApproach(context) ? 'Approach Wreck' : 'Plot Course to Wreck'}</button>}
-      {context.kind === 'salvage' && context.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>run(onSalvage,context)}>Salvage</button>}
+      {context.kind === 'salvage' && context.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>needsApproach(context) ? run(onGoHere,targetPayload(context)) : run(onSalvage,context)}>{needsApproach(context) ? 'Approach to Salvage' : 'Salvage'}</button>}
       {context.kind === 'exploration' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Signal</button>}
       {context.kind === 'exploration' && <button disabled={travelBlocked} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.realName || context.name || 'Ancient site'})}>{needsApproach(context) ? 'Approach Site' : 'Plot Course to Site'}</button>}
-      {context.kind === 'exploration' && context.canScan !== false && <button disabled={travelBlocked} onClick={()=>run(onScanSite,context)}>Scan Site</button>}
-      {context.kind === 'exploration' && context.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>run(onInvestigate,context)}>Investigate</button>}
+      {context.kind === 'exploration' && context.canScan !== false && <button disabled={travelBlocked} onClick={()=>needsApproach(context) ? run(onGoHere,targetPayload(context)) : run(onScanSite,context)}>{needsApproach(context) ? 'Approach to Scan' : 'Scan Site'}</button>}
+      {context.kind === 'exploration' && context.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>needsApproach(context) ? run(onGoHere,targetPayload(context)) : run(onInvestigate,context)}>{needsApproach(context) ? 'Approach to Investigate' : 'Investigate'}</button>}
       {context.kind === 'pirate_station' && <button onClick={()=>{setSelectedObject(context); closeContext();}}>Inspect Station</button>}
       {context.kind === 'pirate_station' && needsApproach(context) && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,targetPayload(context))}>Approach Station</button>}
       {context.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || context.locked || !onEnterPirateStation || needsApproach(context)} onClick={()=>run(onEnterPirateStation,context)}>{context.locked ? 'Station At Capacity' : 'Enter Station'}</button>}
       {context.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.name,map_type:'galaxy'})}>{needsApproach(context) ? 'Approach Capture Ring' : 'Enter Capture Ring'}</button>}
       <button onClick={closeContext}>Cancel</button></div></div>}
-    {selected && selected.kind !== 'blank' && <div className="mapInspectOverlay" onMouseDown={()=>setSelectedObject(null)}><div className="mapObjectPanel phase23bObjectPanel mapInspectModal" style={{left:Math.min((selected.screenX || 420)+18, window.innerWidth-520), top:Math.min((selected.screenY || 180)+18, window.innerHeight-520)}} onMouseDown={e=>e.stopPropagation()}><button className="modalX mapInspectX" onClick={()=>setSelectedObject(null)}>×</button><div className="mapObjectHeader mapObjectHeaderVisual">{selected.kind === 'player' ? <ProfileAvatar profile={findPublicProfile(publicProfiles, selected) || {displayName:selected.name, selectedBadgeCode:selected.selectedBadgeCode}} src={findPublicProfile(publicProfiles, selected)?.avatarUrl} size="md" onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }} /> : <GameImage src={selected.kind === 'npc' || selected.attackable ? '' : selected.image_url} assetType={selected.kind === 'npc' || selected.attackable ? 'ship' : selected.kind === 'node' ? (type === 'galaxy' ? 'galaxy' : (selected.type === 'station' ? 'station' : 'planet')) : selected.kind === 'ore' || selected.kind === 'salvage' || selected.kind === 'exploration' ? 'material' : 'item'} category={selected.role || selected.kind || selected.type || selected.economy_type} alt={selected.name || selected.realName || selected.label || selected.ship_name} />}<div><b>{selected.name || selected.realName || selected.label || selected.ship_name}</b><span>{label(selected.kind || selected.role || 'object')} • {selected.statusText || selected.label || ''}</span></div></div><div className="mapMetaGrid"><span>Risk <b>{selected.riskBand || fmt(selected.riskLevel ?? selected.risk_level ?? selected.route_danger ?? 0)}</b></span><span>Reward <b>{selected.rewardHint || `T${fmt(selected.rewardTier ?? selected.tier ?? selected.ship_tier ?? 0)}`}</b></span><span>State <b>{label(selected.signalState || selected.kind || selected.role || 'known')}</b></span><span>ETA <b>{travel?.active ? clockTimeLeft(travel.arrival_at) : 'Idle'}</b></span><span>Radar <b>{selected.radarDistancePct !== undefined ? `${fmt(selected.radarDistancePct)} / ${fmt(selected.radarRangePct || summary.radar_range_pct)}%` : `${fmt(summary.radar_range_pct || 0)}%`}</b></span><span>Range <b>{selected.rangeLabel || (selected.inActionRange === false ? 'Out of Range' : selected.inActionRange === true ? 'In Range' : '—')}</b></span></div><div className="selectedSummary">{selected.selectedSummary || selected.outcomeFactors || 'No extra intel yet. Scan, inspect, or approach for better data.'}</div>{selected.dangerHint && <div className="mapWarningLine">{selected.dangerHint}</div>}{selected.npcObjectiveLabel && <div className="npcObjectiveBox"><b>NPC Objective</b><span>{selected.npcObjectiveLabel}</span><small>{selected.npcObjectiveState || selected.npcRadarBehavior}</small>{selected.npcObjectiveTargetName && <small>Target: {selected.npcObjectiveTargetName}</small>}</div>}{selected.kind === 'npc' && <div className="npcLifeBox"><span>Level <b>{fmt(selected.npcLevel || 1)}</b></span><span>XP <b>{fmt(selected.npcXp || 0)}</b></span><span>Gen <b>{fmt(selected.npcGeneration || 1)}</b></span><span>Deaths <b>{fmt(selected.npcDeathCount || 0)}</b></span>{selected.npcSkills && Object.entries(selected.npcSkills).slice(0,5).map(([k,v])=><em key={k}>{label(k)} {fmt(v)}</em>)}</div>}{selected.npcVisibleCounts && <div className="npcRadarCounts"><span>Radar sees ships <b>{fmt(selected.npcVisibleCounts.ship || 0)}</b></span><span>ore <b>{fmt(selected.npcVisibleCounts.ore || 0)}</b></span><span>wrecks <b>{fmt(selected.npcVisibleCounts.salvage || 0)}</b></span><span>ancient <b>{fmt(selected.npcVisibleCounts.exploration || 0)}</b></span></div>}{selected.disabledReason && <div className="mapWarningLine">{selected.disabledReason}</div>}{selected.outcomeFactors && <small>Factors: {selected.outcomeFactors}</small>}<div className="buttonRow">{selected.inActionRange === false && ['ore','salvage','exploration','pirate_station','war_zone'].includes(selected.kind) && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere(targetPayload(selected))}>Approach</button>}{isSystemDockTarget(selected) && !(selected.current && !travel?.open_space) && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel({...selected, kind:selected.kind || 'planet'})}>Dock</button>}{selected.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel(selected)}>Jump Gate</button>}{selected.attackable && selected.canAttack !== false && selected.inActionRange !== false && <button className="dangerBtn" onClick={()=>onIntercept && onIntercept(selected)}>Intercept / Attack</button>}{selected.kind === 'ore' && selected.canMine !== false && <button disabled={travelBlocked} onClick={()=>onMine && onMine(selected)}>Mine • Energy {fmt(selected.energyCost)}</button>}{selected.kind === 'salvage' && selected.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>onSalvage && onSalvage(selected)}>Salvage • Energy {fmt(selected.energy_cost)}</button>}{selected.kind === 'exploration' && selected.canScan !== false && <button disabled={travelBlocked} onClick={()=>onScanSite && onScanSite(selected)}>Scan • Energy {fmt(selected.scanEnergy)}</button>}{selected.kind === 'exploration' && selected.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>onInvestigate && onInvestigate(selected)}>Investigate • Energy {fmt(selected.investigateEnergy)}</button>}{selected.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || selected.locked || !onEnterPirateStation || selected.inActionRange === false} onClick={()=>onEnterPirateStation && onEnterPirateStation(selected)}>{selected.locked ? 'Occupied' : 'Enter Station'}</button>}{selected.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere({x_pct:selected.x_pct,y_pct:selected.y_pct,label:selected.name,map_type:'galaxy'})}>Enter Capture Ring</button>}{selected.kind === 'player' && findPublicProfile(publicProfiles, selected) && <button onClick={()=>setProfileModal(findPublicProfile(publicProfiles, selected))}>View Profile</button>}<button onClick={()=>setSelectedObject(null)}>Close</button></div><small>{selected.kind === 'exploration' ? 'Exploration is uncertain by design: scanning improves quality, modules improve analysis, hazard gear lowers trap damage, and bad sites can still produce nothing.' : selected.kind === 'npc' || selected.attackable ? 'Interceptions occur in open space. Planetary defense does not respond once ships are away from the planet.' : ''}</small></div></div>}
+    {selected && selected.kind !== 'blank' && <div className="mapInspectOverlay" onMouseDown={()=>setSelectedObject(null)}><div className="mapObjectPanel phase23bObjectPanel mapInspectModal" style={{left:Math.min((selected.screenX || 420)+18, window.innerWidth-520), top:Math.min((selected.screenY || 180)+18, window.innerHeight-520)}} onMouseDown={e=>e.stopPropagation()}><button className="modalX mapInspectX" onClick={()=>setSelectedObject(null)}>×</button><div className="mapObjectHeader mapObjectHeaderVisual">{selected.kind === 'player' ? <ProfileAvatar profile={findPublicProfile(publicProfiles, selected) || {displayName:selected.name, selectedBadgeCode:selected.selectedBadgeCode}} src={findPublicProfile(publicProfiles, selected)?.avatarUrl} size="md" onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }} /> : <GameImage src={selected.kind === 'npc' || selected.attackable ? '' : selected.image_url} assetType={selected.kind === 'npc' || selected.attackable ? 'ship' : selected.kind === 'node' ? (type === 'galaxy' ? 'galaxy' : (selected.type === 'station' ? 'station' : 'planet')) : selected.kind === 'ore' || selected.kind === 'salvage' || selected.kind === 'exploration' ? 'material' : 'item'} category={selected.role || selected.kind || selected.type || selected.economy_type} alt={selected.name || selected.realName || selected.label || selected.ship_name} />}<div><b>{selected.name || selected.realName || selected.label || selected.ship_name}</b><span>{label(selected.kind || selected.role || 'object')} • {selected.statusText || selected.label || ''}</span></div></div><div className="mapMetaGrid"><span>Risk <b>{selected.riskBand || fmt(selected.riskLevel ?? selected.risk_level ?? selected.route_danger ?? 0)}</b></span><span>Reward <b>{selected.rewardHint || `T${fmt(selected.rewardTier ?? selected.tier ?? selected.ship_tier ?? 0)}`}</b></span><span>State <b>{label(selected.signalState || selected.kind || selected.role || 'known')}</b></span><span>ETA <b>{travel?.active ? clockTimeLeft(travel.arrival_at) : 'Idle'}</b></span><span>Radar <b>{selected.radarDistancePct !== undefined ? `${fmt(selected.radarDistancePct)} / ${fmt(selected.radarRangePct || summary.radar_range_pct)}%` : `${fmt(summary.radar_range_pct || 0)}%`}</b></span><span>Range <b>{selected.rangeLabel || (selected.inActionRange === false ? 'Out of Range' : selected.inActionRange === true ? 'In Range' : '—')}</b></span></div><div className="selectedSummary">{selected.selectedSummary || selected.outcomeFactors || 'No extra intel yet. Scan, inspect, or approach for better data.'}</div>{selected.dangerHint && <div className="mapWarningLine">{selected.dangerHint}</div>}{selected.npcObjectiveLabel && <div className="npcObjectiveBox"><b>NPC Objective</b><span>{selected.npcObjectiveLabel}</span><small>{selected.npcObjectiveState || selected.npcRadarBehavior}</small>{selected.npcObjectiveTargetName && <small>Target: {selected.npcObjectiveTargetName}</small>}</div>}{selected.kind === 'npc' && <div className="npcLifeBox"><span>Level <b>{fmt(selected.npcLevel || 1)}</b></span><span>XP <b>{fmt(selected.npcXp || 0)}</b></span><span>Gen <b>{fmt(selected.npcGeneration || 1)}</b></span><span>Deaths <b>{fmt(selected.npcDeathCount || 0)}</b></span>{selected.npcSkills && Object.entries(selected.npcSkills).slice(0,5).map(([k,v])=><em key={k}>{label(k)} {fmt(v)}</em>)}</div>}{selected.npcVisibleCounts && <div className="npcRadarCounts"><span>Radar sees ships <b>{fmt(selected.npcVisibleCounts.ship || 0)}</b></span><span>ore <b>{fmt(selected.npcVisibleCounts.ore || 0)}</b></span><span>wrecks <b>{fmt(selected.npcVisibleCounts.salvage || 0)}</b></span><span>ancient <b>{fmt(selected.npcVisibleCounts.exploration || 0)}</b></span></div>}{selected.disabledReason && <div className="mapWarningLine">{selected.disabledReason}</div>}{selected.outcomeFactors && <small>Factors: {selected.outcomeFactors}</small>}<div className="buttonRow">{selected.inActionRange === false && ['ore','salvage','exploration','pirate_station','war_zone'].includes(selected.kind) && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere(targetPayload(selected))}>Approach</button>}{isUninhabitableNode(selected) && (selected.mission_contracts || []).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>onMissionTravel && onMissionTravel(selected,m)}>{m.name} • Land & Start</button>)}{isSystemDockTarget(selected) && !(selected.current && !travel?.open_space) && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel({...selected, kind:selected.kind || 'planet'})}>Dock</button>}{selected.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel(selected)}>Jump Gate</button>}{selected.attackable && selected.canAttack !== false && selected.inActionRange !== false && <button className="dangerBtn" onClick={()=>onIntercept && onIntercept(selected)}>Intercept / Attack</button>}{selected.kind === 'ore' && selected.canMine !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onMine && onMine(selected))}>{selected.inActionRange === false ? 'Approach to Mine' : `Mine • Energy ${fmt(selected.energyCost)}`}</button>}{selected.kind === 'salvage' && selected.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onSalvage && onSalvage(selected))}>{selected.inActionRange === false ? 'Approach to Salvage' : `Salvage • Energy ${fmt(selected.energy_cost)}`}</button>}{selected.kind === 'exploration' && selected.canScan !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onScanSite && onScanSite(selected))}>{selected.inActionRange === false ? 'Approach to Scan' : `Scan • Energy ${fmt(selected.scanEnergy)}`}</button>}{selected.kind === 'exploration' && selected.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onInvestigate && onInvestigate(selected))}>{selected.inActionRange === false ? 'Approach to Investigate' : `Investigate • Energy ${fmt(selected.investigateEnergy)}`}</button>}{selected.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || selected.locked || !onEnterPirateStation || selected.inActionRange === false} onClick={()=>onEnterPirateStation && onEnterPirateStation(selected)}>{selected.locked ? 'Occupied' : 'Enter Station'}</button>}{selected.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere({x_pct:selected.x_pct,y_pct:selected.y_pct,label:selected.name,map_type:'galaxy'})}>Enter Capture Ring</button>}{selected.kind === 'player' && findPublicProfile(publicProfiles, selected) && <button onClick={()=>setProfileModal(findPublicProfile(publicProfiles, selected))}>View Profile</button>}<button onClick={()=>setSelectedObject(null)}>Close</button></div><small>{selected.kind === 'exploration' ? 'Exploration is uncertain by design: scanning improves quality, modules improve analysis, hazard gear lowers trap damage, and bad sites can still produce nothing.' : selected.kind === 'npc' || selected.attackable ? 'Interceptions occur in open space. Planetary defense does not respond once ships are away from the planet.' : ''}</small></div></div>}
     <PublicProfileModal profile={profileModal} onClose={()=>setProfileModal(null)} />
   </div>;
 }

@@ -1,0 +1,19 @@
+Nova Frontiers full current source export.
+
+Use this if your local project is behind by many patches.
+
+Excluded:
+- node_modules
+- frontend build outputs
+- virtual environments
+- git metadata
+- caches
+
+After extracting over your project:
+1. git status
+2. npm install inside frontend if needed
+3. python -m py_compile backend/app/main.py
+4. cd frontend && npm run build
+5. git add .
+6. git commit -m "Apply current Nova Frontiers updates"
+7. git push

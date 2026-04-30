@@ -1,0 +1,23 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'>
+<defs>
+  <radialGradient id='bg' cx='32%' cy='24%' r='78%'>
+    <stop offset='0%' stop-color='#ff8a3d' stop-opacity='.30'/>
+    <stop offset='40%' stop-color='#132033'/>
+    <stop offset='100%' stop-color='#05070c'/>
+  </radialGradient>
+  <linearGradient id='rim' x1='0' y1='0' x2='1' y2='1'>
+    <stop offset='0%' stop-color='#ff8a3d' stop-opacity='.95'/>
+    <stop offset='100%' stop-color='#fff4b8' stop-opacity='.78'/>
+  </linearGradient>
+</defs>
+<rect width='256' height='256' rx='34' fill='url(#bg)'/>
+<rect x='8' y='8' width='240' height='240' rx='28' fill='none' stroke='url(#rim)' stroke-width='4'/>
+<circle cx='128' cy='128' r='92' fill='none' stroke='#ff8a3d' stroke-opacity='.18' stroke-width='2'/>
+<circle cx='128' cy='128' r='74' fill='none' stroke='#ff8a3d' stroke-opacity='.10' stroke-width='2'/>
+<path d='M74 174 L88 88 L120 120 L128 82 L136 120 L168 88 L182 174 Z' fill='#ff8a3d' fill-opacity='.18' stroke='#ff8a3d' stroke-width='6' stroke-linejoin='round'/><line x1='74' y1='174' x2='182' y2='174' stroke='#ff8a3d' stroke-width='6'/>
+<polygon points='56.00,42.00 58.35,48.76 65.51,48.91 59.80,53.24 61.88,60.09 56.00,56.00 50.12,60.09 52.20,53.24 46.49,48.91 53.65,48.76' fill='#fff7cf' fill-opacity='.82'/>
+<polygon points='206.00,52.00 208.06,57.17 213.61,57.53 209.33,61.08 210.70,66.47 206.00,63.50 201.30,66.47 202.67,61.08 198.39,57.53 203.94,57.17' fill='#ff8a3d' fill-opacity='.78'/>
+<polygon points='198.00,189.00 200.35,194.76 206.56,195.22 201.80,199.24 203.29,205.28 198.00,202.00 192.71,205.28 194.20,199.24 189.44,195.22 195.65,194.76' fill='#fff7cf' fill-opacity='.74'/>
+<rect x='76' y='198' width='104' height='26' rx='13' fill='#060b12' fill-opacity='.72' stroke='#ff8a3d' stroke-opacity='.45'/>
+<text x='128' y='216' text-anchor='middle' font-family='Segoe UI, Arial, sans-serif' font-size='16' font-weight='800' fill='#f6fbff'>BCC</text>
+</svg>

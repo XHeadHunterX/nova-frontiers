@@ -1,0 +1,5 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'>
+<defs><radialGradient id='g' cx='35%' cy='25%' r='82%'><stop offset='0%' stop-color='#8cffff' stop-opacity='.85'/><stop offset='55%' stop-color='#02060b'/><stop offset='100%' stop-color='#02060b'/></radialGradient><filter id='glow'><feGaussianBlur stdDeviation='3' result='b'/><feMerge><feMergeNode in='b'/><feMergeNode in='SourceGraphic'/></feMerge></filter></defs>
+<rect width='180' height='180' rx='28' fill='#02060b'/><rect x='6' y='6' width='168' height='168' rx='24' fill='none' stroke='#8cffff' stroke-opacity='.28'/><circle cx='90' cy='70' r='42' fill='url(#g)' stroke='#8cffff' stroke-width='4'/><path d='M38 80 C67 55 106 102 146 56' stroke='#8cffff' stroke-opacity='.42' stroke-width='6' fill='none'/>
+<text x='90' y='102' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='31' font-weight='900' fill='#8cffff' filter='url(#glow)'>GX</text>
+</svg>

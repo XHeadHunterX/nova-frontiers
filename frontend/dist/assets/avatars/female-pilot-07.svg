@@ -1,0 +1,18 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'>
+<defs>
+<radialGradient id='bg' cx='38%' cy='20%' r='80%'><stop offset='0%' stop-color='#35f2ff' stop-opacity='.42'/><stop offset='55%' stop-color='#0b2738'/><stop offset='100%' stop-color='#07131d'/></radialGradient>
+<linearGradient id='suit' x1='0' x2='1'><stop offset='0%' stop-color='#06131c'/><stop offset='50%' stop-color='#0b2738'/><stop offset='100%' stop-color='#08131e'/></linearGradient>
+<filter id='glow'><feGaussianBlur stdDeviation='2.4' result='b'/><feMerge><feMergeNode in='b'/><feMergeNode in='SourceGraphic'/></feMerge></filter>
+</defs>
+<rect width='180' height='180' rx='26' fill='url(#bg)'/>
+<circle cx='90' cy='82' r='68' fill='none' stroke='#35f2ff' stroke-opacity='.16' stroke-width='10'/>
+<path d='M42 78 C42 36 68 16 94 20 C126 25 142 54 137 94 C130 65 113 48 88 50 C64 52 50 62 42 78 Z' fill='#2b1c14' opacity='.98'/>
+<path d='M52 72 C55 103 69 123 90 123 C111 123 125 103 128 72 C126 47 110 32 90 32 C70 32 54 47 52 72 Z' fill='#e0a77d' stroke='#050a10' stroke-opacity='.45' stroke-width='2'/>
+<path d='M56 75 C68 68 111 68 124 75 L120 91 C103 101 76 101 60 91 Z' fill='#06131c' stroke='#ffae35' stroke-width='3'/>
+<path d='M64 78 C78 74 102 74 116 78' stroke='#ffae35' stroke-width='5' stroke-linecap='round' filter='url(#glow)'/>
+<path d='M72 108 C82 116 99 116 110 108' stroke='#26140e' stroke-opacity='.45' stroke-width='3' fill='none'/>
+<path d='M24 158 C35 135 54 124 90 124 C126 124 145 135 156 158 Z' fill='url(#suit)' stroke='#35f2ff' stroke-opacity='.45' stroke-width='3'/>
+<path d='M50 150 L68 127 L90 156 L112 127 L130 150' fill='none' stroke='#35f2ff' stroke-opacity='.5' stroke-width='4'/>
+<circle cx='90' cy='145' r='11' fill='#02060b' stroke='#35f2ff' stroke-width='3'/>
+<text x='155' y='162' text-anchor='end' font-family='Segoe UI,Arial' font-size='18' font-weight='900' fill='#35f2ff' opacity='.62'>07</text>
+</svg>
