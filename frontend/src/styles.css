@@ -2767,3 +2767,33 @@ td button{margin:2px;padding:7px 9px;font-size:12px}
 .missionContextGroup button{
   justify-content:flex-start;
 }
+
+
+/* Mission reward roll correction */
+.successBtn{
+  width:100%;
+  padding:12px 16px;
+  border-radius:14px;
+  border:1px solid rgba(84,255,185,.58);
+  background:linear-gradient(135deg,rgba(18,122,75,.88),rgba(6,69,55,.92));
+  color:#eafff7;
+  font-weight:900;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  box-shadow:0 0 22px rgba(75,255,188,.18), inset 0 1px 0 rgba(255,255,255,.08);
+}
+.successBtn:hover{filter:brightness(1.08)}
+.missionScreen.missionDone .missionSceneCard{
+  border-color:rgba(84,255,185,.38);
+  box-shadow:0 0 30px rgba(75,255,188,.12), inset 0 1px 0 rgba(255,255,255,.04);
+}
+.missionEventRewards{
+  margin-top:4px;
+}
+.missionEventRewards span{
+  border-color:rgba(108,255,216,.28);
+  background:rgba(36,255,184,.08);
+}
+.missionFeedItem.general{
+  border-color:rgba(180,196,210,.12);
+}

@@ -7,6 +7,7 @@ import math
 import os
 import random
 import re
+import shutil
 import sqlite3
 import threading
 import time
@@ -25,6 +26,34 @@ DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 DB_PATH = Path(os.getenv("NOVA_DB", DATA_DIR / "nova_frontiers.db"))
 DEV_MODE = os.getenv("NOVA_DEV", "1") == "1"
+
+def backup_and_remove_db(reason: str = "reset") -> Optional[Path]:
+    """Rename the live sqlite DB so a clean one can be created. Used for badly stale live DBs."""
+    try:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if not DB_PATH.exists():
+            return None
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        backup = DB_PATH.with_name(f"{DB_PATH.stem}.{reason}.{stamp}{DB_PATH.suffix}")
+        shutil.move(str(DB_PATH), str(backup))
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(str(DB_PATH) + suffix)
+            if sidecar.exists():
+                shutil.move(str(sidecar), str(backup) + suffix)
+        return backup
+    except Exception:
+        # Let the normal startup failure surface if the file cannot be moved.
+        return None
+
+
+def should_reset_db_on_start() -> bool:
+    return os.getenv("NOVA_RESET_DB_ON_START", "0").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def should_rebuild_bad_db() -> bool:
+    # Default on for this prototype because live DBs can be far behind the code during rapid iteration.
+    return os.getenv("NOVA_REBUILD_BAD_DB_ON_STARTUP_FAILURE", "1").strip().lower() in {"1", "true", "yes", "y"}
+
 
 app = FastAPI(title="Nova Frontiers API", version="0.1.0")
 
@@ -7257,43 +7286,48 @@ def mission_level_from_xp(xp: int) -> int:
     return max(1, min(int(WORLD_MISSION_BALANCE.get("planet_mission_max_level", 50)), 1 + int(math.sqrt(max(0, int(xp)) / 160.0))))
 
 
-def mission_item_reward_rolls(mission_key: str, cfg: Dict[str, Any], level: int, center_ratio: float, seed: str) -> List[Dict[str, Any]]:
-    rewards = cfg.get("rewardItems") or []
-    if not rewards:
-        return []
-    rng = random.Random(seed)
+def mission_weighted_reward_pool(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     weighted: List[Dict[str, Any]] = []
-    for item in rewards:
+    for item in (cfg.get("rewardItems") or []):
         weight = max(1, int(item.get("weight") or 1))
-        weighted.extend([item] * weight)
-    picks = 1 + (1 if level >= 6 and rng.random() < 0.45 else 0) + (1 if center_ratio >= 0.65 and rng.random() < 0.35 else 0)
-    out: Dict[str, Dict[str, Any]] = {}
-    for _ in range(max(1, picks)):
-        item = dict(rng.choice(weighted))
-        code = str(item.get("code") or f"{mission_key}_field_material")
-        qty_min = max(1, int(item.get("qtyMin") or WORLD_MISSION_BALANCE.get("mission_material_qty_min", 1) or 1))
-        qty_max = max(qty_min, int(item.get("qtyMax") or WORLD_MISSION_BALANCE.get("mission_material_qty_max", 4) or 4))
-        qty = rng.randint(qty_min, qty_max)
-        bonus_every = max(1, int(WORLD_MISSION_BALANCE.get("mission_material_level_bonus_every", 5) or 5))
-        qty += max(0, (max(1, int(level)) - 1) // bonus_every)
-        qty += rng.randint(0, max(0, int(round(center_ratio * float(WORLD_MISSION_BALANCE.get("mission_material_center_bonus_max", 2) or 2)))))
-        if code not in out:
-            out[code] = {
-                "code": code,
-                "name": item.get("name") or label_for_api(code),
-                "category": item.get("category") or "mission_materials",
-                "rarity": item.get("rarity") or "common",
-                "qty": 0,
-                "baseValue": int(item.get("baseValue") or item.get("base_value") or 100),
-                "mass": float(item.get("mass") or 0.1),
-                "description": item.get("description") or "Planet mission-only crafting material.",
-                "missionKey": mission_key,
-            }
-        out[code]["qty"] += max(1, int(qty))
-    ultra = roll_mission_ultra_reward(mission_key, level, seed)
-    if ultra and ultra.get("code") not in out:
-        out[ultra["code"]] = dict(ultra)
-    return list(out.values())
+        weighted.extend([dict(item)] * weight)
+    return weighted
+
+
+def mission_success_item_roll(mission_key: str, cfg: Dict[str, Any], level: int, center_ratio: float, rng: random.Random, critical: bool = False) -> List[Dict[str, Any]]:
+    weighted = mission_weighted_reward_pool(cfg)
+    if not weighted:
+        return []
+    item = dict(rng.choice(weighted))
+    code = str(item.get("code") or f"{mission_key}_field_material")
+    qty_min = max(1, int(item.get("qtyMin") or WORLD_MISSION_BALANCE.get("mission_material_qty_min", 1) or 1))
+    qty_max = max(qty_min, int(item.get("qtyMax") or WORLD_MISSION_BALANCE.get("mission_material_qty_max", 4) or 4))
+    qty = rng.randint(qty_min, qty_max)
+    # Level and center-space improve reward quantity, but gently. Success events happen many times.
+    if level >= 8 and rng.random() < min(0.55, level / 90.0):
+        qty += 1
+    if center_ratio >= 0.55 and rng.random() < min(0.45, center_ratio * 0.35):
+        qty += 1
+    if critical:
+        qty = max(qty + 1, int(math.ceil(qty * rng.uniform(1.65, 2.15))))
+    return [{
+        "code": code,
+        "name": item.get("name") or label_for_api(code),
+        "category": item.get("category") or "mission_materials",
+        "rarity": item.get("rarity") or ("rare" if critical else "common"),
+        "qty": max(1, int(qty)),
+        "baseValue": int(item.get("baseValue") or item.get("base_value") or 100),
+        "mass": float(item.get("mass") or 0.1),
+        "description": item.get("description") or "Planet mission-only crafting material.",
+        "missionKey": mission_key,
+    }]
+
+
+def mission_item_reward_rolls(mission_key: str, cfg: Dict[str, Any], level: int, center_ratio: float, seed: str) -> List[Dict[str, Any]]:
+    # Compatibility helper. Missions no longer pre-award a final reward bundle.
+    # Individual success/critical-success event rolls create the actual rewards.
+    rng = random.Random(seed)
+    return mission_success_item_roll(mission_key, cfg, level, center_ratio, rng, critical=False)
 
 
 def grant_planet_mission_item_rewards(conn: sqlite3.Connection, player_id: int, items: List[Dict[str, Any]]) -> None:
@@ -7301,36 +7335,70 @@ def grant_planet_mission_item_rewards(conn: sqlite3.Connection, player_id: int, 
         qty = int(item.get("qty") or 0)
         if qty <= 0:
             continue
+        item_type = str(item.get("itemType") or item.get("item_type") or ("ultra_artifact" if ultra_item_def(item.get("code")) else "mission_material"))
+        is_ultra = bool(ultra_item_def(item.get("code"))) or str(item.get("rarity") or "").lower() == "ultra"
         add_inventory_item(
             conn,
             player_id,
             str(item.get("code") or "planet_mission_material"),
             str(item.get("name") or label_for_api(item.get("code") or "planet_mission_material")),
-            "mission_material",
+            item_type,
             qty,
             1,
             int(item.get("baseValue") or item.get("base_value") or 100),
             float(item.get("mass") or 0.1),
-            str(item.get("description") or "Planet mission-only crafting material."),
+            str(item.get("description") or ("Ultra vanity collectible." if is_ultra else "Planet mission-only crafting material.")),
             "planet_mission",
-            category=str(item.get("category") or "mission_materials"),
-            rarity=str(item.get("rarity") or "common"),
+            category=str(item.get("category") or ("rare_artifacts" if is_ultra else "mission_materials")),
+            rarity=str(item.get("rarity") or ("ultra" if is_ultra else "common")),
+            subcategory=str(item.get("pool") or item.get("missionKey") or "planet_mission"),
             sellable=1,
-            craftable_material=1,
+            craftable_material=0 if is_ultra else 1,
+            equippable=0,
+            usable=0,
+            image_id=str(item.get("code") or "") if is_ultra else "",
             cargo_exempt=0,
-            tier=int(item.get("tier") or 1),
-            max_tier=int(item.get("tier") or 1),
+            tier=int(item.get("tier") or (7 if is_ultra else 1)),
+            max_tier=int(item.get("maxTier") or item.get("tier") or (7 if is_ultra else 1)),
+            tier_locked=1 if is_ultra else 0,
+            tier_source="planet_mission_ultra" if is_ultra else "planet_mission",
         )
+
+
+def aggregate_mission_event_rewards(events: List[Dict[str, Any]], progress: float = 1.0) -> Dict[str, Any]:
+    xp = 0
+    cooldown = 0
+    items_by_code: Dict[str, Dict[str, Any]] = {}
+    visible_events = []
+    for ev in events or []:
+        if float(ev.get("atPct") or 0) > float(progress) + 0.0001:
+            continue
+        visible_events.append(ev)
+        xp += int(ev.get("rewardXp") or ev.get("xp") or 0)
+        cooldown += int(ev.get("cooldownAddMinutes") or 0)
+        for item in ev.get("rewardItems") or []:
+            code = str(item.get("code") or item.get("itemCode") or "")
+            if not code:
+                continue
+            if code not in items_by_code:
+                merged = dict(item)
+                merged["qty"] = 0
+                items_by_code[code] = merged
+            items_by_code[code]["qty"] += int(item.get("qty") or 1)
+    return {"xp": int(xp), "cooldown": int(cooldown), "items": list(items_by_code.values()), "events": visible_events}
 
 
 def mission_reward_text(items: List[Dict[str, Any]], xp: int) -> str:
     item_text = ", ".join(f"{int(i.get('qty') or 0)}x {i.get('name') or label_for_api(i.get('code') or 'material')}" for i in (items or [])[:4])
+    if int(xp or 0) <= 0 and not item_text:
+        return "Nothing banked yet"
     return f"{int(xp)} XP" + (f" • {item_text}" if item_text else "")
 
 
 MISSION_RESULT_PROFILE = {
-    "critical_success": {"label": "Critical Success", "kind": "crit_success", "cooldown": (0, 0)},
+    "general": {"label": "General", "kind": "general", "cooldown": (0, 0)},
     "success": {"label": "Success", "kind": "success", "cooldown": (0, 0)},
+    "critical_success": {"label": "Critical Success", "kind": "crit_success", "cooldown": (0, 0)},
     "failure": {"label": "Failure", "kind": "failure", "cooldown": (int(WORLD_MISSION_BALANCE.get("mission_failure_cooldown_min_minutes", 3)), int(WORLD_MISSION_BALANCE.get("mission_failure_cooldown_max_minutes", 9)))},
     "critical_failure": {"label": "Critical Failure", "kind": "crit_fail", "cooldown": (int(WORLD_MISSION_BALANCE.get("mission_crit_failure_cooldown_min_minutes", 8)), int(WORLD_MISSION_BALANCE.get("mission_crit_failure_cooldown_max_minutes", 18)))},
 }
@@ -7347,172 +7415,115 @@ MISSION_OBJECT_HINTS = {
     "hazard": ["hazard", "crystal", "shield", "engine", "medical", "beacon", "relic", "component"],
 }
 
-MISSION_ACTION_LIBRARY_CONFIG = {
+MISSION_TEXT_PARTS = {
     "survey": {
-        "intros": [
-            "{resultLabel}: You march into the {planetTrait} with your scanner humming like it drank too much reactor coffee.",
-            "{resultLabel}: A {tierLabel} survey route opens up across the {planetTrait}, and your boots commit immediately.",
-            "{resultLabel}: The {planetTrait} looks harmless until it absolutely is not, which is honestly on brand.",
-            "{resultLabel}: Your visor pings at the edge of the {planetTrait}, so you head over with professional curiosity and moderate chaos.",
-            "{resultLabel}: You fan out across the {planetTrait} and pretend the wobbling scanner tray is part of the plan.",
-            "{resultLabel}: A fresh reading drags you toward the {planetTrait}, where science and bad footing shake hands.",
-            "{resultLabel}: You pick through the {planetTrait} while the mission board insists this is all very routine.",
-            "{resultLabel}: The {planetTrait} lights up on your display, and you hustle over before someone else can claim the bragging rights.",
-            "{resultLabel}: You stride into the {planetTrait} looking sharp, competent, and only slightly over-caffeinated.",
-            "{resultLabel}: The survey lane points straight at the {planetTrait}, so off you go to bother geology for profit.",
-        ],
-        "middles": [
-            "Your scanner chirps at a {objectName}, and you secure {itemName} before the dust settles.",
-            "You flag a {objectName}, tap in a clean reading, and tuck away {itemName} with a satisfied nod.",
-            "A strange echo bounces off a {objectName}; it turns out the echo was hiding {itemName}.",
-            "You sweep past a {objectName}, rerun the trace twice, and end up with {itemName} anyway.",
-            "The {objectName} turns out to be more useful than photogenic, which is how you end up with {itemName}.",
-            "Your pack gets heavier after a cheerful encounter with a {objectName} and a tidy stack of {itemName}.",
-            "You kneel by a {objectName}, log the reading, and pocket {itemName} like a seasoned professional goblin.",
-            "A {objectName} coughs up a good lead, a better reading, and {itemName} for your trouble.",
-            "You circle a {objectName} one careful step at a time until it finally gives up {itemName}.",
-            "The {objectName} makes a suspicious noise, but the real surprise is the {itemName} you recover beside it.",
-            "You triangulate a {objectName} and discover {itemName}, proving once again that wandering around can be a career.",
-            "Your instruments argue over a {objectName}; you settle the debate by extracting {itemName}.",
-            "A {objectName} produces exactly the sort of weird reading that leads to {itemName}.",
-            "You tap, scan, and re-scan a {objectName} until the field kit rewards you with {itemName}.",
-            "A wobbling marker draws you to a {objectName}, where {itemName} is waiting like it booked the appointment.",
-            "You map a {objectName}, dodge a little falling grit, and come away with {itemName}.",
-            "The {objectName} is oddly cooperative today, so collecting {itemName} feels almost suspiciously easy.",
-            "You grin at a promising {objectName}; it grins back by handing over {itemName}.",
-            "You hop over a crack, lean into a {objectName}, and recover {itemName} with style.",
-            "The {objectName} gives off a great signal and an even better payout in {itemName}.",
-        ],
+        "subject": ["scanner ping", "sample tube", "mapping drone", "weather vane", "ancient marker", "mineral seam", "survey tripod", "signal flag", "data buoy", "glowing footprint", "fossil plate", "wind gauge", "crystal lens", "field notebook", "wobbly probe", "terrain marker", "ice core", "dust ribbon", "signal echo", "quiet crater"],
+        "place": ["ridge", "basin", "canyon", "dune line", "ice shelf", "old road", "meteor scar", "stone arch", "bright hollow", "survey lane"],
     },
     "salvage": {
-        "intros": [
-            "{resultLabel}: You step into the {planetTrait}, where every piece of scrap insists it has a backstory.",
-            "{resultLabel}: A {tierLabel} salvage ping leads you into the {planetTrait} with a cutter in one hand and optimism in the other.",
-            "{resultLabel}: The {planetTrait} groans in the wind, which usually means something valuable survived the mess.",
-            "{resultLabel}: You duck under loose plating and head across the {planetTrait} before the dust can file a complaint.",
-            "{resultLabel}: Your salvage route opens through the {planetTrait}, a lovely place to trip over profitable debris.",
-            "{resultLabel}: The {planetTrait} looks like a junk heap from orbit and a treasure map up close.",
-            "{resultLabel}: You crack open the next salvage lane in the {planetTrait} with heroic posture and a very practical wrench.",
-            "{resultLabel}: One ping later, you are elbow-deep in the {planetTrait} and smiling at the possibilities.",
-            "{resultLabel}: The {planetTrait} rattles around you while you go shopping for ship parts the hard way.",
-            "{resultLabel}: You head into the {planetTrait}, where the definition of salvageable stays comfortingly flexible.",
-        ],
-        "middles": [
-            "You pry open a {objectName} and uncover {itemName} tucked behind a layer of heroic grime.",
-            "A sleepy {objectName} finally gives up {itemName} after you persuade it with tools and optimism.",
-            "You crack through a {objectName}, duck a shower of bolts, and come away holding {itemName}.",
-            "The {objectName} looks finished until a hidden compartment coughs up {itemName}.",
-            "You wrench at a {objectName} until it politely releases {itemName} and one deeply offended screw.",
-            "A {objectName} gives you attitude, but it also gives you {itemName}, so the relationship evens out.",
-            "You sift through a {objectName} and find {itemName} before the dust even realizes what happened.",
-            "The best part of the {objectName} turns out to be the {itemName} you drag free from underneath it.",
-            "You slice into a {objectName} and recover {itemName}, plus bragging rights for the clean entry.",
-            "A rattling {objectName} nearly tips over before revealing {itemName} like a dramatic stage prop.",
-            "You lean into a {objectName}, pop the latch, and secure {itemName} with a grin.",
-            "The {objectName} is mostly rust, but the pocket of {itemName} inside makes the detour worth it.",
-            "You pull apart a {objectName} and discover {itemName} wedged in exactly the least convenient place.",
-            "One stubborn {objectName} later, you emerge victorious and carrying {itemName}.",
-            "You shake down a {objectName}; out drops {itemName} and a deeply judgmental puff of dust.",
-            "A half-buried {objectName} turns into a jackpot when you spot {itemName} inside.",
-            "The {objectName} gives in after a short argument, leaving you with {itemName}.",
-            "You peel away charred plating from a {objectName} and recover {itemName} in surprisingly decent shape.",
-            "A battered {objectName} hides {itemName}, which is exactly why you keep crawling into places like this.",
-            "You coax open a {objectName} and bag {itemName} before the structure remembers to complain.",
-        ],
+        "subject": ["sealed locker", "rusty panel", "cargo tooth", "dead relay", "collapsed drone", "scrap rib", "charred coupler", "bent antenna", "old reactor tag", "loose hatch", "service box", "wreck spline", "tool cradle", "blackened bracket", "burned cable", "data plate", "gear nest", "hull flake", "tilted winch", "mystery crate"],
+        "place": ["wreck yard", "relay trench", "cargo pit", "hangar ruin", "service crawl", "scrap wash", "old gantry", "debris shelf", "smoke hollow", "salvage lane"],
     },
     "hazard": {
-        "intros": [
-            "{resultLabel}: You push into the {planetTrait}, where the weather report simply says bold of you.",
-            "{resultLabel}: A {tierLabel} hazard route lights up through the {planetTrait}, so you clip in and get moving.",
-            "{resultLabel}: The {planetTrait} crackles ominously, which is usually how interesting paydays introduce themselves.",
-            "{resultLabel}: You step into the {planetTrait} with alarms humming softly and confidence humming louder.",
-            "{resultLabel}: The {planetTrait} spits sparks in the distance, but your mission board still calls this a manageable inconvenience.",
-            "{resultLabel}: Your boots hit the {planetTrait}, and the local atmosphere immediately decides to be extra about it.",
-            "{resultLabel}: You charge into the {planetTrait}, looking heroic enough to distract from the danger.",
-            "{resultLabel}: The route across the {planetTrait} looks unstable, glowing, and therefore impossible to ignore.",
-            "{resultLabel}: You angle into the {planetTrait}, hoping the protective suit continues doing all the hard work.",
-            "{resultLabel}: The {planetTrait} roars ahead, and you answer with a toolkit, a shield pack, and deeply questionable enthusiasm.",
-        ],
-        "middles": [
-            "You stabilize a {objectName} and recover {itemName} before the situation can become dramatically worse.",
-            "A grumpy {objectName} nearly spoils the run, but you still secure {itemName} and keep moving.",
-            "You sidestep a burst from a {objectName}, then scoop up {itemName} like this was always the plan.",
-            "The {objectName} flares bright, calms down, and leaves you with {itemName} for your trouble.",
-            "You lock down a {objectName} and pull {itemName} out of the chaos with surprisingly steady hands.",
-            "A snappy {objectName} tries to ruin your day; instead, it helps you find {itemName}.",
-            "You cool off a {objectName} and salvage {itemName} before the hazard can file a second complaint.",
-            "The {objectName} throws a fit, but you walk away carrying {itemName} and a smug little victory.",
-            "You patch around a {objectName}, vent the pressure, and collect {itemName} from the newly calmer mess.",
-            "A wild pulse from a {objectName} forces a quick shuffle, yet you still leave with {itemName}.",
-            "You outmaneuver a {objectName}, steady the field, and recover {itemName} right on cue.",
-            "The {objectName} sputters, sparks, and eventually rewards you with {itemName}.",
-            "You drag a shield line past a {objectName} and snag {itemName} while the alarms quietly judge you.",
-            "A buzzing {objectName} looks dangerous, which usually means it is also hiding {itemName}.",
-            "You talk yourself through a messy encounter with a {objectName} and come out with {itemName}.",
-            "The {objectName} briefly becomes very exciting, but so does the {itemName} you recover afterward.",
-            "You hold the line against a {objectName}, then pocket {itemName} once things settle down.",
-            "A twitchy {objectName} almost steals the moment; you steal {itemName} instead.",
-            "You jam a stabilizer into a {objectName} and secure {itemName} before the sparks regroup.",
-            "The {objectName} throws one last tantrum, then hands over {itemName} like it always meant to.",
-        ],
+        "subject": ["sparking vent", "acid bubble", "angry crystal", "pressure valve", "storm rod", "toxic puddle", "ion knot", "unstable relay", "frost jet", "warning cone", "geothermal burp", "hissing canister", "shield peg", "static bloom", "flare pocket", "hot crack", "faulty sensor", "jumping spark", "bad-smelling rock", "containment stitch"],
+        "place": ["storm basin", "toxic hollow", "ion shelf", "frost ravine", "vent field", "cracked plain", "hazard line", "pressure ridge", "static trench", "burn zone"],
     },
 }
 
+MISSION_OUTCOME_OPENERS = {
+    "general": [
+        "{resultLabel}: You cross the {planetTrait} and log the {objectName} without drama.",
+        "{resultLabel}: The {tierLabel} route stays calm while you check a {objectName}.",
+        "{resultLabel}: You make steady progress near the {objectName} and keep your boots under you.",
+        "{resultLabel}: A quiet stretch of the {planetTrait} gives you time to recalibrate.",
+        "{resultLabel}: You pass a {objectName}, make a note, and move on.",
+        "{resultLabel}: The suit telemetry behaves, which feels suspicious but welcome.",
+        "{resultLabel}: You take the boring path around the {objectName}. Smart choice.",
+        "{resultLabel}: A mild reading from the {objectName} proves harmless.",
+        "{resultLabel}: You pause at the {planetTrait}, breathe, and continue the route.",
+        "{resultLabel}: Nothing explodes near the {objectName}. This counts as progress.",
+    ],
+    "failure": [
+        "{resultLabel}: You stub your boot on a {objectName}. {cooldownText}",
+        "{resultLabel}: A loose {objectName} rolls underfoot and ruins your rhythm. {cooldownText}",
+        "{resultLabel}: The {planetTrait} wins a tiny argument with your ankle. {cooldownText}",
+        "{resultLabel}: Your pack clips the {objectName} and everything becomes annoying. {cooldownText}",
+        "{resultLabel}: You misread the marker near the {objectName}. {cooldownText}",
+        "{resultLabel}: A harmless-looking {objectName} becomes personally inconvenient. {cooldownText}",
+        "{resultLabel}: You slip, recover, and pretend nobody saw it. {cooldownText}",
+        "{resultLabel}: The suit complains after a bad step through the {planetTrait}. {cooldownText}",
+        "{resultLabel}: A tiny field mistake creates a not-tiny delay. {cooldownText}",
+        "{resultLabel}: You lose time negotiating with a rude {objectName}. {cooldownText}",
+    ],
+    "critical_failure": [
+        "{resultLabel}: The {objectName} chooses violence and the whole route slows down. {cooldownText}",
+        "{resultLabel}: You trip the wrong sensor near the {planetTrait}. {cooldownText}",
+        "{resultLabel}: A chain reaction of nonsense starts at the {objectName}. {cooldownText}",
+        "{resultLabel}: Your suit alarms harmonize badly around the {objectName}. {cooldownText}",
+        "{resultLabel}: The ground shifts, the {objectName} jumps, and your schedule suffers. {cooldownText}",
+        "{resultLabel}: You fall into the least dignified part of the {planetTrait}. {cooldownText}",
+        "{resultLabel}: A bad read near the {objectName} forces a long reset. {cooldownText}",
+        "{resultLabel}: The mission recorder saves this failure in excellent detail. {cooldownText}",
+        "{resultLabel}: You discover a new way for the {planetTrait} to be petty. {cooldownText}",
+        "{resultLabel}: Emergency foam, bad footing, and the {objectName} all arrive together. {cooldownText}",
+    ],
+    "success": [
+        "{resultLabel}: You work the {objectName} cleanly and recover {itemName}.",
+        "{resultLabel}: A useful pocket near the {planetTrait} yields {itemName}.",
+        "{resultLabel}: You follow the signal through the {objectName} and bag {itemName}.",
+        "{resultLabel}: The field kit sings once, then prints a good result: {itemName}.",
+        "{resultLabel}: You take apart the problem around the {objectName} and secure {itemName}.",
+        "{resultLabel}: Your route pays off with {itemName} tucked beside the {objectName}.",
+        "{resultLabel}: A careful sweep of the {planetTrait} turns up {itemName}.",
+        "{resultLabel}: You make the right call at the {objectName} and gain {itemName}.",
+        "{resultLabel}: The planet gives up {itemName} after only moderate arguing.",
+        "{resultLabel}: You extract {itemName} and look competent doing it.",
+    ],
+    "critical_success": [
+        "{resultLabel}: You absolutely nail the read on the {objectName} and pull a premium find: {itemName}.",
+        "{resultLabel}: The {planetTrait} opens a hidden pocket and rewards you with extra {itemName}.",
+        "{resultLabel}: Perfect timing turns the {objectName} into a jackpot of {itemName}.",
+        "{resultLabel}: Your best move of the run lands clean and produces high-grade {itemName}.",
+        "{resultLabel}: A rare alignment at the {objectName} lets you recover a richer haul of {itemName}.",
+        "{resultLabel}: You turn a tricky signal into a clean critical find: {itemName}.",
+        "{resultLabel}: The mission board would applaud if it had hands. You secure excellent {itemName}.",
+        "{resultLabel}: You solve the {objectName} on the first pass and recover extra {itemName}.",
+        "{resultLabel}: A perfect field decision at the {planetTrait} yields a prized bundle of {itemName}.",
+        "{resultLabel}: You catch the planet blinking and steal a critical reward: {itemName}.",
+    ],
+}
 
-def build_mission_action_message_library() -> Dict[str, List[str]]:
-    libraries: Dict[str, List[str]] = {}
-    for mission_key, cfg in MISSION_ACTION_LIBRARY_CONFIG.items():
-        templates: List[str] = []
-        seen = set()
-        for middle in cfg["middles"]:
-            for intro in cfg["intros"]:
-                template = intro + " " + middle + " {endingLine}"
-                if template not in seen:
-                    seen.add(template)
-                    templates.append(template)
-                if len(templates) >= 200:
-                    break
-            if len(templates) >= 200:
-                break
-        libraries[mission_key] = templates[:200]
+MISSION_OUTCOME_ENDINGS = {
+    "general": ["The objective tracker ticks forward.", "You keep moving.", "No reward, no injury, no problem.", "Progress is progress.", "The route continues.", "Your logbook gets one more boring line.", "The mission pace stays steady.", "You leave the area cleaner than you found it.", "Nothing gained except distance.", "The next marker lights up."],
+    "failure": ["You shake it off.", "Your pride takes light damage.", "The local rocks remain undefeated.", "The route timer grumbles.", "You mutter something professional.", "The mission continues after a delay.", "You file this under field lessons.", "Nobody needs to hear about this.", "Your boots request a new job.", "The setback is annoying but survivable."],
+    "critical_failure": ["The recovery timer is not amused.", "That one will be felt later.", "Your suit logs it as educational.", "The mission continues, but slower.", "That mistake gets a red mark.", "The planet wins this round.", "You need a minute.", "The delay stacks hard.", "Your gear needs a stern talking-to.", "This becomes tomorrow's cautionary tale."],
+    "success": ["XP gained: {rewardXp}.", "You gain {rewardXp} XP.", "The find is logged for payout.", "Your pack gets heavier.", "That one was worth the walk.", "The mission tracker marks a win.", "You bank {rewardXp} XP from the find.", "Clean work.", "A good result lands in the bag.", "Progress and profit align."],
+    "critical_success": ["Critical XP gained: {rewardXp}.", "You bank a stronger {rewardXp} XP hit.", "That result deserves a victory lap.", "The find glows like it knows it is rare.", "Your pack gets much heavier.", "The mission tracker flashes gold.", "A critical result lands perfectly.", "That was the kind of luck people lie about.", "You mark it as a premium find.", "The planet briefly respects you."],
+}
+
+
+def build_mission_action_message_library() -> Dict[str, Dict[str, List[str]]]:
+    libraries: Dict[str, Dict[str, List[str]]] = {}
+    for mission_key, parts in MISSION_TEXT_PARTS.items():
+        libraries[mission_key] = {}
+        subjects = parts.get("subject") or ["object"]
+        places = parts.get("place") or ["route"]
+        for outcome, openers in MISSION_OUTCOME_OPENERS.items():
+            endings = MISSION_OUTCOME_ENDINGS[outcome]
+            templates: List[str] = []
+            idx = 0
+            while len(templates) < 200:
+                opener = openers[idx % len(openers)]
+                subj = subjects[idx % len(subjects)]
+                place = places[(idx // len(subjects)) % len(places)]
+                ending = endings[(idx // (len(subjects) * len(places))) % len(endings)]
+                templates.append(opener + f" Around the {place}, the {subj} keeps things interesting. " + ending)
+                idx += 1
+            libraries[mission_key][outcome] = templates[:200]
     return libraries
 
 
 MISSION_ACTION_MESSAGE_LIBRARY = build_mission_action_message_library()
-
-
-def player_planet_mission_cooldown_info(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
-    rec = row(conn, "SELECT planet_mission_cooldown_until, planet_mission_cooldown_reason FROM players WHERE id=?", (player_id,)) or {}
-    until = parse_dt(rec.get("planet_mission_cooldown_until"))
-    now = utcnow()
-    seconds = max(0, int((until - now).total_seconds())) if until else 0
-    active = bool(until and seconds > 0)
-    return {
-        "active": active,
-        "until": iso(until) if until and active else None,
-        "secondsRemaining": seconds,
-        "minutesRemaining": max(0, math.ceil(seconds / 60)) if active else 0,
-        "reason": rec.get("planet_mission_cooldown_reason") or ("Mission cooldown active." if active else ""),
-    }
-
-
-def set_player_planet_mission_cooldown(conn: sqlite3.Connection, player_id: int, minutes: int, reason: str = "") -> Dict[str, Any]:
-    minutes = clamp_int(int(minutes or 0), 0, int(WORLD_MISSION_BALANCE.get("mission_cooldown_cap_minutes", 120) or 120))
-    if minutes <= 0:
-        conn.execute("UPDATE players SET planet_mission_cooldown_until=NULL, planet_mission_cooldown_reason='' WHERE id=?", (player_id,))
-        return {"active": False, "until": None, "secondsRemaining": 0, "minutesRemaining": 0, "reason": ""}
-    until = utcnow() + timedelta(minutes=minutes)
-    conn.execute("UPDATE players SET planet_mission_cooldown_until=?, planet_mission_cooldown_reason=? WHERE id=?", (iso(until), reason or f"Planet mission cooldown: {minutes} minutes.", player_id))
-    return player_planet_mission_cooldown_info(conn, player_id)
-
-
-def mission_cooldown_minutes_from_events(events: List[Dict[str, Any]], progress: float = 1.0) -> int:
-    total = 0
-    cap = int(WORLD_MISSION_BALANCE.get("mission_cooldown_cap_minutes", 120) or 120)
-    for ev in events or []:
-        if float(ev.get("atPct") or 0) <= float(progress) + 0.0001:
-            total += int(ev.get("cooldownAddMinutes") or 0)
-    return clamp_int(total, 0, cap)
 
 
 def mission_tier_label_from_difficulty(difficulty: int) -> str:
@@ -7546,61 +7557,153 @@ def mission_scene_hint_from_event(mission_key: str, reward_item: Optional[Dict[s
     return ("material", hint, label_for_api(hint))
 
 
+def mission_roll_outcome(rng: random.Random, level: int) -> str:
+    # General = no reward. Success/critical success are the only XP/item sources.
+    success_bonus = min(16, max(0, int(level or 1) // 4))
+    weights = [
+        ("general", max(34, 48 - success_bonus)),
+        ("failure", max(11, 20 - success_bonus // 3)),
+        ("critical_failure", max(4, 8 - success_bonus // 5)),
+        ("success", min(38, 20 + success_bonus)),
+        ("critical_success", min(12, 4 + success_bonus // 3)),
+    ]
+    total = sum(w for _, w in weights)
+    pick = rng.randint(1, total)
+    cursor = 0
+    for key, weight in weights:
+        cursor += weight
+        if pick <= cursor:
+            return key
+    return "general"
+
+
+def mission_event_xp_roll(rng: random.Random, level: int, difficulty: int, critical: bool = False) -> int:
+    lvl = max(1, int(level or 1))
+    diff = max(1, int(difficulty or 1))
+    base = rng.randint(4, 9) + int(lvl * 0.45) + int(diff * 0.08)
+    if critical:
+        base = int(math.ceil(base * rng.uniform(2.0, 2.65)))
+    return max(1, int(base))
+
+
 def mission_event_log(seed: str, cfg: Dict[str, Any], minutes: int, mission_key: str = "", planet: Optional[Dict[str, Any]] = None, reward_items: Optional[List[Dict[str, Any]]] = None, level: int = 1, difficulty: int = 1) -> List[Dict[str, Any]]:
     rng = random.Random(seed)
     mission_key = mission_key or next((k for k, v in (WORLD_MISSION_BALANCE.get("mission_types") or {}).items() if v == cfg), "survey")
-    library = list(MISSION_ACTION_MESSAGE_LIBRARY.get(mission_key) or []) or ["{resultLabel}: You push ahead through the field and recover {itemName}. {endingLine}"]
+    mission_library = MISSION_ACTION_MESSAGE_LIBRARY.get(mission_key) or MISSION_ACTION_MESSAGE_LIBRARY.get("survey") or {}
     count = max(10, min(18, int(minutes // 4) + 4))
     tier_label = mission_tier_label_from_difficulty(difficulty)
     trait_pool = MISSION_PLANET_TRAITS.get(mission_key) or ["mission zone"]
     objects = ["crooked beacon", "wobbling crate", "strange marker", "polite-looking rock", "half-buried relay", "micro-crater stash", "shimmering panel", "singed toolbox", "dusty scanner pod", "battered antenna", "sparky conduit", "mischievous rubble pile", "sealed locker", "old field cache", "tilted drone shell", "magnetic shard cluster"]
-    success_bonus = min(16, max(0, (int(level) - 1) // 2))
-    weights = [("critical_success", 10 + success_bonus // 3), ("success", 58 + success_bonus), ("failure", max(10, 22 - success_bonus // 2)), ("critical_failure", max(4, 10 - success_bonus // 3))]
-    total_weight = sum(w for _, w in weights)
-    reward_cycle = list(reward_items or []) or [{"name": "field sample", "code": "field_sample", "qty": 1}]
+    center_ratio = 0.5
+    reward_success_events: List[int] = []
     events: List[Dict[str, Any]] = []
-    used_indexes = set()
+    used_indexes: Dict[str, set] = {k: set() for k in MISSION_RESULT_PROFILE.keys()}
+
+    # One ultra roll per mission. If it hits, attach it to a success/critical success event, not the mission preview.
+    ultra_reward = roll_mission_ultra_reward(mission_key, level, seed)
+
     for i in range(count):
-        pick = rng.randint(1, total_weight)
-        outcome = "success"
-        cursor = 0
-        for key, weight in weights:
-            cursor += weight
-            if pick <= cursor:
-                outcome = key
-                break
+        outcome = mission_roll_outcome(rng, level)
         profile = MISSION_RESULT_PROFILE[outcome]
+        templates = mission_library.get(outcome) or mission_library.get("general") or ["{resultLabel}: You continue through the mission zone. {endingLine}"]
+        used = used_indexes.setdefault(outcome, set())
         while True:
-            t_idx = rng.randint(0, len(library) - 1)
-            if t_idx not in used_indexes or len(used_indexes) >= len(library) - 2:
-                used_indexes.add(t_idx)
-                template = library[t_idx]
+            t_idx = rng.randint(0, len(templates) - 1)
+            if t_idx not in used or len(used) >= len(templates) - 2:
+                used.add(t_idx)
+                template = templates[t_idx]
                 break
-        reward_item = rng.choice(reward_cycle) if outcome in {"success", "critical_success"} else (rng.choice(reward_cycle) if rng.random() < 0.35 else None)
-        asset_type, asset_hint, scene_name = mission_scene_hint_from_event(mission_key, reward_item, rng)
+
+        critical = outcome == "critical_success"
+        reward_list: List[Dict[str, Any]] = []
+        reward_xp = 0
+        if outcome in {"success", "critical_success"}:
+            reward_list = mission_success_item_roll(mission_key, cfg, level, center_ratio, rng, critical=critical)
+            reward_xp = mission_event_xp_roll(rng, level, difficulty, critical=critical)
+            reward_success_events.append(i)
+
         cd_range = profile.get("cooldown") or (0, 0)
         cooldown_add = rng.randint(int(cd_range[0]), int(cd_range[1])) if int(cd_range[1]) > 0 else 0
         cooldown_text = f"(+{cooldown_add} min mission cooldown)." if cooldown_add > 0 else ""
-        ending_line = rng.choice(["The mission pace stays steady.", "You keep the run moving.", "Momentum remains on your side.", "The adventure continues with suspicious confidence.", "The objective tracker happily ticks forward."]) if cooldown_add <= 0 else rng.choice([cooldown_text, f"You shake it off. {cooldown_text}", f"Your pride takes a tiny dent. {cooldown_text}", f"Even the local gravel seems amused. {cooldown_text}"])
-        text = template.format(resultLabel=profile["label"], tierLabel=tier_label, itemName=(reward_item or {}).get("name") or "field sample", cooldownText=cooldown_text, objectName=rng.choice(objects), planetName=(planet or {}).get("name") or "the surface", planetTrait=rng.choice(trait_pool), endingLine=ending_line)
-        events.append({"atPct": round((i + 1) / (count + 1), 3), "text": text, "kind": profile["kind"], "outcome": outcome, "resultLabel": profile["label"], "cooldownAddMinutes": cooldown_add, "sceneAssetType": asset_type, "sceneAssetHint": asset_hint, "sceneObjectName": scene_name, "itemName": (reward_item or {}).get("name") or "", "itemCode": (reward_item or {}).get("code") or ""})
-    ultra_reward = next((r for r in (reward_items or []) if ultra_item_def(r.get("code"))), None)
-    if ultra_reward:
-        ultra_def = ultra_item_def(ultra_reward.get("code")) or {}
+        primary_reward = (reward_list or [{}])[0]
+        asset_type, asset_hint, scene_name = mission_scene_hint_from_event(mission_key, primary_reward if reward_list else None, rng)
+        text = template.format(
+            resultLabel=profile["label"],
+            tierLabel=tier_label,
+            itemName=primary_reward.get("name") or "field sample",
+            cooldownText=cooldown_text,
+            objectName=rng.choice(objects),
+            planetName=(planet or {}).get("name") or "the surface",
+            planetTrait=rng.choice(trait_pool),
+            endingLine="",
+            rewardXp=reward_xp,
+        )
         events.append({
-            "atPct": 0.965,
-            "text": ultra_def.get("special_text") or f"You uncover {ultra_reward.get('name') or 'an ultra item'}.",
-            "kind": "crit_success",
-            "outcome": "ultra",
-            "resultLabel": "Ultra Discovery",
-            "cooldownAddMinutes": 0,
-            "sceneAssetType": "item",
-            "sceneAssetHint": ultra_reward.get("code") or "",
-            "sceneObjectName": ultra_reward.get("name") or "Ultra discovery",
-            "itemName": ultra_reward.get("name") or "",
-            "itemCode": ultra_reward.get("code") or "",
+            "atPct": round((i + 1) / (count + 1), 3),
+            "text": text,
+            "kind": profile["kind"],
+            "outcome": outcome,
+            "resultLabel": profile["label"],
+            "cooldownAddMinutes": cooldown_add,
+            "rewardXp": reward_xp,
+            "rewardItems": reward_list,
+            "sceneAssetType": asset_type,
+            "sceneAssetHint": asset_hint,
+            "sceneObjectName": scene_name,
+            "itemName": primary_reward.get("name") or "",
+            "itemCode": primary_reward.get("code") or "",
         })
+
+    if ultra_reward:
+        target_indexes = [idx for idx, ev in enumerate(events) if ev.get("outcome") in {"success", "critical_success"}]
+        if target_indexes:
+            target_idx = rng.choice(target_indexes)
+        else:
+            target_idx = min(len(events) - 1, max(0, int(len(events) * 0.75)))
+            events[target_idx]["outcome"] = "critical_success"
+            events[target_idx]["kind"] = "crit_success"
+            events[target_idx]["resultLabel"] = "Critical Success"
+            events[target_idx]["rewardXp"] = max(8, mission_event_xp_roll(rng, level, difficulty, critical=True))
+            events[target_idx]["rewardItems"] = []
+        ultra_def = ultra_item_def(ultra_reward.get("code")) or {}
+        events[target_idx]["rewardItems"] = list(events[target_idx].get("rewardItems") or []) + [ultra_reward]
+        events[target_idx]["sceneAssetType"] = "item"
+        events[target_idx]["sceneAssetHint"] = ultra_reward.get("code") or ""
+        events[target_idx]["sceneObjectName"] = ultra_reward.get("name") or "Ultra discovery"
+        events[target_idx]["itemName"] = ultra_reward.get("name") or ""
+        events[target_idx]["itemCode"] = ultra_reward.get("code") or ""
+        events[target_idx]["text"] = ultra_def.get("special_text") or f"Ultra Discovery: You uncover {ultra_reward.get('name') or 'an ultra item'}."
+
     return events
+
+
+def player_planet_mission_cooldown_info(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    rec = row(conn, "SELECT planet_mission_cooldown_until, planet_mission_cooldown_reason FROM players WHERE id=?", (player_id,)) or {}
+    until = parse_dt(rec.get("planet_mission_cooldown_until"))
+    now = utcnow()
+    seconds = max(0, int((until - now).total_seconds())) if until else 0
+    active = bool(until and seconds > 0)
+    return {
+        "active": active,
+        "until": iso(until) if until and active else None,
+        "secondsRemaining": seconds,
+        "minutesRemaining": max(0, math.ceil(seconds / 60)) if active else 0,
+        "reason": rec.get("planet_mission_cooldown_reason") or ("Mission cooldown active." if active else ""),
+    }
+
+
+def set_player_planet_mission_cooldown(conn: sqlite3.Connection, player_id: int, minutes: int, reason: str = "") -> Dict[str, Any]:
+    minutes = clamp_int(int(minutes or 0), 0, int(WORLD_MISSION_BALANCE.get("mission_cooldown_cap_minutes", 120) or 120))
+    if minutes <= 0:
+        conn.execute("UPDATE players SET planet_mission_cooldown_until=NULL, planet_mission_cooldown_reason='' WHERE id=?", (player_id,))
+        return {"active": False, "until": None, "secondsRemaining": 0, "minutesRemaining": 0, "reason": ""}
+    until = utcnow() + timedelta(minutes=minutes)
+    conn.execute("UPDATE players SET planet_mission_cooldown_until=?, planet_mission_cooldown_reason=? WHERE id=?", (iso(until), reason or f"Planet mission cooldown: {minutes} minutes.", player_id))
+    return player_planet_mission_cooldown_info(conn, player_id)
+
+
+def mission_cooldown_minutes_from_events(events: List[Dict[str, Any]], progress: float = 1.0) -> int:
+    return int(aggregate_mission_event_rewards(events, progress).get("cooldown") or 0)
 
 
 def mission_contracts_for_planet(conn: sqlite3.Connection, player: Dict[str, Any], planet: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -7621,16 +7724,15 @@ def mission_contracts_for_planet(conn: sqlite3.Connection, player: Dict[str, Any
         prog = row(conn, "SELECT * FROM planet_mission_progress WHERE player_id=? AND planet_id=? AND mission_key=?", (player["id"], planet["id"], key)) or {}
         level = max(1, int(prog.get("level") or mission_level_from_xp(int(prog.get("xp") or 0))))
         time_mult = 1.0 + (level - 1) * float(WORLD_MISSION_BALANCE.get("mission_time_growth_pct_per_level", 0.10))
-        reward_mult = 1.0 + (level - 1) * float(WORLD_MISSION_BALANCE.get("mission_reward_growth_pct_per_level", 0.20))
         base_minutes = rng.randint(int(WORLD_MISSION_BALANCE.get("mission_base_minutes_min", 30)), int(WORLD_MISSION_BALANCE.get("mission_base_minutes_max", 60)))
         minutes = int(base_minutes * time_mult)
-        credits = 0 if not bool(WORLD_MISSION_BALANCE.get("direct_credit_rewards_enabled", False)) else int(int(cfg.get("baseCredits") or 0) * reward_mult * center_mult)
-        xp = int(int(cfg.get("xp") or 75) * reward_mult)
-        reward_items = mission_item_reward_rolls(key, cfg, level, center_ratio, f"mission-preview:{player['id']}:{planet['id']}:{key}:{level}")
+        credits = 0
+        xp = 0
+        reward_items: List[Dict[str, Any]] = []
         difficulty = clamp_int(int((int(band.get("npc_level_min") or 1) + int(band.get("npc_level_max") or 10)) / 2) + level, 1, 120)
         can_start = not bool(active) and not bool(cooldown.get("active"))
         blocked_reason = "Mission already active" if active else (f"Cooldown {cooldown.get('minutesRemaining')} min" if cooldown.get("active") else "")
-        out.append({"key": key, "name": cfg.get("name") or label_for_api(key), "description": f"{label_for_api(str(planet.get('type') or 'planet'))} contract. Planet mission level {level}; stronger contracts appear closer to center space.", "planetId": planet["id"], "planetName": planet.get("name"), "planetType": planet.get("type"), "level": level, "tierLabel": mission_tier_label_from_difficulty(difficulty), "planetMissionXp": int(prog.get("xp") or 0), "completed": int(prog.get("completed_count") or 0), "minutes": minutes, "rewardCredits": credits, "rewardXp": xp, "rewardItems": reward_items, "rewardText": mission_reward_text(reward_items, xp), "difficulty": difficulty, "tags": cfg.get("tags") or [], "canStart": can_start, "blockedReason": blocked_reason})
+        out.append({"key": key, "name": cfg.get("name") or label_for_api(key), "description": f"{label_for_api(str(planet.get('type') or 'planet'))} contract. Planet mission level {level}; stronger contracts appear closer to center space.", "planetId": planet["id"], "planetName": planet.get("name"), "planetType": planet.get("type"), "level": level, "tierLabel": mission_tier_label_from_difficulty(difficulty), "planetMissionXp": int(prog.get("xp") or 0), "completed": int(prog.get("completed_count") or 0), "minutes": minutes, "rewardCredits": credits, "rewardXp": xp, "rewardItems": reward_items, "rewardText": "Rewards are rolled during the mission", "difficulty": difficulty, "tags": cfg.get("tags") or [], "canStart": can_start, "blockedReason": blocked_reason})
     return out
 
 
@@ -7640,23 +7742,33 @@ def active_planet_mission(conn: sqlite3.Connection, player_id: int) -> Optional[
         FROM planet_mission_runs pmr
         JOIN planets p ON p.id=pmr.planet_id
         JOIN galaxies g ON g.id=p.galaxy_id
-        WHERE pmr.player_id=? AND pmr.status='active'
-        ORDER BY pmr.id DESC LIMIT 1
+        WHERE pmr.player_id=? AND pmr.status IN ('active','return_ready')
+        ORDER BY CASE WHEN pmr.status='return_ready' THEN 0 ELSE 1 END, pmr.id DESC LIMIT 1
     """, (player_id,))
     if not mission:
         return None
     now = utcnow()
     started = parse_dt(mission.get("started_at")) or now
     done = parse_dt(mission.get("completes_at")) or now
-    total = max(1, (done - started).total_seconds())
-    progress = max(0.0, min(1.0, (now - started).total_seconds() / total))
+    if mission.get("status") == "return_ready":
+        progress = 1.0
+        seconds_remaining = 0
+    else:
+        total = max(1, (done - started).total_seconds())
+        progress = max(0.0, min(1.0, (now - started).total_seconds() / total))
+        seconds_remaining = max(0, int((done - now).total_seconds()))
+    all_events = decode_json(mission.get("event_log_json"), []) or []
+    earned = aggregate_mission_event_rewards(all_events, progress)
     mission["progress"] = progress
-    mission["secondsRemaining"] = max(0, int((done - now).total_seconds()))
-    mission["eventLog"] = decode_json(mission.get("event_log_json"), []) or []
-    mission["rewardItems"] = decode_json(mission.get("reward_items_json"), []) or []
-    mission["rewardText"] = mission_reward_text(mission["rewardItems"], int(mission.get("reward_xp") or 0))
-    mission["cooldownAccruedMinutes"] = mission_cooldown_minutes_from_events(mission["eventLog"], progress)
-    mission["cooldownProjectedMinutes"] = mission_cooldown_minutes_from_events(mission["eventLog"], 1.0)
+    mission["secondsRemaining"] = seconds_remaining
+    mission["eventLog"] = earned["events"]
+    mission["totalEventCount"] = len(all_events)
+    mission["rewardItems"] = earned["items"]
+    mission["rewardXpEarned"] = earned["xp"]
+    mission["rewardText"] = mission_reward_text(earned["items"], int(earned["xp"] or 0))
+    mission["cooldownAccruedMinutes"] = earned["cooldown"]
+    mission["cooldownProjectedMinutes"] = earned["cooldown"] if mission.get("status") == "return_ready" else 0
+    mission["returnReady"] = mission.get("status") == "return_ready"
     return mission
 
 
@@ -7664,12 +7776,15 @@ def resolve_completed_planet_missions(conn: sqlite3.Connection, player_id: int) 
     completed = []
     now = utcnow()
     for m in rows(conn, "SELECT * FROM planet_mission_runs WHERE player_id=? AND status='active' AND completes_at<=?", (player_id, iso(now))):
-        reward_items = decode_json(m.get("reward_items_json"), []) or []
         events = decode_json(m.get("event_log_json"), []) or []
-        personal_xp = int(m.get("reward_xp") or 0)
-        xp_gain = int(WORLD_MISSION_BALANCE.get("mission_xp_per_completion", 100)) + personal_xp
-        conn.execute("UPDATE players SET xp=xp+? WHERE id=?", (personal_xp, player_id))
-        grant_planet_mission_item_rewards(conn, player_id, reward_items)
+        earned = aggregate_mission_event_rewards(events, 1.0)
+        reward_items = earned["items"]
+        personal_xp = int(earned["xp"] or 0)
+        xp_gain = personal_xp
+        if personal_xp:
+            conn.execute("UPDATE players SET xp=xp+? WHERE id=?", (personal_xp, player_id))
+        if reward_items:
+            grant_planet_mission_item_rewards(conn, player_id, reward_items)
         progress = row(conn, "SELECT * FROM planet_mission_progress WHERE player_id=? AND planet_id=? AND mission_key=?", (player_id, m["planet_id"], m["mission_key"]))
         old_xp = int((progress or {}).get("xp") or 0)
         new_xp = old_xp + xp_gain
@@ -7679,11 +7794,14 @@ def resolve_completed_planet_missions(conn: sqlite3.Connection, player_id: int) 
             conn.execute("UPDATE planet_mission_progress SET xp=?, level=?, completed_count=completed_count+1, total_rewards=total_rewards+?, updated_at=? WHERE id=?", (new_xp, new_level, item_value, iso(now), progress["id"]))
         else:
             conn.execute("INSERT INTO planet_mission_progress (player_id,planet_id,mission_key,xp,level,completed_count,total_rewards,updated_at) VALUES (?,?,?,?,?,?,?,?)", (player_id, m["planet_id"], m["mission_key"], new_xp, new_level, 1, item_value, iso(now)))
-        cooldown_minutes = mission_cooldown_minutes_from_events(events, 1.0)
+        cooldown_minutes = int(earned["cooldown"] or 0)
         cooldown = set_player_planet_mission_cooldown(conn, player_id, cooldown_minutes, f"Planet mission recovery time: {cooldown_minutes} minutes." if cooldown_minutes > 0 else "")
         reward_text = mission_reward_text(reward_items, personal_xp)
         suffix = f" Cooldown {cooldown_minutes} min." if cooldown_minutes > 0 else ""
-        conn.execute("UPDATE planet_mission_runs SET status='complete', completed_at=?, message=? WHERE id=?", (iso(now), f"Completed. Recovered {reward_text}.{suffix}", m["id"]))
+        conn.execute(
+            "UPDATE planet_mission_runs SET status='return_ready', reward_xp=?, reward_items_json=?, completed_at=?, message=? WHERE id=?",
+            (personal_xp, encode_json(reward_items), iso(now), f"Mission complete. Recovered {reward_text}.{suffix}", m["id"])
+        )
         grant_action_progression(conn, player_id, "planet_mission", 1.0 + new_level / 10, True)
         add_event(conn, player_id, "planet_mission", f"Completed {m.get('mission_name')} on planet mission level {new_level}.", {"missionId": m["id"], "items": reward_items, "personalXp": personal_xp, "missionXp": xp_gain, "level": new_level, "cooldownMinutes": cooldown_minutes})
         completed.append({"id": m["id"], "items": reward_items, "personalXp": personal_xp, "level": new_level, "name": m.get("mission_name"), "cooldown": cooldown})
@@ -7732,13 +7850,12 @@ def start_planet_mission_run(conn: sqlite3.Connection, player: Dict[str, Any], p
     cfg = (WORLD_MISSION_BALANCE.get("mission_types") or {}).get(mission_key, {})
     starts = utcnow()
     completes = starts + timedelta(minutes=max(1, int(contract["minutes"])))
-    reward_items = contract.get("rewardItems") or []
-    events = mission_event_log(f"{pid}:{planet['id']}:{mission_key}:{iso(starts)}", cfg, int(contract["minutes"]), mission_key=mission_key, planet=planet, reward_items=reward_items, level=int(contract.get("level") or 1), difficulty=int(contract.get("difficulty") or 1))
+    events = mission_event_log(f"{pid}:{planet['id']}:{mission_key}:{iso(starts)}", cfg, int(contract["minutes"]), mission_key=mission_key, planet=planet, reward_items=[], level=int(contract.get("level") or 1), difficulty=int(contract.get("difficulty") or 1))
     conn.execute(
         """INSERT INTO planet_mission_runs
            (player_id,planet_id,mission_key,mission_name,status,level,reward_credits,reward_xp,reward_items_json,started_at,completes_at,event_log_json,message)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (pid, planet["id"], mission_key, contract["name"], "active", contract["level"], 0, contract["rewardXp"], encode_json(reward_items), iso(starts), iso(completes), encode_json(events), "Mission in progress."),
+        (pid, planet["id"], mission_key, contract["name"], "active", contract["level"], 0, 0, encode_json([]), iso(starts), iso(completes), encode_json(events), "Mission in progress."),
     )
     run_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
     add_event(conn, pid, "planet_mission", f"Started {contract['name']} on {planet['name']}.", {"missionId": run_id, "planetId": planet["id"], "missionKey": mission_key})
@@ -14006,7 +14123,19 @@ def start_simulation_thread() -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
-    migrate()
+    if should_reset_db_on_start():
+        marker = DB_PATH.with_name(".nova_reset_db_on_start_applied")
+        if not marker.exists():
+            backup_and_remove_db("manual-reset")
+            marker.write_text(iso(), encoding="utf-8")
+    try:
+        migrate()
+    except Exception as exc:
+        if not should_rebuild_bad_db():
+            raise
+        backup = backup_and_remove_db("migration-failed")
+        print(f"WARNING: Nova DB migration failed ({exc!r}). Backed up stale DB to {backup}. Rebuilding clean DB.", flush=True)
+        migrate()
     start_simulation_thread()
 
 
@@ -17966,12 +18095,24 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         mission = active_planet_mission(conn, pid)
         if not mission:
             return {"message": "No active planet mission."}
+        if mission.get("status") == "return_ready":
+            conn.execute("UPDATE planet_mission_runs SET status='complete', message=? WHERE id=?", ("Returned to map after mission completion.", mission["id"]))
+            add_event(conn, pid, "planet_mission", f"Returned to map after {mission.get('mission_name')}.", {"missionId": mission["id"]})
+            return {"message": "Returned to map.", "openPage": "Map"}
         accrued_minutes = mission_cooldown_minutes_from_events(mission.get("eventLog") or [], float(mission.get("progress") or 0))
         cooldown_minutes = max(int(WORLD_MISSION_BALANCE.get("mission_cancel_cooldown_min_minutes", 10) or 10), accrued_minutes)
         cooldown = set_player_planet_mission_cooldown(conn, pid, cooldown_minutes, f"Mission aborted: recovery time {cooldown_minutes} minutes.")
         conn.execute("UPDATE planet_mission_runs SET status='cancelled', completed_at=?, message=? WHERE id=?", (iso(), f"Cancelled. Returned to ship with no rewards or XP. Cooldown {cooldown_minutes} minutes.", mission["id"]))
         add_event(conn, pid, "planet_mission", f"Cancelled {mission.get('mission_name')} and returned to ship with no rewards.", {"missionId": mission["id"], "cooldownMinutes": cooldown_minutes})
         return {"message": f"Mission cancelled. You returned to your ship and left rewards behind. Cooldown {cooldown_minutes} min.", "openPage": "Map", "cooldown": cooldown}
+
+    if t == "return_to_map_after_mission":
+        mission = active_planet_mission(conn, pid)
+        if not mission or mission.get("status") != "return_ready":
+            return {"message": "No completed mission waiting."}
+        conn.execute("UPDATE planet_mission_runs SET status='complete', message=? WHERE id=?", ("Returned to map after mission completion.", mission["id"]))
+        add_event(conn, pid, "planet_mission", f"Returned to map after {mission.get('mission_name')}.", {"missionId": mission["id"]})
+        return {"message": "Returned to map.", "openPage": "Map"}
 
     if t == "pve_operation":
         op = row(conn, "SELECT * FROM pve_operations WHERE code=?", (payload.get("code"),))

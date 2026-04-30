@@ -829,11 +829,16 @@ function Galaxies({state,act,clock,mapMode,onMapModeChange}) {
 function SystemMap({state,act,clock,mapMode,onMapModeChange}) {
   const map = state.system_map || {nodes:[], lanes:[]};
   const travel = state.travel_state || {};
+  const activeMission = state.planet_missions?.active;
+  if (activeMission) {
+    return <Page title="Map — Mission View" sub="You are away from the ship on a planet mission. The local map returns after completion or cancellation.">
+      <MissionScreen state={state} act={act} clock={clock} />
+    </Page>;
+  }
   return <Page title="Map — System View" sub="Planet view shows local planets, stations, pirate stations, resources, and galaxy gates leading to adjacent galaxies.">
     <TravelStatus state={state} clock={clock} />
     <CargoOperationPanel state={state} />
     <MapOperationPanel state={state} clock={clock} />
-    <MissionScreen state={state} act={act} clock={clock} />
     <Panel title={`${state.location?.galaxy_name || 'Current Galaxy'} Local Map`} help="Planet/station nodes expose security, stability, faction control, market strength, operation count, and route danger.">
       <MapView type="system" map={map} travel={travel}
         onTravel={(node)=>node.kind === 'gate' ? act('galaxy_travel',{galaxy_id:node.target_galaxy_id}) : act('travel',{planet_id:node.id,dock:true})}
@@ -2464,9 +2469,9 @@ function PlanetMissionContracts({state,act,compact=false}) {
       <div className="missionCardHeader"><b>{c.name}</b><span>{c.planetName} • {c.tierLabel || `Lvl ${fmt(c.level)}`} • {fmt(c.minutes)} min</span></div>
       <small>{c.description}</small>
       <div className="tagCloud">
-        <span>{fmt(c.rewardXp)} XP</span>
+        <span>Rewards roll during mission</span>
+        <span>XP only on success+</span>
         <span>Diff {fmt(c.difficulty)}</span>
-        {(c.rewardItems||[]).map(i=><span key={i.code}>{fmt(i.qty)}x {i.name}</span>)}
         {(c.tags||[]).map(t=><span key={t}>{label(t)}</span>)}
       </div>
       <button disabled={!c.canStart} onClick={()=>act('start_planet_mission',{mission_key:c.key})}>{c.canStart ? 'Start Mission' : c.blockedReason}</button>
@@ -2480,18 +2485,25 @@ function MissionScreen({state,act,clock}) {
   if (!mission) return null;
   const progress = Math.max(0, Math.min(1, Number(mission.progress || 0)));
   const logs = mission.eventLog || [];
-  const visibleLogs = logs.filter(e => Number(e.atPct || 0) <= progress + 0.02);
+  const totalEvents = Number(mission.totalEventCount || logs.length || 0);
+  const visibleLogs = logs;
   const encounters = missionSceneEncounters(visibleLogs);
   const theme = missionThemeFor(mission);
   const avatarArt = missionAvatarArt(state);
   const planetArt = missionPlanetArt(mission);
+  const done = mission.returnReady || mission.status === 'return_ready';
   const cancel = () => {
+    if (done) {
+      act('return_to_map_after_mission', {mission_id:mission.id});
+      return;
+    }
     if (window.confirm('You will expedite returning to your ship and leaving your rewards behind, continue?')) {
       act('cancel_planet_mission', {});
     }
   };
-  return <Panel title="Active Planet Mission" help="Your ship is docked off-map during the run. Failures and early cancellations add to the visible cooldown timer.">
-    <div className={`missionScreen ${theme.className}`}>
+  const itemCount = (mission.rewardItems || []).reduce((a,i)=>a+Number(i.qty||0),0);
+  return <Panel title={done ? "Planet Mission Complete" : "Active Planet Mission"} help={done ? "Review final action results, then return to the map." : "Your ship is docked off-map during the run. Rewards are only revealed by completed action rolls."}>
+    <div className={`missionScreen ${theme.className} ${done ? 'missionDone' : ''}`}>
       <div className="missionSceneCard">
         <div className="missionSceneHeader">
           <div>
@@ -2499,9 +2511,9 @@ function MissionScreen({state,act,clock}) {
             <p>{mission.planet_name} • {mission.galaxy_name} • {label(mission.planet_type)} • {theme.accent}</p>
           </div>
           <div className="missionHeaderBadges">
-            <span>{Math.round(progress * 100)}% complete</span>
-            <span>{clockTimeLeft(mission.completes_at)} remaining</span>
-            <span>Cooldown on return {fmt(mission.cooldownProjectedMinutes || 0)}m</span>
+            <span>{done ? 'Complete' : `${Math.round(progress * 100)}% complete`}</span>
+            <span>{done ? 'Ready to return' : `${clockTimeLeft(mission.completes_at)} remaining`}</span>
+            <span>Cooldown so far {fmt(mission.cooldownAccruedMinutes || 0)}m</span>
           </div>
         </div>
 
@@ -2523,7 +2535,7 @@ function MissionScreen({state,act,clock}) {
           </div>)}
           <div className="missionStageHud">
             <span>{theme.subtitle}</span>
-            <b>{mission.rewardText || `${fmt(mission.reward_xp)} XP`}</b>
+            <b>{done ? 'Mission complete' : 'Rewards reveal as events resolve'}</b>
           </div>
         </div>
 
@@ -2538,29 +2550,30 @@ function MissionScreen({state,act,clock}) {
         <div className="missionBottomGrid">
           <div className="missionSummaryStrip">
             <div className="missionSummaryCard"><b>Level</b><span>{fmt(mission.level)}</span></div>
-            <div className="missionSummaryCard"><b>Reward</b><span>{mission.rewardText || `${fmt(mission.reward_xp)} XP`}</span></div>
-            <div className="missionSummaryCard"><b>Cooldown So Far</b><span>{fmt(mission.cooldownAccruedMinutes || 0)} min</span></div>
-            <div className="missionSummaryCard"><b>Projected Cooldown</b><span>{fmt(mission.cooldownProjectedMinutes || 0)} min</span></div>
+            <div className="missionSummaryCard"><b>XP Earned</b><span>{fmt(mission.rewardXpEarned || 0)}</span></div>
+            <div className="missionSummaryCard"><b>Items Found</b><span>{fmt(itemCount)}</span></div>
+            <div className="missionSummaryCard"><b>{done ? 'Final Cooldown' : 'Cooldown So Far'}</b><span>{fmt(mission.cooldownAccruedMinutes || 0)} min</span></div>
           </div>
           {!!(mission.rewardItems||[]).length && <div className="tagCloud missionRewardItems">{(mission.rewardItems||[]).map(i=><span key={i.code}>{fmt(i.qty)}x {i.name}</span>)}</div>}
           <div className="missionFeedWrap">
             <div className="missionFeedHeader">
               <b>Action Result Stream</b>
-              <span>{visibleLogs.length} / {logs.length} events resolved</span>
+              <span>{visibleLogs.length} / {totalEvents} events resolved</span>
             </div>
             <div className="missionEventFeed">
               {visibleLogs.length ? visibleLogs.map((e,i)=><div key={i} className={`missionFeedItem ${e.kind || 'event'}`}>
                 <div className="missionFeedItemTop">
                   <b>{e.resultLabel || label(e.kind || 'event')}</b>
-                  {!!e.cooldownAddMinutes && <span>+{fmt(e.cooldownAddMinutes)}m cooldown</span>}
+                  <span>{!!e.cooldownAddMinutes ? `+${fmt(e.cooldownAddMinutes)}m cooldown` : Number(e.rewardXp || 0) > 0 ? `+${fmt(e.rewardXp)} XP` : ''}</span>
                 </div>
                 <span>{e.text}</span>
+                {!!(e.rewardItems||[]).length && <div className="tagCloud missionEventRewards">{(e.rewardItems||[]).map(i=><span key={i.code}>{fmt(i.qty)}x {i.name}</span>)}</div>}
               </div>) : <div className="missionFeedItem"><div className="missionFeedItemTop"><b>Deploying</b></div><span>Landing team is leaving the ship and setting up mission instruments.</span></div>}
             </div>
           </div>
         </div>
 
-        <button className="dangerBtn" onClick={cancel}>Cancel Mission / Return To Ship</button>
+        <button className={done ? "successBtn" : "dangerBtn"} onClick={cancel}>{done ? 'Return To Map' : 'Cancel Mission / Return To Ship'}</button>
       </div>
     </div>
   </Panel>;
