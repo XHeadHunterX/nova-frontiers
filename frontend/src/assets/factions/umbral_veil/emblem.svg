@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>Umbral Veil emblem</title>
+  <rect width="128" height="128" rx="26" fill="#070718"/>
+  <circle cx="64" cy="64" r="56" fill="#b174ff" opacity=".08"/>
+  <path d="M64 13 C87 29 101 48 104 73 C84 63 72 75 64 111 C56 75 44 63 24 73 C27 48 41 29 64 13Z" fill="#b174ff" stroke="#42f0ff" stroke-width="5"/><circle cx="64" cy="62" r="15" fill="#070718" stroke="#f472b6" stroke-width="4"/><path d="M64 31 C55 48 55 76 64 94 C73 76 73 48 64 31Z" fill="#42f0ff" opacity=".75"/>
+</svg>

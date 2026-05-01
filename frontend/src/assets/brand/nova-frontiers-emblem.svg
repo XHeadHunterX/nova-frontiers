@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none" >
+<defs>
+<linearGradient id="brand-g" x1="40" y1="20" x2="560" y2="180" gradientUnits="userSpaceOnUse"><stop stop-color="#7af7ff"/><stop offset=".45" stop-color="#c7fbff"/><stop offset="1" stop-color="#ffcf6f"/></linearGradient>
+<radialGradient id="brand-r" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(98 95) rotate(45) scale(78 78)"><stop stop-color="#ffffff"/><stop offset=".24" stop-color="#63f5ff"/><stop offset="1" stop-color="#071622" stop-opacity="0"/></radialGradient>
+<filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+
+<rect width="128" height="128" rx="28" fill="#020812"/>
+<circle cx="64" cy="64" r="50" stroke="#173d4e" stroke-width="2"/>
+<path d="M64 10 L81 48 L120 64 L81 80 L64 118 L47 80 L8 64 L47 48 Z" stroke="url(#brand-g)" stroke-width="5" fill="#041420" filter="url(#glow)"/>
+<path d="M64 35 L73 55 L94 64 L73 73 L64 94 L55 73 L34 64 L55 55 Z" fill="url(#brand-g)"/>
+
+</svg>

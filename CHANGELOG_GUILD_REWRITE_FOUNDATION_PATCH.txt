@@ -1,0 +1,38 @@
+NOVA GUILD REWRITE FOUNDATION PATCH
+
+Changed/created by updater:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- NOVA_GUILD_SYSTEM_NOTES.md
+- NOVA_GUILD_SYSTEM_TEST_CHECKLIST.md
+
+Backend:
+- Adds normalized guild tables.
+- Adds guild creation, join/apply/invite, leave, kick, rank update endpoints.
+- Adds data-driven default ranks and permissions.
+- Adds daily contribution aggregate/event system.
+- Adds guild XP, level-up, member cap progression, and research point grants.
+- Adds point-based guild research definitions and unlock endpoint.
+- Adds planet-specific guild armory tables/endpoints.
+- Adds safe inventory adapter that blocks if no compatible planet-specific inventory table is found.
+- Adds treasury deposit/logging.
+- Adds guild-vs-guild and guild-vs-planet war declaration/surrender foundations.
+- Adds admin guild settings endpoints.
+- Adds compact guild logs and indexes.
+
+Frontend:
+- Adds Guild nav launcher.
+- Adds full Guild Command overlay/page at #guild.
+- Adds tabs: Overview, Roster, Contributions, Armory, Research, Treasury, Wars, Apps/Invites, Settings, Logs.
+- Guild data loads only when Guild page is opened; no large guild payload added to /api/state.
+
+CSS:
+- Adds clean MMO-style guild UI layout, responsive tables/cards, XP bar, research cards, and overlay shell.
+
+Docs:
+- Adds balance notes, integration notes, endpoint list, and test checklist.
+
+Known integration point:
+- Wire nova_record_guild_contribution(...) into existing mining, processing, crafting, mission, combat, salvage, delivery, event, and war-completion handlers.
+- If existing inventory tables use custom names/columns, extend _nova_guild_inventory_change(...) in backend/app/main.py.

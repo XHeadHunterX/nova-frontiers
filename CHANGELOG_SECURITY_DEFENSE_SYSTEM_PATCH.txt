@@ -1,0 +1,55 @@
+Nova Frontiers - Galaxy Security / Gate Turret / Patrol Defense System Patch
+
+Changed by updater:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- NOVA_SECURITY_DEFENSE_SYSTEM_NOTES.md
+
+Backend:
+- Adds galaxy security calculation:
+  - home/safe/capital galaxies are 1.0 security.
+  - center/dead-center/null/core galaxies are 0.0 security.
+  - coordinate-backed galaxies derive security from distance to map center.
+  - border/frontier/war fallback galaxies are lower security.
+- Adds security_settings table for adjustable admin tuning.
+- Adds galaxy_security_state table for per-galaxy security, owner faction, war flag, turret multiplier, and patrol bonus state.
+- Adds security_defense_registry table for spawned defender tracking.
+- Adds security_auto_engagements table for security-targeting records.
+- Ensures the npcs table exists with the fields already used by Nova traffic/state output.
+- Spawns gate turrets as stationary security NPCs near gate/crossing/jump/relay planets.
+- Falls back to four deterministic gates if no gate planets exist.
+- Turrets target bountied players and opposing factions.
+- Turrets respawn after turret_respawn_seconds, default 600.
+- If every turret in a galaxy is wiped, next spawn wave doubles up to max_turret_multiplier, default 8.
+- If no turret losses occur for turret_escalation_quiet_seconds, default 3600, multiplier resets.
+- Patrols scale with security and add slow bonus spawns after repeated galaxy losses.
+- Patrol escalation resets after patrol_escalation_quiet_seconds, default 3600.
+- War-active galaxies stop replacement spawns; existing defenders remain until defeated.
+- War state can be toggled through /api/admin/security/settings.
+- Hooks build_state so defense tick runs server-side without adding constant frontend polling.
+- Exposes GET /api/security/state.
+- Exposes POST /api/admin/security/settings.
+
+Frontend:
+- Adds a passive Galaxy Security overlay button.
+- Overlay is minimized by default.
+- It loads /api/security/state only when opened.
+- Shows security level, owner faction, war status, turret count/multiplier, and patrol count/bonus.
+
+CSS:
+- Adds compact bottom-left security overlay styling.
+
+Important behavior:
+- This patch uses the existing NPC traffic shape instead of inventing a separate map object system.
+- If the existing project exposes a compatible NPC/open-space battle helper, security defenders attempt to start a battle directly.
+- If no compatible helper exists, the system records the pending security engagement in security_auto_engagements and still places attackable defender NPCs on the map.
+
+Local validation:
+1. Run update-nova-security-defense-system.bat from project root.
+2. Restart backend and frontend.
+3. Run python -m py_compile backend/app/main.py.
+4. Run cd frontend && npm run build.
+5. Open the map, open Galaxy Security overlay, verify home galaxies show higher security than center/border galaxies.
+6. Destroy all turrets in one galaxy, wait for respawn, confirm multiplier increases.
+7. Mark a galaxy war-active through /api/admin/security/settings and confirm new replacements stop.

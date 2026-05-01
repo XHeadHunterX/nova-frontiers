@@ -1,0 +1,13 @@
+Nova Frontiers schema/state stability fix
+
+Fixed:
+- Existing SQLite saves created before server events now receive the missing server_events columns during migration.
+- /api/state no longer crashes with: table server_events has no column named warning_at.
+- server_events rows are backfilled with safe starts_at/warning_at/ends_at/metadata values.
+- server event schedule rows are deduplicated and protected with a unique event_key + starts_at index.
+- Server event scheduling now uses an upsert, not INSERT OR IGNORE against stale rows.
+- Galaxy gate seeding no longer deletes/reinserts all routes during /api/state setup.
+- Galaxy gate routes now upsert by route_key to avoid concurrent UNIQUE(route_key) crashes.
+
+Validation:
+- backend/app/main.py passed Python AST parse.

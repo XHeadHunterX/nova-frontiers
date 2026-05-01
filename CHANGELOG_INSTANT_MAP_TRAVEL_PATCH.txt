@@ -1,0 +1,38 @@
+Nova Frontiers - Instant Map Travel Visual Patch
+
+Changed by updater:
+- frontend/src/main.jsx
+
+Problem:
+- Map movement actions return before the expensive /api/state reload finishes.
+- The ship marker only starts moving after React receives the refreshed travel_state.
+- That creates a visible 1-2 second delay after clicking Go Here / Plot Course / Jump / Dock.
+
+Fix:
+- Adds a tiny optimistic travel_state builder on the frontend.
+- When a map travel action is clicked, React immediately inserts a local travel_state with:
+  - active=true
+  - origin_x_pct / origin_y_pct
+  - destination_x_pct / destination_y_pct
+  - started_at / arrival_at timestamps
+  - matching map mode: system, galaxy, or intercept
+- The existing MapView already knows how to animate coordinate travel lines from those fields.
+- The backend remains authoritative. The next /api/state response replaces the optimistic state.
+- If the action fails, the patch restores the previous React state.
+
+Also included:
+- Guards older frontend branches from blanking the app when /api/action returns refresh:true without a full state payload.
+
+Not changed:
+- No backend files.
+- No database changes.
+- No travel rules, speed, docking rules, battle rules, or server authority changed.
+
+Install:
+1. Copy update-nova-instant-map-travel.bat and apply_nova_instant_map_travel_patch.py into the Nova Frontiers project root.
+2. Run update-nova-instant-map-travel.bat.
+3. Restart frontend.
+
+Validation done here:
+- Patch script compiled with python -m py_compile.
+- Zip integrity checked.

@@ -1,0 +1,79 @@
+Nova Frontiers Phase Expansion — Full Pass 2
+
+Source:
+- Continued from nova-frontiers-phase-expansion-patch.zip and the phased requirements prompt.
+
+Files changed:
+1. backend/app/main.py
+   - Added durable phase tables:
+     phase_bounties, phase_ship_locks, derelict_sites, player_derelict_runs,
+     phase_wormhole_control, phase_refinery_jobs.
+   - Added artifact schema evolution:
+     equipped_ship_id and carried flags.
+   - Added bounty board loop:
+     NPC bounties, player-created bounties with 10% fee, bounty accept/claim actions,
+     last-seen-galaxy metadata, admin NPC bounty refresh.
+   - Added same-faction/criminal bounty-lock enforcement:
+     unlawful destruction can create a crime bounty and lock current ship/equipment.
+     Active bounty lock blocks ship swapping and module equip/unequip, but does not block cargo offload.
+   - Added crime bounty clearing action with fine.
+   - Added derelict exploration:
+     active derelict sites, derelict exploration runs, timed completion, rewards,
+     salvage, artifact chance, ladder score, 20 background keys, 200 flavor lines.
+   - Added artifact equipment:
+     identify -> collect -> equip/unequip loop.
+     Equipped identified artifacts expose ship bonus totals.
+     Unidentified carried artifacts are destroyed on ship destruction.
+   - Added Wormhole Control participation:
+     join control ring, tick/hold control, capture threshold, 48-hour reward expiry metadata,
+     event ladder capture-time scoring.
+   - Added refining jobs:
+     raw material/ore -> refined material timed conversion.
+   - Added phase timer resolution:
+     expired contracts fail, expired ship locks clear, completed refining jobs resolve.
+   - Added backend performance hardening:
+     phase trade-good market seeding updates market tick time to avoid massive first-load restock.
+     market restock avoids logging thousands of generated trade-good restock entries.
+   - Added safety hardening:
+     module stat aggregation now ignores non-numeric metadata fields so seeded weapons/modules
+     cannot crash ship-status or derived-stat calculations.
+   - Preserved existing features and did not delete admin, guild, profile, achievements,
+     party, combat, map, market, crafting, or faction war systems.
+
+2. frontend/src/main.jsx
+   - Expanded Server Calendar page with tabs for:
+     Events, Enemy Contracts, Bounty Board, Wormhole Control,
+     Scans / Derelicts / Artifacts, Refining, War Supply, Admin Events.
+   - Added bounty board UI:
+     create player bounty, accept bounty, claim NPC bounty, clear crime bounty.
+   - Added active bounty-lock warning in the Calendar event snapshot.
+   - Added Wormhole Control UI:
+     active event display, join control ring, tick control, capture table.
+   - Added derelict exploration UI:
+     list sites, start exploration, complete active runs.
+   - Added artifact equip/unequip UI and visible active artifact bonus chips.
+   - Added refinery job UI.
+
+3. frontend/src/styles.css
+   - Added styling for artifact bonus chips and stronger danger warning lines.
+
+Validation performed:
+- PASS backend Python AST parse.
+- PASS backend py_compile.
+- PASS fresh SQLite migration.
+- PASS seeded content counts:
+  server_events=28, phase_bounties=6, derelict_sites=20, trade_goods=120, artifacts=6.
+- PASS scan_area action.
+- PASS NPC bounty claim action.
+- PASS derelict start/complete actions.
+- PASS artifact identify/collect/equip flow.
+- PASS wormhole control trigger/join/tick/win flow.
+- PASS refinery job start action.
+- PASS same-faction bounty lock blocks ship swapping.
+- PASS build_state includes expanded phase payload.
+- Frontend browser build was not completed because the extracted project has no node_modules and vite is not available in the working directory. npm run build reaches the vite command and fails with vite not found.
+
+Known remaining implementation depth:
+- This pass converts the previous scaffolds into working backend loops and Calendar UI controls.
+- True browser/manual regression still must be run in your local project after npm install/start because this environment cannot run the Vite app without dependencies.
+- Wormhole reward planet entry is represented by reward expiry metadata; a future visual pass can add a dedicated home-galaxy wormhole map object if you want it shown as an actual clickable local-map object.

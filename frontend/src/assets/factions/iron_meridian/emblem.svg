@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>Iron Meridian emblem</title>
+  <rect width="128" height="128" rx="26" fill="#090d11"/>
+  <circle cx="64" cy="64" r="56" fill="#c9d2d8" opacity=".08"/>
+  <path d="M64 14 L103 36 V82 L64 114 L25 82 V36Z" fill="#090d11" stroke="#c9d2d8" stroke-width="5"/><path d="M64 26 L88 40 V74 L64 94 L40 74 V40Z" fill="#c9d2d8" opacity=".9"/><path d="M44 63 H84 M64 39 V89" stroke="#ff8f2e" stroke-width="7" stroke-linecap="round"/>
+</svg>

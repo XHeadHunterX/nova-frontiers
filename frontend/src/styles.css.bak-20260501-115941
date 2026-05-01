@@ -1,0 +1,3212 @@
+
+:root{--bg:#030b12;--panel:#071722cc;--panel2:#0b2230;--line:#11485c;--cyan:#35f2ff;--cyan2:#00a9c8;--green:#4dff91;--red:#ff4d57;--orange:#ffae35;--purple:#a65cff;--text:#d7f6ff;--muted:#82a7b5;--gold:#ffc247}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 70% 10%,#123044 0,#06121d 35%,#02060b 100%);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif;font-size:14px}.appShell{display:flex;min-height:100vh}.sidebar{width:260px;background:linear-gradient(180deg,#061520,#020910);border-right:1px solid var(--line);padding:14px;position:sticky;top:0;height:100vh;overflow:auto}.brand{display:flex;gap:12px;align-items:center;font-size:20px;letter-spacing:6px;font-weight:300;line-height:1.05}.brand b{font-weight:800}.brand.big{font-size:34px;justify-content:center;margin-bottom:20px}.brandMark{display:grid;place-items:center;width:42px;height:42px;border:1px solid var(--cyan2);border-radius:50%;color:var(--cyan);box-shadow:0 0 30px #00eaff44}.pilotCard{display:flex;gap:12px;margin:20px 0;padding:12px;border:1px solid var(--line);background:#071b28}.avatar{width:62px;height:62px;border:1px solid var(--cyan2);display:grid;place-items:center;font-size:30px;background:radial-gradient(circle,#164357,#07141d)}.pilotCard span,.muted,small{color:var(--muted)}.bars{display:grid;gap:8px}.bar{display:grid;grid-template-columns:56px 1fr 80px;gap:8px;align-items:center}.bar i{height:9px;background:#132735;border:1px solid #1d4d62;display:block}.bar b{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),#4dff91)}.bar b.danger{background:linear-gradient(90deg,#ff3545,#ff7e35)}nav{margin-top:22px;display:grid;gap:2px}nav button,.quickLogin button,.topbar button,button{background:#092535;color:var(--text);border:1px solid #176277;padding:10px 12px;cursor:pointer;text-transform:uppercase;font-weight:700;letter-spacing:.04em}nav button{display:flex;align-items:center;gap:12px;text-align:left;text-transform:none;font-weight:600;font-size:15px;border-color:transparent;background:transparent}nav button:hover,nav button.active{background:linear-gradient(90deg,#0f5363,#071923);border-color:var(--cyan2);color:#8cffff}nav em{margin-left:auto;background:#ff9d2e;color:#111;padding:2px 6px;border-radius:8px;font-style:normal;font-size:12px}.sector{margin-top:20px;border:1px solid var(--line);padding:12px;color:var(--muted)}.main{flex:1;min-width:0}.topbar{height:72px;display:flex;align-items:center;gap:18px;padding:0 24px;background:#04111a;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:2}.stat{display:flex;align-items:center;gap:8px;color:var(--muted);border-right:1px solid #123849;padding-right:18px}.stat svg{width:18px;color:var(--cyan)}.stat b{display:block;color:white}.god{padding:8px 12px;background:#3a2800;border:1px solid var(--gold);color:var(--gold);font-weight:900;margin-left:auto}.content{padding:18px;max-width:1760px}.content.wideMapContent{max-width:none;padding-right:18px}.dashboardGrid{display:grid;grid-template-columns:1.1fr 1fr 1.2fr;gap:14px}.panel{border:1px solid var(--line);background:linear-gradient(180deg,#081d2aaa,#06121cdd);box-shadow:0 0 30px #00131f99;position:relative;padding:16px;margin-bottom:14px}.panel h2{margin:0 0 14px;font-size:18px;letter-spacing:.06em;text-transform:uppercase}.help{display:inline-flex;position:relative;margin-left:8px;color:var(--muted);vertical-align:middle}.help em{display:none;position:absolute;left:20px;top:0;width:270px;padding:10px;background:#020a0f;border:1px solid var(--cyan2);color:var(--text);z-index:10;font-size:12px;line-height:1.35;text-transform:none;letter-spacing:0}.help:hover em{display:block}.pageHead{border:1px solid var(--line);padding:18px;margin-bottom:14px;background:linear-gradient(90deg,#102938aa,#07121aaa)}h1{margin:0;text-transform:uppercase;letter-spacing:.08em}.pageHead p{margin:8px 0 0;color:var(--muted)}.galaxyCards,.cards3{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.cards2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.galaxy{min-height:160px;padding:16px;border:1px solid #245b70;background:radial-gradient(circle at 50% 35%,#1d4b68,#07141d 65%);border-radius:6px}.galaxy.green{box-shadow:inset 0 0 50px #00ff9044}.galaxy.purple{box-shadow:inset 0 0 50px #a65cff55}.galaxy.orange{box-shadow:inset 0 0 50px #ff9d2e55}.galaxy.blue{box-shadow:inset 0 0 50px #25aaff55}.routeList,.opList{display:grid;gap:8px}.routeList div,.opList div,.itemLine,.event,.warCard{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:10px;border:1px solid #123849;background:#06141e}.itemLine b{color:#dffbff}.itemLine span{color:var(--muted)}table{width:100%;border-collapse:collapse}th,td{border-bottom:1px solid #13394a;padding:9px;text-align:left}th{color:#80cfe1;text-transform:uppercase;font-size:12px}.ok{color:var(--green)}.bad{color:var(--red)}.shipCard{display:flex;gap:16px;align-items:center}.shipArt{width:150px;height:90px;border:1px solid var(--line);background:linear-gradient(130deg,#12384d,#06111a);display:grid;place-items:center;font-size:44px;color:var(--cyan);clip-path:polygon(5% 50%,30% 8%,80% 18%,98% 50%,80% 82%,30% 92%)}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px}.stats div{padding:8px;background:#07131c;border:1px solid #123849}.stats span{display:block;color:var(--muted);font-size:12px}.stats b{font-size:16px}.moduleRow{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.moduleRow span{border:1px solid #1d637a;padding:7px;background:#06131c;color:#9dfcff}.twoCols{display:grid;grid-template-columns:1fr 1fr;gap:12px}.twoCols h3{color:var(--cyan);margin:0 0 6px}.mapPanel{height:620px;position:relative;background:radial-gradient(circle at 20% 30%,#0d4d56,#020810 34%,#020810 100%),radial-gradient(circle at 70% 60%,#6d3bd9,#020810 30%);overflow:hidden}.planetNode{position:absolute;border-radius:999px;padding:8px 12px;background:#07131ccc}.planetNode:before{content:'';display:inline-block;width:12px;height:12px;background:var(--cyan);border-radius:50%;box-shadow:0 0 20px var(--cyan);margin-right:8px}.treeWrap{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}.skillNode{display:flex;width:100%;justify-content:space-between;margin:4px 0;background:#07131c}.skillGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.skillGrid button{height:90px;text-align:left;background:#07131c}.skillGrid small{display:block;margin-top:8px}.hugeTimer{font-size:42px;font-weight:900;color:#ff9d4a;text-shadow:0 0 20px #ff7b0088}.actionLog{position:fixed;bottom:0;left:260px;right:0;display:flex;gap:8px;padding:8px;background:#02080dcc;border-top:1px solid var(--line);overflow:auto;z-index:3}.actionLog div{white-space:nowrap;color:#a9f7ff}.loginScreen{min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle,#103042,#02060b)}.loginCard{width:min(560px,90vw);padding:32px}.loginForm{display:grid;gap:10px}input,select{background:#030b12;border:1px solid #236078;color:var(--text);padding:12px}button:hover{filter:brightness(1.2);box-shadow:0 0 16px #00eaff33}.primary{background:linear-gradient(180deg,#28d9df,#0d788b);color:#001014}.quickLogin{display:flex;gap:10px;margin:12px 0}.error{color:#ff8a8a;margin:12px 0}.note{color:#8eb3c1;font-size:12px}.boot{height:100vh;display:grid;place-items:center;background:#020a10;color:var(--cyan);font-size:24px}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}code{display:block;padding:12px;margin:8px 0;background:#02070b;border:1px solid #123849}@media(max-width:1100px){.sidebar{width:88px}.sidebar span:not(.brandMark),.brand div,.pilotCard div,.bars,.sector{display:none}.main{min-width:0}.actionLog{left:88px}.dashboardGrid,.cards2{grid-template-columns:1fr}.topbar{overflow:auto}.stat{min-width:max-content}.content{padding:10px}}
+.partGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.part,.miniCard,.careerCard{padding:12px;border:1px solid #164e63;background:#06141e}.part b,.miniCard b,.careerCard b{display:block;color:#dffbff;margin-bottom:6px}.miniCard p,.careerCard p{color:var(--muted);min-height:38px}.miniCard span,.careerCard span,.careerCard small{display:block;color:var(--muted);margin:6px 0}.careerHeader{display:flex;justify-content:space-between;gap:12px;padding:10px;margin-bottom:12px;border:1px solid #1d637a;background:#06131c}.careerHeader b{color:#9dfcff}.careerList{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:10px}.careerCard details{margin:8px 0;color:#9fc7d2}.careerCard summary{cursor:pointer;color:var(--cyan)}.careerCard details p{min-height:0;margin:5px 0;color:#c9f5ff}.careerCard button{margin-top:8px}
+
+.currentGalaxyCard{display:grid;grid-template-columns:1.2fr .8fr;gap:12px;align-items:stretch}
+.panelSubhead{margin:8px 0 8px;color:var(--cyan);font-size:13px;text-transform:uppercase;letter-spacing:.08em}
+.opList.detailed{gap:10px;margin-bottom:12px}
+.opList.detailed>.operationCard{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px;border:1px solid #164e63;background:#06141e}
+.operationMain{display:grid;gap:4px;min-width:0}
+.operationMain b{color:#dffbff}
+.operationMain p{margin:0;color:var(--muted);font-size:12px;line-height:1.35}
+.operationMain span{color:#9dfcff;font-size:12px}
+button:disabled{opacity:.45;cursor:not-allowed;filter:none;box-shadow:none}
+@media(max-width:1100px){.currentGalaxyCard{grid-template-columns:1fr}.opList.detailed>.operationCard{align-items:stretch;flex-direction:column}.opList.detailed>.operationCard button{width:100%}}
+
+.feedList{display:grid;gap:8px;max-height:390px;overflow:auto}
+.feedList>div{display:grid;gap:4px;padding:10px;border:1px solid #123849;background:#06141e}
+.feedList b{color:#dffbff;text-transform:uppercase;font-size:12px;letter-spacing:.05em}
+.feedList span{color:var(--text);line-height:1.35}
+.feedList small{color:var(--muted)}
+.simulationMeta{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}
+.simulationMeta span,.tagCloud span{display:inline-block;border:1px solid #1d637a;background:#06131c;color:#9dfcff;padding:6px 8px;font-size:12px}
+.tagCloud{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+
+.tabBar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;padding:10px;border:1px solid var(--line);background:#04111a}
+.tabBar button{background:#061722;border-color:#123849;color:var(--muted)}
+.tabBar button.active{background:linear-gradient(180deg,#0f5363,#071923);border-color:var(--cyan2);color:#9dfcff}
+.inventoryToolbar{display:grid;gap:10px}
+.inventoryToolbar input{width:100%}
+.chipRow{display:flex;gap:6px;flex-wrap:wrap}
+.chipRow button{padding:7px 9px;background:#06131c;border-color:#164e63;color:#a7ceda;text-transform:none;letter-spacing:0;font-size:12px}
+.chipRow button.active{border-color:var(--cyan2);color:#8cffff;background:#092535}
+.warningLine{display:flex;align-items:center;gap:8px;margin-top:10px;padding:10px;border:1px solid #8a5b12;background:#2c1d06;color:#ffc247;font-weight:700}
+td small{display:block;margin-top:3px;max-width:520px;line-height:1.3}
+td button{margin:2px;padding:7px 9px;font-size:12px}
+
+/* Phase 3 PvE / Jobs refinement */
+.operationTitle{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.operationTitle em{font-style:normal;font-size:11px;padding:3px 7px;border:1px solid #1d637a;color:#9dfcff;background:#04111a;text-transform:uppercase;letter-spacing:.08em}
+.operationMain small{color:#82a7b5;font-size:11px;line-height:1.35}
+.operationCard.recommendedOp{border-color:#29d9ff;background:linear-gradient(180deg,#082638,#06141e);box-shadow:inset 0 0 22px #00eaff1c}
+.careerHero{display:grid;gap:6px;padding:12px;border:1px solid #164e63;background:#06141e;margin-bottom:10px}
+.careerHero b{font-size:22px;color:#dffbff}
+.careerHero span{color:#9dfcff}
+.careerHero p{margin:0;color:var(--muted);line-height:1.35}
+.miniStack{display:grid;gap:8px}
+.miniStack button{text-align:left;text-transform:none;letter-spacing:0;background:#06141e;border-color:#164e63}
+.miniStack b{display:block;color:#dffbff;margin-bottom:4px}
+.miniStack small{display:block;color:#82a7b5;line-height:1.3}
+.activeCareerCard{border-color:#29d9ff;background:linear-gradient(180deg,#082638,#06141e)}
+.skillTreeTotal{margin-bottom:8px;color:#9dfcff;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.skillNode{display:grid;grid-template-columns:1fr auto;gap:4px;text-align:left;text-transform:none;letter-spacing:0}
+.skillNode small{grid-column:1 / -1;color:#82a7b5;font-size:11px}
+.skillNode.locked{opacity:.55;border-color:#3a4650}
+
+/* Phase 5 crafting */
+.recipeGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:12px;margin-bottom:14px}
+.recipeCard{border:1px solid #164e63;background:#06141e;padding:14px;display:grid;gap:10px;box-shadow:inset 0 0 20px #00131f66}
+.recipeCard.readyRecipe{border-color:#1d8f73;background:linear-gradient(180deg,#08251f,#06141e)}
+.recipeCard.blockedRecipe{border-color:#3a4650;opacity:.82}
+.recipeHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.recipeHead b{display:block;color:#dffbff;font-size:16px}
+.recipeHead span{display:block;color:#82a7b5;font-size:12px;margin-top:4px;text-transform:uppercase;letter-spacing:.07em}
+.recipeHead em{font-style:normal;color:#9dfcff;border:1px solid #1d637a;background:#04111a;padding:5px 8px;font-weight:900}
+.recipeCard p{margin:0;color:#82a7b5;line-height:1.35;min-height:38px}
+.recipeMeta{display:flex;gap:6px;flex-wrap:wrap}
+.recipeMeta span{border:1px solid #123849;background:#07131c;color:#9dfcff;padding:5px 7px;font-size:12px}
+.recipeReqs{display:grid;gap:6px}
+.recipeReqs div{display:flex;justify-content:space-between;gap:8px;border:1px solid #123849;background:#07131c;padding:7px 8px}
+.recipeReqs div.met{border-color:#1d6b55;color:#bafcdd}
+.recipeReqs div.missing{border-color:#703442;color:#ffb9bf}
+.recipeReqs span{color:inherit}
+.recipeReqs b{color:#dffbff}
+.outputPreview{border:1px solid #1d637a;background:#04111a;padding:9px;display:grid;gap:3px}
+.outputPreview span{color:#82a7b5;font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+.outputPreview b{color:#dffbff}
+.outputPreview small{color:#9dfcff}
+.blockerLine{border:1px solid #703442;background:#261016;color:#ffb9bf;padding:8px;font-size:12px;line-height:1.35}
+.compactFeed{max-height:440px}
+
+
+/* Phase 7 planet control */
+.controlQuickActions{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.controlQuickActions button{padding:7px 9px;font-size:12px}.mutedBlock{color:var(--muted);line-height:1.4}.influenceStack{display:grid;gap:9px}.influenceBar{display:grid;grid-template-columns:120px 1fr 44px;gap:8px;align-items:center}.influenceBar span{color:var(--muted);font-size:12px}.influenceBar i{height:11px;background:#132735;border:1px solid #1d4d62;display:block}.influenceBar b{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),#4dff91)}.influenceBar b.danger{background:linear-gradient(90deg,#ffae35,#ff4d57)}.influenceBar em{font-style:normal;color:#dffbff;text-align:right}.controlActionGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}.controlActionCard{display:grid;gap:8px;padding:12px;border:1px solid #164e63;background:#06141e}.controlActionCard.matchedControl{border-color:#29d9ff;background:linear-gradient(180deg,#082638,#06141e)}.controlActionCard>div{display:flex;justify-content:space-between;gap:10px}.controlActionCard b{color:#dffbff}.controlActionCard em{font-style:normal;color:#9dfcff;border:1px solid #1d637a;background:#04111a;padding:3px 7px;font-size:11px;text-transform:uppercase;letter-spacing:.08em}.controlActionCard p{margin:0;color:var(--muted);line-height:1.35}.controlActionCard span{color:#9dfcff;font-size:12px}.controlActionCard small{color:#82a7b5;line-height:1.35}
+
+/* Phase 8 cleanup / visual inventory */
+.itemNameCell{display:flex;align-items:center;gap:10px;min-width:260px}.itemVisual{flex:0 0 auto;width:46px;height:46px;border:1px solid #1d637a;background:#020a10;border-radius:10px;display:grid;place-items:center;box-shadow:inset 0 0 18px #00131f,0 0 14px #00eaff12;overflow:hidden}.itemVisual img{width:100%;height:100%;object-fit:cover;display:block}.itemVisual span{font-size:22px;color:var(--cyan)}.itemVisual.xs{width:28px;height:28px;border-radius:7px}.itemVisual.sm{width:38px;height:38px;border-radius:9px}.itemVisual.ship{width:64px;height:42px;border-radius:10px}.visualLine{justify-content:flex-start}.visualLine>b{min-width:180px}.visualLine>span{margin-left:auto}.miniItem{display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;border:1px solid #123849;background:#06141e;padding:7px;margin:6px 0}.miniItem span{color:#dffbff}.miniItem b{color:var(--cyan)}.shipArt{clip-path:none;border-radius:14px;overflow:hidden}.shipArt img{width:100%;height:100%;object-fit:cover}.feedVisual{grid-template-columns:auto 1fr!important;display:grid!important;align-items:center!important}.visualOutput{grid-template-columns:auto 1fr;align-items:center}.visualOutput span{display:block}.recipeCard .itemVisual{box-shadow:inset 0 0 20px #00131f,0 0 18px #00eaff18}.itemLine button:last-child{margin-left:8px}@media(max-width:760px){.itemNameCell{min-width:0}.visualLine{display:grid;grid-template-columns:auto 1fr;align-items:center}.visualLine>span,.visualLine>button{grid-column:1 / -1;margin-left:0}.shipCard{align-items:flex-start;flex-direction:column}.shipArt{width:100%;height:110px}}
+
+/* Phase 9 visual information systems */
+.travelTop{min-width:260px}.travelIdle{display:grid;gap:4px;padding:12px;border:1px solid #164e63;background:#06141e}.travelIdle b{color:#dffbff;font-size:18px}.travelIdle span{color:var(--muted)}.travelStatusGrid{display:grid;grid-template-columns:1.3fr .7fr .8fr;gap:10px;margin-bottom:10px}.travelStatusGrid>div{border:1px solid #123849;background:#06141e;padding:10px}.travelStatusGrid b{display:block;color:#dffbff}.travelStatusGrid span{display:block;color:var(--muted);font-size:12px;margin-top:4px}.progress{display:block;height:10px;background:#132735;border:1px solid #1d4d62;overflow:hidden}.progress b{display:block;height:100%;background:linear-gradient(90deg,var(--cyan),var(--green));box-shadow:0 0 12px #35f2ff66}.progress b.danger{background:linear-gradient(90deg,var(--orange),var(--red))}.infoMap{height:560px;position:relative;overflow:hidden;border:1px solid #123849;background:radial-gradient(circle at 20% 20%,#0a3442 0,#020810 34%,#020810 100%),linear-gradient(135deg,#020810,#071722)}.infoMap:before{content:'';position:absolute;inset:0;background-image:radial-gradient(#8cf8ff55 1px, transparent 1px);background-size:38px 38px;opacity:.18}.mapLines{position:absolute;inset:0;width:100%;height:100%;z-index:1}.lane{stroke:#1c5f73;stroke-width:.45;vector-effect:non-scaling-stroke}.lane.planned{stroke-dasharray:4 4;opacity:.7}.lane.visited{stroke:var(--cyan);stroke-width:.7;opacity:.85}.lane.active{stroke:var(--gold);stroke-width:1.1;stroke-dasharray:5 3;animation:dashMove 1.8s linear infinite;filter:drop-shadow(0 0 4px #ffc247)}@keyframes dashMove{to{stroke-dashoffset:-20}}.mapNode{position:absolute;z-index:2;transform:translate(-50%,-50%);min-width:158px;max-width:190px;text-align:left;text-transform:none;letter-spacing:0;background:#031019dd;border:1px solid #1d637a;border-radius:14px;padding:8px;display:grid;grid-template-columns:42px 1fr;gap:8px;align-items:center}.mapNode img{width:42px;height:42px;border-radius:10px;border:1px solid #176277}.mapNode b{color:#dffbff;line-height:1.1}.mapNode span{grid-column:2;color:#82a7b5;font-size:11px;line-height:1.25}.mapNode.current{border-color:var(--gold);box-shadow:0 0 22px #ffc24755}.mapNode.visited:not(.current){border-color:var(--cyan2)}.shipMarker{position:absolute;z-index:5;transform:translate(-50%,-50%);color:var(--gold);font-size:28px;text-shadow:0 0 18px #ffc247,0 0 5px #000;display:grid;place-items:center;pointer-events:none}.shipMarker span{font-size:10px;background:#02060b;border:1px solid var(--gold);padding:2px 5px;border-radius:6px;margin-top:-5px}.routeLegend{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;color:var(--muted);font-size:12px}.routeLegend span{border:1px solid #123849;background:#06141e;padding:6px 8px}.routeLegend .solid{border-color:var(--cyan)}.routeLegend .dash{border-style:dashed}.routeLegend .activeLine{border-color:var(--gold);color:var(--gold)}.nodeHeader{display:grid;grid-template-columns:auto 1fr;gap:10px;align-items:center;margin-bottom:10px}.nodeHeader b{display:block;color:#dffbff}.nodeHeader span{display:block;color:var(--muted);line-height:1.35}.shipStatusHead{display:grid;grid-template-columns:116px 1fr;gap:12px;align-items:center;margin-bottom:12px}.shipStatusHead b{display:block;color:#dffbff;font-size:18px}.shipStatusHead span{display:block;color:#9dfcff;line-height:1.35}.smallShip{width:116px;height:72px}.systemBars{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px}.systemBars>div{border:1px solid #123849;background:#06141e;padding:8px}.systemBars span{color:var(--muted);font-size:12px}.systemBars small{display:block;margin-top:4px}.warningStack{display:grid;gap:6px;margin-top:10px}.warningStack span{display:flex;align-items:center;gap:6px;border:1px solid #8a5b12;background:#2c1d06;color:#ffc247;padding:7px 9px}.pressureColumns{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}.miniMarketStack{border:1px solid #123849;background:#06141e;padding:10px}.miniMarketStack h3{margin:0 0 8px;color:var(--cyan);font-size:13px;text-transform:uppercase}.miniMarketStack>div{display:grid;grid-template-columns:auto 1fr auto auto;gap:7px;align-items:center;border-top:1px solid #123849;padding:6px 0}.miniMarketStack span{color:#dffbff}.miniMarketStack b{color:var(--gold)}.miniMarketStack em{font-style:normal;color:var(--muted);font-size:11px}.pressureBadge{display:inline-block;border:1px solid #1d637a;background:#06141e;color:#9dfcff;padding:5px 7px;font-size:12px}.pressureBadge.illegal{border-color:#703442;color:#ffb9df;background:#26101c}.effectNotes{display:grid;gap:6px;margin-top:10px}.effectNotes span{border:1px solid #123849;background:#06141e;color:var(--muted);padding:8px;font-size:12px}.eventFilters{margin-bottom:10px}.enhancedFeed .eventCard{border-left:4px solid #1d637a}.enhancedFeed .eventCard.danger{border-left-color:var(--red)}.enhancedFeed .eventCard.info{border-left-color:var(--cyan)}.enhancedFeed .eventCard b{display:flex;gap:7px;align-items:center}.opIcon{width:46px;height:46px;border:1px solid #1d637a;background:#020a10;border-radius:12px;display:grid;place-items:center;color:var(--cyan);font-size:25px;box-shadow:0 0 15px #00eaff1e}.operationCard{display:grid!important;grid-template-columns:auto 1fr auto!important;align-items:center!important}.operationCard.illegalOp{border-color:#703442;background:linear-gradient(180deg,#26101c,#06141e)}.factorLine{display:flex;gap:6px;flex-wrap:wrap}.factorLine small{border:1px solid #123849;background:#031019;padding:3px 6px;color:#82a7b5}.inventoryCardGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:10px}.inventoryCard{display:grid;grid-template-columns:auto 1fr repeat(3,64px);gap:10px;align-items:center;border:1px solid #164e63;background:#06141e;padding:12px}.inventoryCard.illegalItem{border-color:#703442;background:linear-gradient(180deg,#26101c,#06141e)}.inventoryCardMain b{display:block;color:#dffbff}.inventoryCardMain span{display:block;color:#9dfcff;font-size:12px}.inventoryCardMain p{margin:4px 0 0;color:var(--muted);font-size:12px;line-height:1.3}.inventoryStats{border:1px solid #123849;background:#07131c;padding:7px;text-align:center}.inventoryStats small{display:block;text-transform:uppercase;font-size:10px}.inventoryStats b{color:#dffbff}.inventoryFlags{grid-column:1 / -2;display:flex;gap:6px;flex-wrap:wrap}.inventoryFlags span{border:1px solid #123849;background:#031019;color:var(--muted);padding:5px 7px;font-size:12px}@media(max-width:900px){.travelStatusGrid,.shipStatusHead{grid-template-columns:1fr}.infoMap{height:720px}.mapNode{min-width:136px}.operationCard{grid-template-columns:1fr!important}.inventoryCard{grid-template-columns:auto 1fr}.inventoryStats,.inventoryFlags,.inventoryCard .actions{grid-column:1 / -1}.cards2{grid-template-columns:1fr}}
+.mapNode img{object-fit:cover;background:#06121b}.trafficShip img,.resourceNode img{width:100%;height:100%;display:block;object-fit:cover;border-radius:999px;padding:4px;background:#06121b}.resourceNode img{padding:5px}.mapObjectHeaderVisual{grid-template-columns:56px 1fr;align-items:center;gap:12px}.mapObjectHeaderVisual img{width:56px;height:56px;border-radius:14px;border:1px solid #1d637a;background:#06121b;object-fit:cover}
+
+/* Phase 10 profile, avatars, and chat identity */
+.profileAvatarSmall img,.identityStat img{width:100%;height:100%;object-fit:cover;display:block}.avatar.profileAvatarSmall{overflow:hidden;border-radius:14px;box-shadow:0 0 18px #00eaff22}.identityStat{display:flex;align-items:center;gap:10px;border-right:1px solid #123849;padding-right:18px;min-width:210px}.identityStat img{width:44px;height:44px;border-radius:12px;border:1px solid var(--cyan2);background:#020a10}.identityStat span{display:grid;color:#dffbff;font-weight:900;line-height:1.15}.identityStat small{font-weight:600;color:var(--muted)}.profileLayout{display:grid;grid-template-columns:1.1fr .9fr;gap:14px}.profileHero{display:grid;grid-template-columns:150px 1fr;gap:16px;align-items:center;margin-bottom:14px}.profileHero img{width:150px;height:150px;object-fit:cover;border-radius:22px;border:1px solid var(--cyan2);box-shadow:0 0 28px #00eaff22;background:#020a10}.profileHero h3{margin:0;color:#dffbff;font-size:28px}.profileHero span{display:block;color:#9dfcff;margin:4px 0}.profileHero p{color:var(--muted);line-height:1.45}.profileForm{display:grid;gap:12px}.profileForm label{display:grid;gap:6px;color:#9dfcff;font-weight:800;text-transform:uppercase;font-size:12px;letter-spacing:.06em}.profileForm input,.profileForm textarea,.chatComposer input{width:100%;background:#030b12;border:1px solid #236078;color:var(--text);padding:12px}.profileForm textarea{min-height:110px;resize:vertical;font-family:inherit}.profileForm button,.chatComposer button{display:inline-flex;align-items:center;justify-content:center;gap:8px}.avatarGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px}.avatarGrid button{display:grid;gap:8px;text-align:center;text-transform:none;letter-spacing:0;background:#06141e;border:1px solid #164e63;padding:9px;border-radius:14px}.avatarGrid button.selectedAvatar{border-color:var(--gold);box-shadow:0 0 22px #ffc24733;background:linear-gradient(180deg,#18230a,#06141e)}.avatarGrid img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:12px;border:1px solid #123849;background:#020a10}.avatarGrid span{font-size:12px;color:#dffbff}.chatLayout{display:grid;grid-template-columns:340px 1fr;gap:14px}.chatIdentity{display:grid;grid-template-columns:82px 1fr;gap:12px;align-items:center;margin-bottom:12px}.chatIdentity img{width:82px;height:82px;object-fit:cover;border-radius:16px;border:1px solid var(--cyan2);background:#020a10}.chatIdentity b{display:block;color:#dffbff;font-size:18px}.chatIdentity span,.chatIdentity small{display:block;color:var(--muted);margin-top:3px}.chatFeed{display:grid;gap:10px;max-height:620px;overflow:auto;padding-right:4px}.chatMessage{display:grid;grid-template-columns:54px 1fr;gap:10px;align-items:start;border:1px solid #123849;background:#06141e;padding:10px;border-radius:14px}.chatMessage.mine{border-color:var(--cyan2);background:linear-gradient(180deg,#082638,#06141e)}.chatMessage.system{border-color:#6f6420;background:linear-gradient(180deg,#282107,#06141e)}.chatMessage.npc{border-color:#4d3578;background:linear-gradient(180deg,#170f2a,#06141e)}.chatMessage img{width:54px;height:54px;object-fit:cover;border-radius:13px;border:1px solid #1d637a;background:#020a10}.chatMessage b{display:flex;gap:8px;align-items:center;color:#dffbff}.chatMessage em{font-style:normal;border:1px solid #1d637a;color:#9dfcff;background:#031019;padding:2px 6px;border-radius:999px;font-size:10px;text-transform:uppercase;letter-spacing:.06em}.chatMessage p{margin:5px 0;color:var(--text);line-height:1.42}.chatMessage small{color:var(--muted)}.chatComposer{display:grid;grid-template-columns:1fr 120px;gap:10px;margin-top:12px}.emptyChat{border:1px solid #123849;background:#06141e;color:var(--muted);padding:18px;text-align:center;border-radius:14px}@media(max-width:1000px){.profileLayout,.chatLayout{grid-template-columns:1fr}.profileHero{grid-template-columns:100px 1fr}.profileHero img{width:100px;height:100px}.chatComposer{grid-template-columns:1fr}.identityStat{min-width:170px}}
+
+/* Phase 12 deep inventory pass */
+.advancedInventoryToolbar{grid-template-columns:1fr}.inventorySelectRow{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.inventorySelectRow select,.inventoryToolbar select{background:#030b12;border:1px solid #236078;color:var(--text);padding:10px}.inventoryLayout{display:grid;grid-template-columns:minmax(0,1fr) 430px;gap:14px;align-items:start}.deepInventoryGrid{grid-template-columns:repeat(auto-fit,minmax(390px,1fr))}.inventoryCard{position:relative;border-radius:14px;transition:.14s ease}.inventoryCard:hover{border-color:var(--cyan2);box-shadow:0 0 18px #00eaff18;transform:translateY(-1px)}.selectedInventoryCard{border-color:var(--gold)!important;box-shadow:0 0 22px #ffc24722}.inventoryActions{grid-column:1 / -1;display:flex;gap:6px;flex-wrap:wrap}.inventoryActions button:disabled{opacity:.38;cursor:not-allowed}.rarityBadge{border-color:#274657!important;color:#dffbff!important}.rarityBadge.common{color:#9bb5c2!important}.rarityBadge.uncommon{color:#4dff91!important;border-color:#1c7040!important}.rarityBadge.rare{color:#35f2ff!important;border-color:#1d637a!important}.rarityBadge.epic{color:#d98cff!important;border-color:#6e3ca0!important}.rarityBadge.legendary{color:#ffc247!important;border-color:#8a5b12!important}.rarityBadge.black_market{color:#ff4d9d!important;border-color:#703442!important}.rarityBadge.ultra{color:#fff2a8!important;border-color:#8edbff!important;background:linear-gradient(135deg,#251033,#0a2235)!important;box-shadow:0 0 18px #ffd67033}.inventoryCard.rarity-epic,.inventoryDetailPanel.rarity-epic{box-shadow:inset 0 0 0 1px #6e3ca055,0 0 18px #a65cff16}.inventoryCard.rarity-legendary,.inventoryDetailPanel.rarity-legendary{box-shadow:inset 0 0 0 1px #ffc24755,0 0 20px #ffc24718}.inventoryCard.rarity-black_market,.inventoryDetailPanel.rarity-black_market{box-shadow:inset 0 0 0 1px #ff4d9d55,0 0 20px #ff4d9d14}.inventoryCard.rarity-ultra,.inventoryDetailPanel.rarity-ultra{box-shadow:inset 0 0 0 1px #8edbff88,0 0 24px #ffd67033,0 0 36px #a65cff1f;background:linear-gradient(180deg,rgba(24,10,39,.55),rgba(5,17,29,.92))}.warn{color:var(--orange)!important;border-color:#8a5b12!important}.inventoryDetailPanel{display:grid;gap:12px;border:1px solid #164e63;background:#06141e;padding:14px;border-radius:16px;position:sticky;top:92px}.inventoryDetailPanel h3{margin:0;color:#dffbff;font-size:22px}.inventoryDetailPanel p{margin:0;color:var(--muted);line-height:1.45}.itemVisual.lg{width:120px;height:120px;border-radius:22px}.itemVisual.lg img{width:100%;height:100%;object-fit:cover;border-radius:22px}.detailFlags{grid-column:auto}.detailGrid{display:grid;gap:8px}.detailGrid>div,.recipeUseList{border:1px solid #123849;background:#031019;padding:9px;display:grid;gap:4px}.detailGrid b,.recipeUseList b{color:#9dfcff}.detailGrid span,.recipeUseList span{color:var(--muted);font-size:12px;line-height:1.35}.recipeUseList{max-height:170px;overflow:auto}.detailActions{border-top:1px solid #123849;padding-top:10px}.warningLine{display:flex;align-items:center;gap:8px;border:1px solid #8a5b12;background:#2c1d06;color:#ffc247;padding:8px 10px;margin-top:8px;border-radius:10px}@media(max-width:1200px){.inventoryLayout{grid-template-columns:1fr}.inventoryDetailPanel{position:relative;top:auto}.deepInventoryGrid{grid-template-columns:1fr}}
+
+/* Phase 13 tier system */
+.tierBadge{display:inline-flex!important;align-items:center;justify-content:center;min-width:34px;height:22px;border-radius:999px;border:1px solid #315365;background:#031019;color:#dffbff;padding:2px 8px;font-size:11px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;vertical-align:middle;margin-left:5px;box-shadow:inset 0 0 12px #ffffff08}
+.tier-scrap{border-color:#54616a;color:#b7c3ca;background:#10171d}.tier-basic{border-color:#1d637a;color:#9dfcff;background:#031923}.tier-improved{border-color:#1f7f4f;color:#4dff91;background:#041c13}.tier-advanced{border-color:#216e91;color:#35f2ff;background:#031923}.tier-military{border-color:#8a5b12;color:#ffc247;background:#281b06}.tier-prototype{border-color:#8e3ab0;color:#d98cff;background:#180b22}.tier-exotic{border-color:#008c9e;color:#8cffff;background:#041a22}.tier-relic{border-color:#d6a52d;color:#ffe7a3;background:linear-gradient(180deg,#382703,#111)}
+.inventoryDetailPanel .tierBadge,.inventoryCard .tierBadge,.itemLine .tierBadge,.recipeCard .tierBadge{margin-left:6px}.recipeReqs b{display:flex;gap:6px;align-items:center;justify-content:flex-end}.recipeReqs .missing b{color:var(--red)}.itemLine.visualLine span{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.shipCard .stats div:first-child{border-color:#8a5b12;box-shadow:inset 0 0 18px #ffc24712}.inventoryCard .actions button:nth-last-child(-n+2){border-color:#8a5b12;color:#ffd98a}.inventoryCard .actions button:nth-last-child(1){border-color:#67506d;color:#dcb4ff}.detailActions button:nth-last-child(-n+2){border-color:#8a5b12;color:#ffd98a}
+
+/* Phase 15 market/jail/heat refinement */
+.jailHeatPanel{display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:stretch}.jailHeatPanel.jailed{grid-template-columns:1fr 1fr 1.4fr}.heatBlock,.cooldownBlock,.jailBlock{border:1px solid #123849;background:#06141e;padding:10px;border-radius:12px;display:grid;gap:6px}.heatBlock b,.cooldownBlock b,.jailBlock b{color:#dffbff}.heatBlock span,.cooldownBlock span,.jailBlock span,.jailBlock small{color:var(--muted);line-height:1.35}.jailBlock{border-color:#8a2c38;background:linear-gradient(180deg,#261016,#06141e)}.jailBlock>b{color:#ffb9bf}.buttonRow{display:flex;gap:8px;flex-wrap:wrap}.safeTrade{display:inline-flex;border:1px solid #1d6b55;background:#061b15;color:#bafcdd;padding:4px 7px;border-radius:999px;font-size:12px;font-weight:900}.heatText{display:inline-block;border:1px solid #703442;background:#261016;color:#ffb9bf;padding:4px 7px;border-radius:8px;font-size:12px;line-height:1.25}.rowMuted{opacity:.72}.rowMuted td{background:#050b11}.rowMuted button:disabled{opacity:.35}.bad .tierBadge,.ok .tierBadge{margin-left:4px}button[disabled]{opacity:.45;cursor:not-allowed;filter:saturate(.6)}
+@media(max-width:1000px){.jailHeatPanel,.jailHeatPanel.jailed{grid-template-columns:1fr}}
+
+
+/* Phase 16 Jobs/Skills */
+.jobsLayout,.skillsLayout{display:grid;grid-template-columns:minmax(360px,1fr) minmax(420px,1fr);gap:16px;align-items:start}
+.careerSpotlight,.careerDetailHeader,.skillCardHead{display:flex;gap:14px;align-items:center}
+.careerSpotlight{padding:14px;border:1px solid rgba(55,255,220,.22);border-radius:16px;background:linear-gradient(135deg,rgba(26,240,210,.12),rgba(64,93,255,.07))}
+.careerSpotlight b,.careerDetailHeader b{font-size:18px}
+.careerSpotlight span,.careerDetailHeader span,.skillCardHead span{display:block;color:var(--muted);font-size:12px}
+.careerIcon{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;border:1px solid rgba(85,255,225,.25);background:rgba(8,18,34,.82);box-shadow:0 0 28px rgba(42,234,210,.10)}
+.careerIcon.large{width:58px;height:58px}
+.careerGrid,.skillGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.careerTile,.skillCard{border:1px solid rgba(135,158,190,.18);border-radius:16px;background:rgba(10,18,34,.72);padding:12px;text-align:left;color:var(--text)}
+.careerTile{display:grid;gap:7px;cursor:pointer}
+.careerTile:hover,.skillCard:hover{border-color:rgba(60,245,220,.42);box-shadow:0 0 24px rgba(21,229,207,.09)}
+.careerTile.selected,.careerTile.activeCareerCard{border-color:rgba(80,255,220,.75);background:linear-gradient(135deg,rgba(19,232,207,.16),rgba(22,34,66,.72))}
+.careerTile svg,.skillCard svg{color:#66ffe5}
+.careerTile b,.skillCard b{display:block}
+.careerTile span,.skillCard small{color:var(--muted);font-size:12px}
+.bonusGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-top:12px}
+.bonusGrid>div{border:1px solid rgba(135,158,190,.16);border-radius:14px;background:rgba(8,14,28,.58);padding:12px}
+.bonusGrid span,.detailPill{display:block;margin-top:6px;color:#cfe8ff;font-size:12px;line-height:1.35}
+.infoStack{display:grid;gap:10px}
+.infoStack>div{border-left:3px solid rgba(80,255,220,.5);padding-left:10px}
+.infoStack b{display:block}
+.infoStack span{color:var(--muted);font-size:12px}
+.skillTopList{display:grid;gap:8px}
+.skillTopList>div{display:grid;grid-template-columns:24px 1fr auto;gap:8px;align-items:center;border:1px solid rgba(135,158,190,.14);border-radius:12px;padding:8px;background:rgba(8,14,28,.55)}
+.skillTopList span{color:var(--muted);font-size:12px}
+.skillCard{display:grid;gap:8px}
+.skillCard p{margin:0;color:#cfe8ff;font-size:13px;line-height:1.35}
+.skillCard details{border-top:1px solid rgba(135,158,190,.15);padding-top:8px}
+.skillCard summary{cursor:pointer;color:#65ffe8;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.skillCard.industry{box-shadow:inset 0 0 0 1px rgba(245,180,72,.08)}
+.skillCard.economy{box-shadow:inset 0 0 0 1px rgba(70,255,165,.08)}
+.skillCard.combat{box-shadow:inset 0 0 0 1px rgba(255,95,105,.08)}
+.skillCard.illegal{box-shadow:inset 0 0 0 1px rgba(185,95,255,.12)}
+.skillCard.travel{box-shadow:inset 0 0 0 1px rgba(85,175,255,.10)}
+.skillCard.utility{box-shadow:inset 0 0 0 1px rgba(180,220,255,.08)}
+@media(max-width:1100px){.jobsLayout,.skillsLayout{grid-template-columns:1fr}}
+
+
+/* Phase 17 Ships & Hangar */
+.hangarHero {
+  display: grid;
+  grid-template-columns: 220px 1fr 280px;
+  gap: 18px;
+  align-items: stretch;
+  margin-bottom: 18px;
+  padding: 18px;
+  border: 1px solid rgba(99, 241, 255, .22);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(60, 227, 255, .18), transparent 36%),
+    linear-gradient(135deg, rgba(7, 23, 39, .96), rgba(7, 12, 24, .96));
+  box-shadow: 0 18px 60px rgba(0,0,0,.35), inset 0 0 40px rgba(99,241,255,.04);
+}
+.hangarHeroImage,
+.shipDetailImage {
+  min-height: 160px;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid rgba(99, 241, 255, .22);
+  background: rgba(0,0,0,.22);
+}
+.hangarHeroImage img,
+.shipDetailImage img,
+.hangarShipCard img,
+.marketShipCard img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.hangarHero .eyebrow {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+  font-size: 11px;
+}
+.hangarHero h2 {
+  margin: 4px 0 6px;
+  font-size: 34px;
+}
+.hangarActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.hangarMeters {
+  display: grid;
+  gap: 9px;
+}
+.miniMeter {
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255,255,255,.035);
+}
+.miniMeter span,
+.miniMeter b {
+  display: block;
+  font-size: 12px;
+}
+.miniMeter b {
+  margin-top: 4px;
+  color: #d7f9ff;
+}
+.miniMeter.danger {
+  border-color: rgba(255, 115, 115, .35);
+}
+.hangarWarnings {
+  margin-bottom: 16px;
+}
+.hangarLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(420px, .85fr);
+  gap: 16px;
+  align-items: start;
+}
+.hangarShipGrid,
+.shipMarketGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 12px;
+}
+.hangarShipCard {
+  text-align: left;
+  min-height: 230px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,.09);
+  background: rgba(255,255,255,.035);
+}
+.hangarShipCard img {
+  height: 110px;
+  display: block;
+}
+.hangarShipCard b,
+.hangarShipCard span,
+.hangarShipCard small,
+.hangarShipCard em {
+  display: block;
+  padding: 0 12px;
+}
+.hangarShipCard b {
+  margin-top: 10px;
+  color: #e9fbff;
+}
+.hangarShipCard span {
+  color: #a9cbd4;
+  font-size: 12px;
+}
+.hangarShipCard small {
+  margin-top: 7px;
+}
+.hangarShipCard em {
+  margin: 8px 12px 12px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.06);
+  font-size: 11px;
+  color: #9ff5ff;
+}
+.hangarShipCard.active,
+.hangarShipCard.selected {
+  border-color: rgba(99,241,255,.6);
+  box-shadow: 0 0 25px rgba(99,241,255,.16);
+}
+.selectedShipDetail {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 14px;
+  align-items: center;
+}
+.statCompare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+.statCompare div,
+.slotGrid div {
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.035);
+  border-radius: 10px;
+  padding: 9px;
+}
+.statCompare span,
+.slotGrid b {
+  display: block;
+  font-size: 11px;
+  color: #93b7c1;
+}
+.statCompare b {
+  display: inline-block;
+  margin-right: 8px;
+}
+.statCompare em.positive {
+  color: #82ffb7;
+}
+.statCompare em.negative {
+  color: #ff8f8f;
+}
+.slotGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px,1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+.equipmentGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
+}
+.equipmentCard {
+  display: grid;
+  grid-template-columns: 74px 1fr auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(255,255,255,.035);
+}
+.equipmentCard.blocked {
+  opacity: .78;
+}
+.equipmentCard h3 {
+  margin: 0;
+}
+.equipmentCard p {
+  margin: 4px 0 8px;
+  color: #a9cbd4;
+}
+.moduleStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.moduleStats span,
+.rarityBadge {
+  border: 1px solid rgba(255,255,255,.11);
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: rgba(255,255,255,.045);
+  font-size: 11px;
+}
+.blockedReason {
+  display: block;
+  margin-top: 7px;
+  color: #ffb27a;
+}
+.marketShipCard {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 14px;
+  background: rgba(255,255,255,.035);
+}
+.marketShipCard img {
+  min-height: 160px;
+  border-radius: 12px;
+}
+.marketShipCard.owned {
+  border-color: rgba(130, 255, 183, .25);
+}
+.emptyState {
+  padding: 22px;
+  border: 1px dashed rgba(255,255,255,.16);
+  border-radius: 14px;
+  color: #9ebac3;
+  background: rgba(255,255,255,.025);
+}
+.dangerTag {
+  color: #ffb0b0;
+  border-color: rgba(255,120,120,.3) !important;
+}
+@media (max-width: 1200px) {
+  .hangarHero,
+  .hangarLayout,
+  .marketShipCard {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Phase 18: explicit ship loadout/fitting UI */
+.loadoutSummary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+.loadoutSummary>div{padding:10px;border:1px solid rgba(93,234,255,.16);border-radius:12px;background:rgba(7,18,30,.62)}
+.loadoutSummary b{display:block;color:#d9fbff;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}
+.loadoutSummary span{color:#7ee7ff;font-weight:800}
+.shipSlotGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
+.shipSlotCard{display:grid;grid-template-columns:42px 1fr auto;align-items:center;text-align:left;gap:10px;min-height:92px;border:1px solid rgba(93,234,255,.15);background:linear-gradient(135deg,rgba(8,20,34,.92),rgba(3,8,16,.92));border-radius:16px;padding:12px;color:#d8fbff;cursor:pointer;transition:.16s ease;box-shadow:inset 0 0 0 1px rgba(255,255,255,.02)}
+.shipSlotCard:hover{transform:translateY(-1px);border-color:rgba(93,234,255,.45);box-shadow:0 0 24px rgba(19,178,203,.13)}
+.shipSlotCard.selected{border-color:#7ee7ff;background:linear-gradient(135deg,rgba(16,62,82,.95),rgba(8,18,32,.95));box-shadow:0 0 0 1px rgba(126,231,255,.25),0 0 28px rgba(35,190,230,.18)}
+.shipSlotCard.occupied{border-color:rgba(82,255,177,.28)}
+.shipSlotCard.empty{opacity:.92}
+.slotIcon{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;border:1px solid rgba(126,231,255,.22);background:radial-gradient(circle at 40% 20%,rgba(126,231,255,.24),rgba(7,15,24,.9));font-size:1.25rem;color:#8ff5ff}
+.shipSlotCard b{display:block;color:#f0feff;margin-bottom:3px}
+.shipSlotCard span{display:block;color:#8edceb;font-size:.82rem}
+.shipSlotCard small{display:block;color:#6d93a5;font-size:.72rem;margin-top:2px}
+.slotInstalled{display:flex;align-items:center;gap:7px;max-width:150px}
+.slotInstalled .itemIcon,.slotInstalled img{width:34px;height:34px;border-radius:10px;object-fit:cover}
+.slotInstalled em{font-style:normal;color:#8fffc8;font-size:.72rem;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.slotEmpty{font-style:normal;color:#547385;border:1px dashed rgba(126,231,255,.2);border-radius:999px;padding:5px 9px;font-size:.72rem}
+.slotGrid .occupied{border-color:rgba(82,255,177,.35);background:rgba(25,95,70,.12)}
+.equipmentCard small{display:block;line-height:1.35;color:#7895a8;margin-top:5px}
+
+
+/* Phase 19 Fight / Battle screen */
+.fightTop{display:grid;grid-template-columns:1.3fr 1fr;gap:16px;margin-bottom:16px}
+.fightLayout{display:grid;grid-template-columns:1.05fr .95fr;gap:16px;margin-bottom:16px}
+.combatShipMini{display:flex;gap:14px;align-items:center}
+.combatShipMini img{width:96px;height:70px;object-fit:cover;border-radius:14px;border:1px solid rgba(69,243,255,.22);background:#07131c}
+.targetGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.targetCard{display:flex;flex-direction:column;text-align:left;gap:6px;padding:12px;border:1px solid rgba(127,255,255,.14);border-radius:16px;background:linear-gradient(180deg,rgba(16,37,51,.88),rgba(5,13,22,.9));color:var(--text);cursor:pointer;min-height:220px}
+.targetCard:hover,.targetCard.selected{border-color:rgba(69,243,255,.58);box-shadow:0 0 0 1px rgba(69,243,255,.22),0 0 24px rgba(69,243,255,.08)}
+.targetCard.criminal{border-color:rgba(255,82,82,.28)}
+.targetCard img{width:100%;height:92px;object-fit:cover;border-radius:12px;background:#06121b}
+.targetCard em,.okTag,.dangerTag{display:inline-flex;width:max-content;border-radius:999px;padding:3px 8px;font-size:11px;font-style:normal;border:1px solid rgba(255,255,255,.12)}
+.okTag{color:#9fffd2;background:rgba(25,220,130,.09)}
+.dangerTag{color:#ffb5b5;background:rgba(255,70,70,.10);border-color:rgba(255,70,70,.28)!important}
+.targetDetail{display:flex;flex-direction:column;gap:14px}
+.combatVersus{display:grid;grid-template-columns:1fr 120px 1fr;gap:14px;align-items:center}
+.combatVersus.compact .combatShipSide img{height:86px}
+.versusCore{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:#7ff7ff}
+.versusCore svg{filter:drop-shadow(0 0 12px rgba(69,243,255,.35))}
+.fightActions{display:flex;gap:10px;flex-wrap:wrap}
+.battleScreen{border:1px solid rgba(69,243,255,.18);border-radius:18px;overflow:hidden;background:radial-gradient(circle at center,rgba(36,86,110,.18),rgba(4,9,18,.96) 58%)}
+.battleHeader{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.2)}
+.battleHeader div:first-child{display:flex;flex-direction:column;gap:4px}
+.battleStage{position:relative;display:grid;grid-template-columns:260px 1fr 260px;gap:18px;align-items:center;min-height:330px;padding:20px;background:
+  linear-gradient(90deg,rgba(15,245,255,.07),transparent 25%,transparent 75%,rgba(255,77,77,.06)),
+  radial-gradient(circle at 50% 50%,rgba(86,160,255,.14),rgba(0,0,0,0) 45%)}
+.combatShipSide{position:relative;z-index:2;display:flex;flex-direction:column;gap:8px;align-items:stretch;padding:12px;border-radius:16px;background:rgba(2,10,18,.72);border:1px solid rgba(255,255,255,.10)}
+.combatShipSide h3{margin:0;color:#9ff7ff;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.combatShipSide img{width:100%;height:130px;object-fit:cover;border-radius:14px;border:1px solid rgba(69,243,255,.18);background:#07131c}
+.battleLane{position:relative;min-height:190px;border-top:1px dashed rgba(127,255,255,.16);border-bottom:1px dashed rgba(127,255,255,.16);display:flex;align-items:center;justify-content:center;overflow:hidden}
+.projectile{position:absolute;left:8%;top:50%;width:84%;height:4px;background:linear-gradient(90deg,transparent,#7ff7ff,transparent);filter:drop-shadow(0 0 10px #45f3ff);animation:laserFire 1.2s ease-in-out infinite}
+.projectile.reverse{left:auto;right:8%;transform:scaleX(-1)}
+.projectile.missile{height:9px;width:34%;border-radius:999px;background:linear-gradient(90deg,transparent,#ffd27a,#ff5d5d);animation:missileFire 1.5s ease-in-out infinite}
+.projectile.projectile{height:6px;background:linear-gradient(90deg,transparent,#d6f6ff,#7aa7ff)}
+.projectile.miss{opacity:.45;top:37%;transform:rotate(-8deg)}
+.projectile.reverse.miss{transform:scaleX(-1) rotate(-8deg)}
+.damageFloater{position:relative;z-index:3;padding:8px 12px;border-radius:999px;background:rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.14);font-weight:800;color:#fff;text-shadow:0 0 12px rgba(69,243,255,.5)}
+@keyframes laserFire{0%{clip-path:inset(0 100% 0 0);opacity:.2}45%{clip-path:inset(0 0 0 0);opacity:1}100%{clip-path:inset(0 0 0 100%);opacity:.15}}
+@keyframes missileFire{0%{transform:translateX(-120%);opacity:.2}55%{opacity:1}100%{transform:translateX(140%);opacity:.2}}
+.battleFooter{display:grid;grid-template-columns:1.2fr .8fr;gap:16px;padding:16px}
+.battleLog{display:flex;flex-direction:column;gap:8px;max-height:300px;overflow:auto}
+.battleLog div{display:grid;grid-template-columns:44px 1fr;gap:8px;padding:9px 10px;border-radius:12px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)}
+.battleLog .playerLog{border-color:rgba(69,243,255,.22)}
+.battleLog .enemyLog{border-color:rgba(255,91,91,.20)}
+.battleRewards{padding:12px;border-radius:14px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)}
+.historyList{display:flex;flex-direction:column;gap:8px}
+@media (max-width:1100px){.fightTop,.fightLayout,.battleFooter{grid-template-columns:1fr}.battleStage,.combatVersus{grid-template-columns:1fr}.battleLane{min-height:120px}.combatShipSide img{height:100px}}
+
+/* Phase 20 battle modal + battlefield salvage */
+.battleLaunchPanel{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px;border:1px solid rgba(69,243,255,.16);border-radius:16px;background:linear-gradient(135deg,rgba(13,37,52,.78),rgba(5,12,21,.88))}
+.battleLaunchPanel>div{display:flex;flex-direction:column;gap:4px}.battleLaunchPanel span{color:#8caec0;font-size:.9rem}
+.battleModalBackdrop{position:fixed;inset:0;z-index:1000;background:rgba(0,5,12,.78);backdrop-filter:blur(10px);display:flex;align-items:center;justify-content:center;padding:24px}
+.battleModal{position:relative;width:min(1220px,96vw);max-height:92vh;overflow:auto;border:1px solid rgba(69,243,255,.34);border-radius:22px;background:linear-gradient(180deg,rgba(6,18,30,.98),rgba(2,8,15,.98));box-shadow:0 24px 80px rgba(0,0,0,.65),0 0 60px rgba(69,243,255,.12)}
+.modalClose{position:sticky;top:12px;left:calc(100% - 92px);z-index:5;margin:12px 12px 0 auto;display:block;border-color:rgba(255,255,255,.22);background:rgba(5,15,25,.92)}
+.battleModal .battleScreen{border:0;border-radius:0;background:radial-gradient(circle at 50% 40%,rgba(46,99,140,.22),rgba(4,9,18,.98) 62%)}
+.salvageCallout{margin:10px 0;padding:10px 12px;border-radius:13px;border:1px solid rgba(255,174,53,.32);background:rgba(255,174,53,.08);display:flex;flex-direction:column;gap:4px}.salvageCallout b{color:#ffd88a}.salvageCallout span{color:#d0a46a;font-size:.86rem}
+.salvageSiteGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.salvageSiteCard{display:grid;grid-template-columns:92px 1fr;gap:12px;align-items:start;padding:13px;border:1px solid rgba(255,174,53,.18);border-radius:17px;background:linear-gradient(135deg,rgba(48,33,13,.42),rgba(6,14,22,.92))}.salvageSiteCard img{width:92px;height:84px;object-fit:cover;border-radius:13px;border:1px solid rgba(255,174,53,.22);background:#091016}.salvageSiteCard h3{margin:0;color:#fff}.salvageSiteCard p,.salvageSiteCard small{display:block;color:#9fb0bd;margin:4px 0}.salvageSiteCard button{margin-top:10px}
+@media (max-width:760px){.battleModalBackdrop{padding:8px}.battleModal{width:100vw;max-height:96vh;border-radius:16px}.battleLaunchPanel,.salvageSiteCard{grid-template-columns:1fr;display:flex;flex-direction:column}.salvageSiteCard img{width:100%;height:120px}}
+
+/* Phase 21: open-world zoomable maps, cargo handling, transit traffic, ore fields, and map salvage. */
+.mapShell{display:grid;gap:10px}.mapToolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:2px}.mapToolbar span{color:var(--muted);font-size:12px;border:1px solid #123849;background:#06141e;padding:7px 9px}.mapScroll{max-height:680px;overflow:auto;border:1px solid #123849;background:#020810;padding:10px}.openWorldMap{min-width:820px;min-height:560px;height:auto;overflow:hidden}.trafficShip,.resourceNode{position:absolute;z-index:6;transform:translate(-50%,-50%);border:1px solid #1d637a;background:#031019dd;color:#9dfcff;border-radius:999px;width:42px;height:42px;display:grid;place-items:center;box-shadow:0 0 18px #00eaff22;cursor:pointer}.trafficShip span,.resourceNode{font-size:20px}.trafficShip em,.resourceNode em{position:absolute;right:-8px;bottom:-8px;background:#02060b;border:1px solid #164e63;border-radius:7px;padding:1px 4px;font-size:10px;font-style:normal;color:#dffbff}.trafficShip.hostile{border-color:#ff4d6d;color:#ff9aaa;box-shadow:0 0 20px #ff4d6d44}.trafficShip.player{border-color:#ffc247;color:#ffd88a}.resourceNode.oreNode{border-color:#4dff91;color:#bfffd2;box-shadow:0 0 20px #4dff9144}.resourceNode.salvageNode{border-color:#ffc247;color:#ffd88a;box-shadow:0 0 20px #ffc24744}.shipMarker.selfShip{pointer-events:auto;border:0;background:transparent;cursor:pointer}.mapObjectPanel{border:1px solid #1d637a;background:linear-gradient(180deg,#06141e,#031019);padding:12px;display:grid;gap:8px}.mapObjectPanel b{color:#dffbff;display:block}.mapObjectPanel span,.mapObjectPanel small{color:var(--muted);display:block;line-height:1.35}.dangerBtn{border-color:#8b2638!important;background:#2a0b13!important;color:#ffb5c1!important}.cargoOperationPanel{display:grid;grid-template-columns:1.4fr 1fr auto;gap:12px;align-items:center}.cargoOperationPanel>div{border:1px solid #123849;background:#06141e;padding:10px}.cargoOperationPanel b{display:block;color:#dffbff}.cargoOperationPanel span,.cargoOperationPanel small{display:block;color:var(--muted);line-height:1.35}.protectionBadge{display:flex!important;align-items:center;gap:8px;color:#9dfcff!important;border-color:#1d637a!important}.mutedCallout{border-color:#123849!important;background:#06141e!important}.mutedCallout b{color:#9dfcff!important}.mutedCallout span{color:var(--muted)!important}@media(max-width:760px){.cargoOperationPanel{grid-template-columns:1fr}.mapScroll{max-height:620px}.openWorldMap{min-width:760px}}
+
+
+/* Phase 23 map-first gameplay UX */
+.enhancedMapToolbar{position:relative;z-index:7}
+.mapLayerToggles{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 8px}
+.mapLayerToggles button{font-size:12px;padding:6px 9px;border-color:#123849;background:#06141e;color:var(--muted)}
+.mapLayerToggles button.active{border-color:var(--cyan);color:#dffbff;background:#073344}
+.mapViewport{height:760px;min-height:620px;position:relative;overflow:hidden;border:1px solid #123849;background:#020810;cursor:grab;touch-action:none}
+.mapViewport:active{cursor:grabbing}
+.mapWorld{position:absolute!important;left:0;top:0;width:12000px!important;height:7800px!important;min-width:12000px!important;min-height:7800px!important;transform-origin:0 0;overflow:hidden}
+.mapContextPopup{position:fixed;z-index:2000;width:240px;border:1px solid #1d637a;background:linear-gradient(180deg,#06141ef8,#020810fb);box-shadow:0 18px 60px #000b;border-radius:14px;padding:10px;display:grid;gap:7px}
+.mapContextPopup b{display:block;color:#dffbff;line-height:1.2}
+.mapContextPopup small{display:block;color:var(--muted);line-height:1.25}
+.verticalButtons{display:grid!important;grid-template-columns:1fr!important;gap:6px!important}
+.verticalButtons button{text-align:left;justify-content:flex-start}
+.resourceNode.explorationNode{border-color:#b892ff;color:#d9c8ff;box-shadow:0 0 22px #b892ff44}
+.resourceNode.explorationNode.unknown{border-style:dashed;filter:saturate(.75)}
+.resourceNode.explorationNode.partial{border-color:#ffc247;color:#ffe0a3}
+.resourceNode.explorationNode.resolved{border-color:#4dff91;color:#c9ffd8}
+.mapMetaGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:7px}
+.mapMetaGrid span{border:1px solid #123849;background:#031019;padding:7px;color:var(--muted)}
+.mapMetaGrid b{display:block;color:#dffbff;margin-top:2px}
+.mapObjectPanel{position:relative;z-index:8}
+.openWorldMap .mapNode{transition:box-shadow .15s ease,border-color .15s ease,transform .15s ease}
+.openWorldMap .mapNode:hover,.trafficShip:hover,.resourceNode:hover{box-shadow:0 0 25px #35f2ff55;z-index:25}
+.openWorldMap .mapNode:disabled{opacity:.72;cursor:pointer}
+@media(max-width:900px){.mapViewport{height:680px}.mapWorld{width:1100px!important;height:720px!important;min-width:1100px!important;min-height:720px!important}.mapContextPopup{width:220px}}
+
+
+/* Phase 23B: map-first polish, readability, filtering, selected-object hardening. */
+.phase23bMapShell{gap:12px}.mapInsightStrip{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border:1px solid #123849;background:linear-gradient(90deg,#06141e,#031019);padding:9px 10px;border-radius:12px;color:var(--muted);font-size:12px}.mapInsightStrip b{color:#dffbff;text-transform:uppercase;letter-spacing:.08em;font-size:11px}.mapInsightStrip span{flex:1;min-width:240px}.mapInsightStrip em{font-style:normal;border:1px solid #1d637a;background:#061b28;color:#9dfcff;border-radius:999px;padding:4px 8px}.phase23bLayers{align-items:center}.phase23bLayers button{border-radius:999px}.phase23bLayers button:not(.active){opacity:.75}.mapViewport.zoomFar .mapNode b{font-size:10px}.mapViewport.zoomFar .mapNode span{display:none}.mapViewport.zoomFar .trafficShip,.mapViewport.zoomFar .resourceNode{width:32px;height:32px}.mapViewport.zoomFar .trafficShip em,.mapViewport.zoomFar .resourceNode em{display:none}.mapViewport.zoomNear .mapNode{min-width:170px}.dangerZone{position:absolute;z-index:1;transform:translate(-50%,-50%);width:220px;height:160px;border-radius:50%;pointer-events:none;background:radial-gradient(circle,rgba(255,183,71,.18),rgba(255,183,71,.04) 45%,transparent 72%);border:1px dashed rgba(255,183,71,.18)}.dangerZone.extreme{background:radial-gradient(circle,rgba(255,77,109,.2),rgba(255,77,109,.05) 48%,transparent 75%);border-color:rgba(255,77,109,.22)}.marketPulse{position:absolute;z-index:2;transform:translate(-50%,-50%);width:86px;height:86px;border-radius:50%;border:1px solid rgba(77,255,145,.16);box-shadow:0 0 28px rgba(77,255,145,.08);pointer-events:none}.mapNode.riskyNode{border-color:rgba(255,77,109,.42)!important;box-shadow:0 0 18px rgba(255,77,109,.12)}.trafficShip.patrol{border-color:#7aa7ff;color:#bfd3ff;box-shadow:0 0 20px #7aa7ff33}.trafficShip.hostile{animation:hostilePulse 1.8s ease-in-out infinite}@keyframes hostilePulse{50%{box-shadow:0 0 28px rgba(255,77,109,.75)}}.resourceNode.explorationNode.highQuality{box-shadow:0 0 28px rgba(184,146,255,.68),0 0 0 5px rgba(184,146,255,.08)}.phase23bPopup{max-height:min(72vh,440px);overflow:auto}.phase23bPopup .blockedReason{border:1px solid rgba(255,207,112,.22);background:rgba(255,207,112,.08);color:#ffd88a;padding:6px;border-radius:9px}.phase23bPopup button:disabled{opacity:.48;cursor:not-allowed}.phase23bObjectPanel{border-color:#2b6f8f;background:linear-gradient(180deg,#071b29,#031019);box-shadow:0 14px 44px rgba(0,0,0,.32)}.mapObjectHeader{display:grid;gap:2px}.selectedSummary{border:1px solid #123849;background:#06141e;color:#dffbff;padding:9px;border-radius:10px;line-height:1.35}.mapWarningLine{border:1px solid rgba(255,183,71,.24);background:rgba(255,183,71,.08);color:#ffd88a;padding:8px;border-radius:10px;font-size:12px}.mapMetaGrid span{border-radius:10px}.buttonRow button:disabled{opacity:.48;cursor:not-allowed}@media(max-width:760px){.mapInsightStrip span{min-width:100%}.mapViewport.zoomFar .mapNode b{display:none}.dangerZone{width:170px;height:120px}}
+
+
+/* Asset force pass: generated art should visually replace placeholder initials/cards. */
+.shipArt,
+.hangarHeroImage,
+.shipDetailImage,
+.hangarShipCard .shipCardImage,
+.marketShipCard .shipCardImage {
+  background: radial-gradient(circle at 45% 35%, rgba(53,242,255,.12), #020810 70%) !important;
+}
+
+.shipArt img,
+.hangarHeroImage img,
+.shipDetailImage img,
+.hangarShipCard img,
+.marketShipCard img {
+  object-fit: contain !important;
+  background: radial-gradient(circle at 45% 35%, rgba(53,242,255,.10), #020810 70%) !important;
+  padding: 6px;
+}
+
+.hangarHeroImage img {
+  padding: 10px;
+}
+
+.itemVisual img,
+.mapNode img,
+.trafficShip img,
+.resourceNode img,
+.mapObjectHeaderVisual img {
+  background: radial-gradient(circle at 45% 35%, rgba(53,242,255,.10), #020810 70%) !important;
+}
+
+.trafficShip,
+.resourceNode {
+  overflow: visible;
+}
+
+.trafficShip img,
+.resourceNode img {
+  filter: drop-shadow(0 0 8px rgba(53,242,255,.35));
+}
+
+
+/* Phase 24 map scale/live-position fix. */
+.mapWorld{width:12000px!important;height:7800px!important;min-width:12000px!important;min-height:7800px!important;background-size:380px 380px!important}
+.trafficShip,.resourceNode{transition:left 9.5s linear, top 9.5s linear, box-shadow .15s ease, border-color .15s ease, transform .15s ease}
+.mapNode{transition:left .2s ease, top .2s ease, box-shadow .15s ease, border-color .15s ease, transform .15s ease}
+.mapContextPopup .verticalButtons button:not(:disabled){display:block}
+.resourceNode.oreNode,.resourceNode.explorationNode{z-index:7}
+.mapViewport{height:760px}
+
+
+/* Phase 24B visual cleanup:
+   - restore a cleaner deep-space background
+   - enlarge map nodes and moving icons after 10x map expansion
+*/
+.mapWorld{
+  width:12000px !important;
+  height:7800px !important;
+  min-width:12000px !important;
+  min-height:7800px !important;
+  background:
+    radial-gradient(circle at 20% 18%, rgba(20,100,122,.42) 0, rgba(6,22,36,.10) 26%, rgba(2,8,16,0) 48%),
+    linear-gradient(135deg,#03111c 0%, #020810 58%, #061722 100%) !important;
+  background-repeat:no-repeat !important;
+  background-size:100% 100% !important;
+}
+
+.mapNode{
+  min-width: 200px;
+  max-width: 238px;
+  grid-template-columns: 56px 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 16px;
+}
+
+.mapNode img{
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+}
+
+.mapNode b{
+  font-size: 15px;
+}
+
+.mapNode span{
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.trafficShip,
+.resourceNode{
+  width: 68px;
+  height: 68px;
+  box-shadow: 0 0 24px rgba(0,234,255,.24);
+}
+
+.trafficShip img,
+.resourceNode img{
+  padding: 7px;
+  filter: drop-shadow(0 0 10px rgba(53,242,255,.42));
+}
+
+.trafficShip em,
+.resourceNode em{
+  right: -10px;
+  bottom: -10px;
+  padding: 2px 6px;
+  font-size: 12px;
+  border-radius: 9px;
+}
+
+.shipMarker{
+  font-size: 40px;
+}
+
+.shipMarker span{
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.mapViewport.zoomFar .trafficShip,
+.mapViewport.zoomFar .resourceNode{
+  width: 52px;
+  height: 52px;
+}
+
+.mapViewport.zoomNear .mapNode{
+  min-width: 220px;
+}
+
+@media(max-width:900px){
+  .mapNode{
+    min-width: 164px;
+    grid-template-columns: 48px 1fr;
+  }
+
+  .mapNode img{
+    width: 48px;
+    height: 48px;
+  }
+
+  .trafficShip,
+  .resourceNode{
+    width: 56px;
+    height: 56px;
+  }
+}
+
+
+/* Phase 25 intercept/docking/map readability pass. */
+.findShipBtn{
+  border-color:#ffffff!important;
+  color:#ffffff!important;
+  background:linear-gradient(180deg,#14586b,#07202f)!important;
+  box-shadow:0 0 18px rgba(255,255,255,.18);
+}
+
+.mapNode.current{
+  border-color:#ffffff!important;
+  box-shadow:0 0 0 2px rgba(255,255,255,.38),0 0 34px rgba(134,255,190,.75)!important;
+}
+
+.mapNode.dockedCurrent:after{
+  content:'DOCKED HERE';
+  position:absolute;
+  left:10px;
+  top:-22px;
+  border:1px solid rgba(134,255,190,.55);
+  color:#d7ffe7;
+  background:#02150f;
+  padding:2px 6px;
+  border-radius:999px;
+  font-size:10px;
+  letter-spacing:.08em;
+  pointer-events:none;
+}
+
+.shipMarker.selfShip{
+  color:#ffffff!important;
+  text-shadow:0 0 10px #fff,0 0 28px #6cffb0,0 0 44px #00ff88!important;
+  animation:selfShipPulse 1.35s ease-in-out infinite;
+  z-index:30!important;
+}
+
+.shipMarker.selfShip span{
+  border-color:#ffffff!important;
+  color:#02110b!important;
+  background:#b9ffd6!important;
+  box-shadow:0 0 14px rgba(185,255,214,.7);
+}
+
+@keyframes selfShipPulse{
+  50%{filter:drop-shadow(0 0 18px rgba(185,255,214,.95));}
+}
+
+.trafficShip,
+.resourceNode{
+  min-width:82px!important;
+  min-height:82px!important;
+  width:82px!important;
+  height:82px!important;
+}
+
+.mapViewport.zoomFar .trafficShip,
+.mapViewport.zoomFar .resourceNode{
+  min-width:72px!important;
+  min-height:72px!important;
+  width:72px!important;
+  height:72px!important;
+}
+
+.mapViewport.zoomNear .trafficShip,
+.mapViewport.zoomNear .resourceNode{
+  min-width:86px!important;
+  min-height:86px!important;
+  width:86px!important;
+  height:86px!important;
+}
+
+.trafficShip img,
+.resourceNode img{
+  padding:8px!important;
+  object-fit:contain!important;
+}
+
+.trafficShip em,
+.resourceNode em{
+  font-size:13px!important;
+  padding:3px 7px!important;
+  right:-13px!important;
+  bottom:-13px!important;
+}
+
+.mapNode{
+  min-width:230px!important;
+  max-width:280px!important;
+}
+
+.mapNode img{
+  width:68px!important;
+  height:68px!important;
+  object-fit:contain!important;
+}
+
+.mapNode b{
+  font-size:17px!important;
+}
+
+.mapNode span{
+  font-size:13px!important;
+}
+
+.travelIdle{
+  border-color:rgba(134,255,190,.35)!important;
+  box-shadow:inset 0 0 28px rgba(134,255,190,.06);
+}
+
+.phase23bObjectPanel .mapObjectHeaderVisual img{
+  width:74px!important;
+  height:74px!important;
+  object-fit:contain!important;
+}
+
+
+/* Phase 26: waypoint/intercept usability fixes. */
+.mapViewport{
+  overscroll-behavior: contain !important;
+  overscroll-behavior-block: contain !important;
+  touch-action: none !important;
+}
+
+.shipMarker.selfShip{
+  width:96px!important;
+  height:96px!important;
+  border:2px solid rgba(255,255,255,.92)!important;
+  border-radius:999px!important;
+  background:radial-gradient(circle at 45% 35%, rgba(185,255,214,.22), rgba(2,8,16,.92) 70%)!important;
+  box-shadow:0 0 0 3px rgba(185,255,214,.22),0 0 34px rgba(185,255,214,.75),0 0 64px rgba(0,255,136,.28)!important;
+  overflow:visible!important;
+}
+
+.shipMarker.selfShip .selfShipImg{
+  width:100%!important;
+  height:100%!important;
+  object-fit:contain!important;
+  padding:8px!important;
+  border-radius:999px!important;
+  filter:drop-shadow(0 0 12px rgba(255,255,255,.85)) drop-shadow(0 0 20px rgba(108,255,176,.75));
+}
+
+.shipMarker.selfShip.intercepting{
+  border-color:#ffeff6!important;
+  box-shadow:0 0 0 4px rgba(255,77,109,.22),0 0 38px rgba(255,77,109,.82),0 0 72px rgba(255,255,255,.22)!important;
+}
+
+.shipMarker.selfShip.parkedOpenSpace{
+  border-color:#b9ffd6!important;
+}
+
+.shipMarker.selfShip span{
+  position:absolute!important;
+  right:-15px!important;
+  bottom:-13px!important;
+  z-index:3!important;
+}
+
+.trafficShip,
+.resourceNode{
+  min-width:92px!important;
+  min-height:92px!important;
+  width:92px!important;
+  height:92px!important;
+}
+
+.mapViewport.zoomFar .trafficShip,
+.mapViewport.zoomFar .resourceNode{
+  min-width:82px!important;
+  min-height:82px!important;
+  width:82px!important;
+  height:82px!important;
+}
+
+.mapViewport.zoomNear .trafficShip,
+.mapViewport.zoomNear .resourceNode{
+  min-width:98px!important;
+  min-height:98px!important;
+  width:98px!important;
+  height:98px!important;
+}
+
+
+/* Phase 27 radar range visibility. */
+.playerRadarRing{
+  position:absolute;
+  z-index:4;
+  transform:translate(-50%,-50%);
+  border:2px solid rgba(185,255,214,.48);
+  border-radius:9999px;
+  background:radial-gradient(circle, rgba(185,255,214,.08), rgba(185,255,214,.025) 48%, rgba(185,255,214,.0) 72%);
+  box-shadow:0 0 24px rgba(185,255,214,.25), inset 0 0 28px rgba(185,255,214,.08);
+  pointer-events:none;
+}
+
+.playerRadarRing:after{
+  content:'RADAR RANGE';
+  position:absolute;
+  left:50%;
+  top:-22px;
+  transform:translateX(-50%);
+  color:#d9ffe8;
+  background:#02150f;
+  border:1px solid rgba(185,255,214,.44);
+  border-radius:999px;
+  padding:2px 8px;
+  font-size:11px;
+  letter-spacing:.08em;
+  white-space:nowrap;
+}
+
+.playerRadarPing{
+  position:absolute;
+  z-index:29;
+  transform:translate(-50%,-50%);
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  background:#d9ffe8;
+  box-shadow:0 0 16px rgba(185,255,214,.9),0 0 36px rgba(53,242,255,.45);
+  pointer-events:none;
+}
+
+.phase23bObjectPanel .mapMetaGrid{
+  grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+}
+
+
+/* Phase 28: NPC objective clarity. */
+.npcObjectiveBox{
+  margin-top:8px;
+  border:1px solid rgba(53,242,255,.35);
+  background:linear-gradient(180deg,rgba(5,31,46,.72),rgba(2,10,16,.82));
+  border-radius:10px;
+  padding:9px 10px;
+  display:grid;
+  gap:3px;
+}
+
+.npcObjectiveBox b{
+  color:#dffbff;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  font-size:11px;
+}
+
+.npcObjectiveBox span{
+  color:#9dfcff;
+  font-weight:800;
+}
+
+.npcObjectiveBox small{
+  color:#9fb8c7;
+}
+
+.npcRadarCounts{
+  margin-top:8px;
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(110px,1fr));
+  gap:6px;
+}
+
+.npcRadarCounts span{
+  border:1px solid #123849;
+  background:#04121b;
+  padding:6px 8px;
+  border-radius:8px;
+  color:#9fb8c7;
+  font-size:12px;
+}
+
+.npcRadarCounts b{
+  color:#dffbff;
+}
+
+.trafficShip em{
+  max-width:64px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+
+/* Phase 29: Admin runtime game tuning. */
+.adminHeroGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:10px;
+  margin-bottom:12px;
+}
+
+.adminHeroGrid>div,
+.adminHintGrid>div{
+  border:1px solid #164e63;
+  background:linear-gradient(180deg,#071b29,#041018);
+  border-radius:12px;
+  padding:12px;
+}
+
+.adminHeroGrid b,
+.adminHintGrid b{
+  display:block;
+  color:#dffbff;
+  margin-bottom:5px;
+}
+
+.adminHeroGrid span,
+.adminHintGrid span{
+  display:block;
+  color:#9fb8c7;
+  line-height:1.35;
+}
+
+.adminHintGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+  gap:10px;
+}
+
+.adminHintGrid code{
+  display:inline-block;
+  margin:4px 0 8px;
+  color:#9dfcff;
+  background:#020a10;
+  border:1px solid #164e63;
+  padding:4px 7px;
+  border-radius:8px;
+}
+
+.adminTuningLayout{
+  display:grid;
+  grid-template-columns:minmax(280px,390px) minmax(0,1fr);
+  gap:14px;
+  align-items:start;
+}
+
+.adminConfigList{
+  display:grid;
+  gap:8px;
+  max-height:720px;
+  overflow:auto;
+  padding-right:4px;
+}
+
+.adminConfigList button{
+  text-align:left;
+  border:1px solid #123849;
+  background:#04121b;
+  border-radius:12px;
+  padding:10px;
+  display:grid;
+  gap:4px;
+}
+
+.adminConfigList button.active{
+  border-color:#35f2ff;
+  box-shadow:0 0 18px rgba(53,242,255,.16);
+  background:#082132;
+}
+
+.adminConfigList b{
+  color:#dffbff;
+  font-size:12px;
+}
+
+.adminConfigList span{
+  color:#9fb8c7;
+  line-height:1.3;
+  font-size:12px;
+}
+
+.adminConfigList small{
+  color:#ffc247;
+  font-size:11px;
+}
+
+.adminJsonEditor{
+  display:grid;
+  gap:10px;
+}
+
+.adminConfigMeta{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:8px;
+}
+
+.adminConfigMeta span{
+  border:1px solid #123849;
+  background:#04121b;
+  border-radius:10px;
+  padding:8px;
+  color:#9fb8c7;
+}
+
+.adminConfigMeta b{
+  color:#dffbff;
+}
+
+.adminJsonEditor textarea{
+  width:100%;
+  min-height:560px;
+  resize:vertical;
+  border:1px solid #1d637a;
+  background:#02080d;
+  color:#d9f7ff;
+  border-radius:12px;
+  padding:14px;
+  font-family:Consolas, Monaco, monospace;
+  font-size:12px;
+  line-height:1.45;
+  tab-size:2;
+}
+
+.defaultConfigPreview{
+  border:1px solid #123849;
+  background:#04121b;
+  border-radius:12px;
+  padding:10px;
+}
+
+.defaultConfigPreview summary{
+  color:#9dfcff;
+  cursor:pointer;
+  font-weight:800;
+}
+
+.defaultConfigPreview pre{
+  max-height:360px;
+  overflow:auto;
+  white-space:pre-wrap;
+  color:#9fb8c7;
+}
+
+@media(max-width:1100px){
+  .adminTuningLayout{
+    grid-template-columns:1fr;
+  }
+}
+
+
+/* Phase 30: Timed crafting and fabrication queue. */
+.craftTimingSummary{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:8px;
+  margin-top:10px;
+}
+
+.craftTimingSummary span{
+  border:1px solid #123849;
+  background:#04121b;
+  border-radius:10px;
+  padding:8px;
+  color:#9fb8c7;
+}
+
+.craftTimingSummary b{
+  display:block;
+  color:#dffbff;
+  font-size:17px;
+}
+
+.craftQueueGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(340px,1fr));
+  gap:10px;
+}
+
+.craftJob{
+  display:grid;
+  grid-template-columns:auto 1fr auto;
+  gap:10px;
+  align-items:center;
+  border:1px solid #164e63;
+  background:linear-gradient(180deg,#071b29,#041018);
+  border-radius:14px;
+  padding:12px;
+}
+
+.craftJob b{
+  color:#dffbff;
+  display:block;
+}
+
+.craftJob span{
+  color:#9dfcff;
+  display:block;
+  margin-top:2px;
+}
+
+.craftJob small{
+  color:#9fb8c7;
+  display:block;
+  margin-top:2px;
+}
+
+.activeCraftJob{
+  border-color:#35f2ff;
+  box-shadow:0 0 18px rgba(53,242,255,.12);
+}
+
+.craftJob.complete{
+  border-color:rgba(134,255,190,.35);
+}
+
+.craftJob.failed{
+  border-color:rgba(255,77,109,.35);
+}
+
+.craftJob.cancelled{
+  opacity:.72;
+}
+
+/* Phase 31: Pirate station assaults. */
+.pirateStationNode{
+  border-color:#ff4d57 !important;
+  box-shadow:0 0 26px rgba(255,77,87,.42), inset 0 0 14px rgba(255,77,87,.18);
+  background:radial-gradient(circle,#351016,#080b12 72%);
+}
+.pirateStationNode.locked{
+  filter:grayscale(.45);
+  opacity:.72;
+}
+.pirateStationLayout{
+  display:grid;
+  grid-template-columns:minmax(320px, .85fr) minmax(520px, 1.4fr);
+  gap:14px;
+}
+.pirateStationLayout .panel:nth-child(3){
+  grid-column:1 / -1;
+}
+.stationStatusHead{
+  display:grid;
+  grid-template-columns:78px 1fr;
+  gap:12px;
+  align-items:center;
+}
+.stationStatusHead img,
+.stationStatusHead .gameImage{
+  width:74px;
+  height:74px;
+}
+.pirateArena{
+  position:relative;
+  height:620px;
+  border:1px solid #4d1d25;
+  border-radius:18px;
+  overflow:hidden;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(255,77,87,.10), transparent 16%),
+    radial-gradient(circle at 20% 30%, rgba(255,140,53,.10), transparent 24%),
+    linear-gradient(135deg,#05070d,#14080c 55%,#03060a);
+  box-shadow:inset 0 0 60px rgba(255,77,87,.10);
+}
+.escapeBand{
+  position:absolute;
+  background:rgba(77,255,145,.08);
+  border-color:rgba(77,255,145,.25);
+  pointer-events:none;
+}
+.escapeBand.top{left:0;right:0;top:0;height:4%;border-bottom:1px dashed rgba(77,255,145,.35)}
+.escapeBand.bottom{left:0;right:0;bottom:0;height:4%;border-top:1px dashed rgba(77,255,145,.35)}
+.escapeBand.left{left:0;top:0;bottom:0;width:4%;border-right:1px dashed rgba(77,255,145,.35)}
+.escapeBand.right{right:0;top:0;bottom:0;width:4%;border-left:1px dashed rgba(77,255,145,.35)}
+.arenaPlayer,
+.arenaEnemy{
+  position:absolute;
+  transform:translate(-50%,-50%);
+  border:1px solid #35f2ff;
+  border-radius:999px;
+  width:58px;
+  height:58px;
+  display:grid;
+  place-items:center;
+  background:#04131b;
+  color:#dffbff;
+  font-weight:900;
+  z-index:3;
+  box-shadow:0 0 22px rgba(53,242,255,.28);
+}
+.arenaPlayer{
+  width:70px;
+  height:70px;
+  border-color:#ffffff;
+  box-shadow:0 0 28px rgba(255,255,255,.35), 0 0 44px rgba(53,242,255,.22);
+}
+.arenaEnemy{
+  border-color:#ff4d57;
+  box-shadow:0 0 18px rgba(255,77,87,.34);
+}
+.arenaEnemy img,
+.arenaEnemy .gameImage{
+  width:44px;
+  height:44px;
+  border-radius:50%;
+}
+.arenaEnemy em{
+  position:absolute;
+  right:-6px;
+  bottom:-6px;
+  border:1px solid #ff4d57;
+  background:#19070b;
+  border-radius:999px;
+  padding:2px 5px;
+  font-size:10px;
+  color:#ffd4d8;
+}
+.arenaEnemy.defeated{
+  opacity:.38;
+  filter:grayscale(1);
+  border-color:#59636f;
+}
+.arenaEnemy.engaged{
+  animation:pulseDanger 1s infinite alternate;
+}
+@keyframes pulseDanger{
+  from{box-shadow:0 0 18px rgba(255,77,87,.32)}
+  to{box-shadow:0 0 36px rgba(255,77,87,.72)}
+}
+.stationEnemyList{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(310px,1fr));
+  gap:10px;
+}
+.stationEnemy{
+  display:grid;
+  grid-template-columns:54px 1fr auto;
+  gap:10px;
+  align-items:center;
+  border:1px solid #37202a;
+  background:linear-gradient(180deg,#10080d,#05070b);
+  border-radius:14px;
+  padding:10px;
+}
+.stationEnemy.defeated{
+  opacity:.56;
+  filter:grayscale(.75);
+}
+.stationEnemy b,
+.stationEnemy span,
+.stationEnemy small{
+  display:block;
+}
+.stationEnemy b{color:#ffe1e4}
+.stationEnemy span{color:#ff9aa3}
+.stationEnemy small{color:#9fb8c7}
+.stationBattleOverlay{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.72);
+  z-index:80;
+  display:grid;
+  place-items:center;
+  padding:24px;
+}
+.stationBattleModal{
+  width:min(980px,96vw);
+  max-height:90vh;
+  overflow:auto;
+  border:1px solid #ff4d57;
+  border-radius:22px;
+  background:linear-gradient(180deg,#15070c,#06080d);
+  box-shadow:0 0 80px rgba(255,77,87,.28);
+  padding:18px;
+}
+.battleHeader{
+  display:grid;
+  grid-template-columns:90px 1fr;
+  gap:14px;
+  align-items:center;
+  border-bottom:1px solid rgba(255,77,87,.28);
+  padding-bottom:12px;
+  margin-bottom:12px;
+}
+.battleHeader img,
+.battleHeader .gameImage{
+  width:84px;
+  height:84px;
+}
+.battleHeader h2{
+  margin:0;
+  color:#ffe1e4;
+}
+.battleHeader p{
+  margin:4px 0 0;
+  color:#9fb8c7;
+}
+.battleActions,
+.battleReport{
+  display:grid;
+  gap:12px;
+}
+.combatLog{
+  display:grid;
+  gap:6px;
+  max-height:320px;
+  overflow:auto;
+}
+.combatLog div{
+  border:1px solid #1f3440;
+  background:#04111a;
+  border-radius:10px;
+  padding:8px;
+}
+.combatLog b,
+.combatLog span{
+  display:block;
+}
+.combatLog span{color:#b8cdd8}
+@media(max-width:1050px){
+  .pirateStationLayout{grid-template-columns:1fr;}
+}
+
+
+/* Phase 32: open-world pirate station capacity and targeting. */
+.stationPilotList{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+  gap:8px;
+}
+.stationPilot{
+  border:1px solid #123849;
+  background:#04121b;
+  border-radius:10px;
+  padding:9px;
+}
+.stationPilot.self{
+  border-color:#b9ffd6;
+  box-shadow:0 0 14px rgba(185,255,214,.16);
+}
+.stationPilot b{
+  display:block;
+  color:#dffbff;
+}
+.stationPilot span{
+  color:#9fb8c7;
+  font-size:12px;
+}
+.arenaPlayer.ally{
+  background:#25476f;
+  border-color:#9fc7ff;
+  color:#e5f1ff;
+}
+.arenaPlayer.self{
+  background:#b9ffd6;
+  border-color:#fff;
+  color:#04120b;
+  box-shadow:0 0 18px rgba(185,255,214,.75);
+}
+.arenaEnemy.targetingSelf{
+  border-color:#ff4d6d!important;
+  box-shadow:0 0 22px rgba(255,77,109,.65)!important;
+}
+.stationEnemy.targetingSelf{
+  border-color:#ff4d6d!important;
+  background:linear-gradient(180deg,#2a101a,#071018)!important;
+}
+.stationBattleOverlay.nonBlocking{
+  pointer-events:none;
+}
+.stationBattleOverlay.nonBlocking .stationBattleModal{
+  pointer-events:auto;
+  border-color:#ffb84d;
+}
+
+
+.recipeCard.lockedRecipe{opacity:.58;filter:saturate(.72)}
+.recipeOwnershipRow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.recipeLicenseChip,.recipeSetChip{display:inline-flex;align-items:center;gap:6px;border:1px solid #1d637a;background:#08141e;padding:5px 8px;border-radius:999px;font-size:12px;color:#dffbff}
+.recipeLicenseChip.unlimited{border-color:#1d8f73;color:#bafcdd}
+.recipeLicenseChip.owned{border-color:#8a5b12;color:#ffd98a}
+.recipeLicenseChip.missing{border-color:#703442;color:#ffb9bf}
+.recipeSetChip{border-color:#67506d;color:#dcb4ff}
+.recipeSetText{display:block;color:#dcb4ff;margin-top:3px}
+
+/* Phase 33: expanded galaxy factions, gates, and wars. */
+.galaxyWarRing{
+  position:absolute;
+  z-index:5;
+  transform:translate(-50%,-50%);
+  border:2px solid rgba(255,59,77,.75);
+  border-radius:999px;
+  background:radial-gradient(circle, rgba(255,59,77,.12), rgba(255,59,77,.05) 50%, rgba(255,59,77,0) 72%);
+  box-shadow:0 0 28px rgba(255,59,77,.35), inset 0 0 28px rgba(255,59,77,.12);
+  pointer-events:none;
+}
+
+.captureStationMarker{
+  position:absolute;
+  z-index:34;
+  width:34px;
+  height:34px;
+  border-radius:50%;
+  border:2px solid rgba(255,210,120,.9);
+  background:#2a0710;
+  color:#ffd278;
+  display:grid;
+  place-items:center;
+  font-weight:900;
+  box-shadow:0 0 20px rgba(255,69,90,.6);
+}
+
+.mapNode.gateNode{
+  border-color:#83f7ff;
+  box-shadow:0 0 20px rgba(131,247,255,.28);
+}
+
+.mapNode.homeGalaxyNode{
+  border-color:rgba(255,210,120,.55);
+}
+
+.galaxyWarCard{
+  border:1px solid #4a1a24;
+  background:linear-gradient(180deg,#170810,#08050a);
+  padding:12px;
+  border-radius:14px;
+  display:grid;
+  gap:6px;
+}
+
+.galaxyWarCard.activeWar{
+  border-color:#ff405d;
+  box-shadow:0 0 22px rgba(255,64,93,.16);
+}
+
+.warGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+  gap:10px;
+}
+
+.factionStack{
+  display:grid;
+  gap:8px;
+}
+
+.factionLine{
+  display:grid;
+  grid-template-columns:130px 1fr auto auto;
+  align-items:center;
+  gap:8px;
+  color:#b9c9d8;
+}
+
+.factionLine b{
+  color:#dffbff;
+}
+
+.factionLine em{
+  color:#ffd278;
+  font-style:normal;
+}
+
+.miniGalaxyCard{
+  border:1px solid #164e63;
+  background:#04121b;
+  border-radius:12px;
+  padding:10px;
+  display:grid;
+  gap:6px;
+}
+
+.miniGalaxyCard b{
+  color:#dffbff;
+}
+
+
+/* Achievement/profile pass */
+.profileAvatarWithBadge{
+  position:relative;
+  display:inline-grid;
+  place-items:center;
+  width:46px;
+  height:46px;
+  flex:0 0 auto;
+}
+.profileAvatarWithBadge.sm{width:38px;height:38px}
+.profileAvatarWithBadge.md{width:48px;height:48px}
+.profileAvatarWithBadge.lg{width:96px;height:96px}
+.profileAvatarWithBadge img{width:100%;height:100%;object-fit:cover;border-radius:999px}
+.profileAvatarWithBadge .achievementBadge.tiny{
+  position:absolute;
+  right:-5px;
+  bottom:-5px;
+  width:24px;
+  height:24px;
+  filter:drop-shadow(0 0 8px rgba(0,0,0,.8));
+}
+.profileAvatarButton,.badgeButton,.chatNameButton{
+  background:transparent;
+  border:0;
+  padding:0;
+  color:inherit;
+  cursor:pointer;
+  text-align:left;
+}
+.achievementBadge{
+  position:relative;
+  display:inline-grid;
+  place-items:center;
+  border-radius:999px;
+}
+.achievementBadge img{width:100%;height:100%;object-fit:contain;border-radius:999px}
+.achievementBadge.tiny{width:28px;height:28px}
+.achievementBadge.sm{width:42px;height:42px}
+.achievementBadge.md{width:58px;height:58px}
+.achievementBadge.locked{filter:grayscale(1);opacity:.35}
+.achievementBadge em{
+  position:absolute;
+  right:-4px;
+  bottom:-2px;
+  background:#07121b;
+  border:1px solid #78e7ff;
+  border-radius:999px;
+  font-size:9px;
+  padding:1px 4px;
+  color:#dffbff;
+}
+.profileTabs{margin:12px 0}
+.achievementTopList,.publicAchievementGrid,.achievementGrid,.badgePicker,.buffGrid{
+  display:grid;
+  gap:10px;
+}
+.achievementTopList>div,.publicAchievementCard,.achievementLoopCard,.badgePicker>button,.buffGrid>span{
+  border:1px solid #164e63;
+  background:#06131d;
+  border-radius:14px;
+  padding:10px;
+}
+.achievementTopList>div,.publicAchievementCard{
+  display:grid;
+  grid-template-columns:auto 1fr;
+  align-items:center;
+  gap:8px;
+}
+.achievementTopList .progress,.publicAchievementCard .progress{grid-column:1 / -1}
+.achievementGrid{grid-template-columns:repeat(auto-fit,minmax(290px,1fr))}
+.achievementLoopCard{
+  display:grid;
+  gap:8px;
+  box-shadow:0 0 22px rgba(58,180,255,.08);
+}
+.achievementLoopHead{
+  display:grid;
+  grid-template-columns:auto 1fr auto;
+  gap:10px;
+  align-items:center;
+}
+.badgeRow{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+}
+.badgePicker{
+  grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+}
+.badgePicker>button{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  color:#dffbff;
+}
+.selectedBadgeChoice{
+  outline:2px solid #77e8ff;
+  box-shadow:0 0 18px rgba(119,232,255,.18);
+}
+.buffGrid{
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+}
+.profileModalBackdrop{
+  position:fixed;
+  inset:0;
+  z-index:5000;
+  background:rgba(0,0,0,.62);
+  display:grid;
+  place-items:center;
+}
+.publicProfileModal{
+  width:min(760px,92vw);
+  max-height:86vh;
+  overflow:auto;
+  border:1px solid #2d7b95;
+  border-radius:22px;
+  background:linear-gradient(180deg,#081521,#03070d);
+  box-shadow:0 30px 90px rgba(0,0,0,.75),0 0 40px rgba(75,210,255,.15);
+  padding:18px;
+  position:relative;
+}
+.modalX{
+  position:absolute;
+  right:12px;
+  top:10px;
+  border:1px solid #326d83;
+  background:#08131d;
+  color:#dffbff;
+  border-radius:999px;
+  width:32px;
+  height:32px;
+}
+.publicProfileHeader{
+  display:grid;
+  grid-template-columns:auto 1fr;
+  gap:16px;
+  align-items:center;
+  margin-bottom:12px;
+}
+.publicAchievementGrid{
+  grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+}
+.chatMessage .profileAvatarButton{
+  align-self:flex-start;
+}
+.mapObjectHeaderVisual .profileAvatarButton{
+  width:54px;
+  height:54px;
+}
+
+
+/* DB-backed map operations / inspect modal */
+.mapOperationBanner{
+  display:flex;
+  align-items:center;
+  gap:12px;
+  border:1px solid #19d4ff;
+  background:linear-gradient(90deg,rgba(7,26,38,.96),rgba(4,12,20,.96));
+  color:#dffbff;
+  border-radius:12px;
+  padding:10px 12px;
+  margin:8px 0 12px;
+  box-shadow:0 0 22px rgba(25,212,255,.14);
+}
+.mapOperationBanner b{color:#83f7ff;text-transform:uppercase;letter-spacing:.08em}
+.mapOperationBanner small{margin-left:auto;color:#ffd97a}
+
+.mapInspectOverlay{
+  position:fixed;
+  inset:0;
+  z-index:4900;
+  background:rgba(0,0,0,.18);
+}
+.mapInspectModal{
+  position:fixed !important;
+  width:min(500px,92vw);
+  max-height:min(520px,84vh);
+  overflow:auto;
+  z-index:5001;
+  border:1px solid #39d7ff;
+  background:linear-gradient(180deg,#071725,#030912);
+  border-radius:18px;
+  padding:14px;
+  box-shadow:0 24px 80px rgba(0,0,0,.72),0 0 38px rgba(57,215,255,.22);
+}
+.mapInspectX{
+  position:absolute;
+  right:10px;
+  top:8px;
+  z-index:2;
+}
+.mapObjectPanel.mapInspectModal{
+  bottom:auto !important;
+  left:auto;
+}
+
+/* Map polish final: remove secondary ship-following ping and smooth live-world movement. */
+.playerRadarPing{display:none !important;}
+.shipMarker,.trafficShip{transition:left 700ms linear, top 700ms linear, filter 180ms ease, transform 120ms ease;}
+.resourceNode,.captureStationMarker{transition:left 420ms ease, top 420ms ease, filter 180ms ease;}
+.mapContextPopup{z-index:5100;}
+.mapInspectOverlay{z-index:5200;}
+.mapInspectModal{z-index:5300;}
+
+/* Living-world map rework: one canonical player marker, coordinate-true routes, smoother NPC interpolation. */
+.trafficShip.player,
+.trafficShip.self,
+.trafficShip[data-self="true"]{
+  display:none !important;
+}
+.mapCoordinateTravelLine{
+  stroke-width:1.25;
+  filter:drop-shadow(0 0 5px rgba(255,194,71,.75));
+}
+.trafficShip{
+  transition:left 950ms linear, top 950ms linear, box-shadow .15s ease, border-color .15s ease, transform .15s ease;
+  will-change:left, top;
+}
+.shipMarker.selfShip{
+  transition:left 650ms linear, top 650ms linear, box-shadow .15s ease, border-color .15s ease, transform .15s ease;
+  will-change:left, top;
+}
+.npcLifeBox{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:6px;
+  margin:8px 0;
+}
+.npcLifeBox span,
+.npcLifeBox em{
+  border:1px solid rgba(74,226,255,.22);
+  background:rgba(4,18,28,.74);
+  border-radius:9px;
+  padding:6px 8px;
+  font-size:11px;
+  color:#ccefff;
+  font-style:normal;
+}
+.npcLifeBox em{
+  color:#ffd67a;
+}
+
+/* Map living-world rework v4: positions are timestamp-derived; do not let long CSS transitions create ghost/follower behavior. */
+.trafficShip,
+.shipMarker.selfShip {
+  transition: filter 180ms ease, box-shadow .15s ease, border-color .15s ease, transform .15s ease !important;
+}
+.trafficShip.player,
+.trafficShip.self,
+.trafficShip[data-self="true"] {
+  display: none !important;
+}
+.mapCoordinateTravelLine {
+  stroke-width: .42 !important;
+  filter: drop-shadow(0 0 4px rgba(53,242,255,.72));
+}
+
+
+/* Phase 29: strict radar circle + interactive battle controls. */
+.playerRadarRing{
+  aspect-ratio:1 / 1;
+  border-radius:50%!important;
+}
+.battlePaceRow{align-items:center}
+.battlePaceRow span{border:1px solid rgba(69,243,255,.18);background:rgba(5,17,28,.82);color:#9fb8c7;padding:7px 10px;border-radius:999px;font-size:12px}
+.escapeBtn{border-color:#ff4d6d!important;background:#3a0712!important;color:#fff!important;font-weight:900!important;letter-spacing:.08em;box-shadow:0 0 22px rgba(255,77,109,.22)}
+.escapeResult{margin:12px 16px 0;padding:12px 14px;border-radius:14px;display:grid;gap:3px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05)}
+.escapeResult.success{border-color:rgba(89,255,163,.36);background:rgba(89,255,163,.08)}
+.escapeResult.fail{border-color:rgba(255,77,109,.34);background:rgba(255,77,109,.08)}
+.escapeResult b{color:#fff}.escapeResult span{color:#b9c8d2}
+.globalBattleLock{z-index:1400}
+.globalBattleLock .battleModal{outline:2px solid rgba(255,77,109,.18)}
+
+/* Phase 30: real-time combat modal polish. Keep ships fixed, mark defeated side, show clear end state. */
+.realtimeBattleScreen .battleStage{grid-template-columns:260px minmax(220px,1fr) 260px;align-items:stretch}
+.realtimeBattleScreen .combatShipSide{min-height:245px;justify-content:space-between;transform:none!important;transition:box-shadow .2s ease,border-color .2s ease,opacity .2s ease}
+.realtimeBattleScreen .combatShipSide.defeated{opacity:.72;border-color:rgba(255,54,86,.55);box-shadow:inset 0 0 0 2px rgba(255,54,86,.22),0 0 30px rgba(255,54,86,.16)}
+.realtimeBattleScreen .combatShipSide.defeated::after{content:"";position:absolute;left:8%;right:8%;top:50%;height:9px;border-radius:999px;background:linear-gradient(90deg,transparent,#ff274d 16%,#ff274d 84%,transparent);transform:rotate(-24deg);box-shadow:0 0 22px rgba(255,39,77,.75);z-index:5}
+.realtimeStage.complete .battleLane{border-color:rgba(255,77,109,.28);background:radial-gradient(circle at center,rgba(255,77,109,.10),rgba(0,0,0,.08) 55%)}
+.battleEndedStamp{position:relative;z-index:4;padding:14px 22px;border-radius:16px;border:1px solid rgba(255,77,109,.45);background:rgba(44,3,12,.86);color:#fff;font-size:22px;font-weight:950;letter-spacing:.12em;text-transform:uppercase;box-shadow:0 0 34px rgba(255,77,109,.24)}
+.battleLog .systemLog{border-color:rgba(255,210,122,.22);background:rgba(255,210,122,.06)}
+.escapeBtn:disabled{opacity:.58;cursor:not-allowed;filter:saturate(.55)}
+.dangerCallout{border-color:rgba(255,77,109,.34)!important;background:rgba(255,77,109,.08)!important}
+
+/* Phase 31: interactive attack-energy combat controls. */
+.energyBattleScreen .battleHeader{align-items:flex-start}.energyBattleScreen .escapeBtn{display:flex!important;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:150px;padding:9px 14px!important}.energyBattleScreen .escapeBtn small{font-size:10px;color:#ffd5dd;letter-spacing:.04em}.battleEnergyStrip{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.18)}.battleEnergyStripWithEscape{grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center}.battleEscapeSlot{display:flex;align-items:center;justify-content:center}.battleEscapeSlot .escapeBtn{min-width:170px;padding:12px 16px!important}.battleEnergyMeter{display:grid;gap:7px;padding:10px;border:1px solid rgba(69,243,255,.20);border-radius:14px;background:linear-gradient(180deg,rgba(5,22,34,.86),rgba(3,11,18,.88))}.battleEnergyMeter.enemy{border-color:rgba(255,91,91,.22)}.battleEnergyMeter>div:first-child{display:flex;justify-content:space-between;gap:10px;align-items:center}.battleEnergyMeter b{color:#dffbff}.battleEnergyMeter span{color:#9db4c1;font-size:12px}.battleEnergyTrack{height:10px;border-radius:999px;overflow:hidden;background:#06131d;border:1px solid rgba(255,255,255,.08)}.battleEnergyTrack i{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,#45f3ff,#9dffdf);box-shadow:0 0 18px rgba(69,243,255,.35)}.battleEnergyMeter.enemy .battleEnergyTrack i{background:linear-gradient(90deg,#ff4d6d,#ffd27a);box-shadow:0 0 18px rgba(255,77,109,.28)}.battleEnergyPips{display:grid;grid-template-columns:repeat(12,1fr);gap:4px}.battleEnergyPips span{height:20px;border-radius:6px;display:grid;place-items:center;font-size:10px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);color:#6f8797}.battleEnergyPips span.filled{background:rgba(69,243,255,.18);border-color:rgba(69,243,255,.36);color:#dffbff}.battleEnergyMeter.enemy .battleEnergyPips span.filled{background:rgba(255,77,109,.16);border-color:rgba(255,77,109,.34);color:#ffd5dd}.interactiveStage{grid-template-columns:minmax(290px,360px) minmax(220px,1fr) minmax(260px,320px)!important;align-items:start!important}.playerBattleColumn,.enemyBattleColumn{display:flex;flex-direction:column;gap:12px;min-width:0}.battleActionDeck{position:relative;z-index:3;display:grid;gap:10px;padding:12px;border-radius:16px;border:1px solid rgba(69,243,255,.20);background:linear-gradient(180deg,rgba(3,14,24,.96),rgba(2,8,15,.96));box-shadow:0 14px 32px rgba(0,0,0,.24)}.actionDeckHeader{display:flex;align-items:center;justify-content:space-between;gap:8px}.actionDeckHeader b{color:#dffbff}.actionDeckHeader span{font-size:12px;color:#9db4c1}.weaponButtonGrid,.utilityButtonGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.specialActionRow{display:grid;grid-template-columns:1fr 1fr;gap:8px}.combatActionBtn{min-height:54px;padding:8px 9px!important;border-radius:13px!important;display:flex!important;flex-direction:column;justify-content:center;align-items:flex-start;gap:3px;text-align:left;border:1px solid rgba(255,255,255,.13)!important;background:linear-gradient(180deg,rgba(10,28,42,.92),rgba(4,12,20,.94))!important;color:#effcff!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}.combatActionBtn span{font-weight:850;font-size:12px;line-height:1.1}.combatActionBtn small{font-size:10px;color:#9fb5c1;line-height:1.15}.combatActionBtn.weapon{border-color:rgba(69,243,255,.24)!important}.combatActionBtn.utility{border-color:rgba(172,122,255,.24)!important;background:linear-gradient(180deg,rgba(28,16,54,.86),rgba(7,10,24,.94))!important}.combatActionBtn.defend{border-color:rgba(157,255,223,.25)!important}.combatActionBtn.useAll{border-color:rgba(255,210,122,.30)!important;background:linear-gradient(180deg,rgba(58,38,8,.80),rgba(18,12,4,.94))!important}.combatActionBtn:not(:disabled):hover{transform:translateY(-1px);border-color:rgba(255,255,255,.34)!important;box-shadow:0 0 20px rgba(69,243,255,.10)}.combatActionBtn.disabled,.combatActionBtn:disabled{opacity:.45;cursor:not-allowed;filter:saturate(.55)}.enemyIntentPanel{display:grid;gap:5px;padding:12px;border-radius:14px;border:1px solid rgba(255,91,91,.20);background:rgba(32,5,12,.34)}.enemyIntentPanel b{color:#ffd5dd}.enemyIntentPanel span{font-size:12px;color:#bd9aa3}.activeCombatEffects{display:flex;gap:8px;flex-wrap:wrap;padding:0 16px 12px}.activeCombatEffects span{border:1px solid rgba(172,122,255,.24);background:rgba(80,45,130,.16);color:#d9caff;border-radius:999px;padding:7px 10px;font-size:12px}.escapeResult.warn{border-color:rgba(255,210,122,.34);background:rgba(255,210,122,.08)}@media(max-width:1100px){.battleEnergyStrip{grid-template-columns:1fr}.battleEnergyStripWithEscape{grid-template-columns:1fr}.interactiveStage{grid-template-columns:1fr!important}.weaponButtonGrid,.utilityButtonGrid,.specialActionRow{grid-template-columns:1fr}.battleActionDeck{order:2}}
+
+/* Phase 32: stable combat-stage rewrite. Fixed ship anchors prevent layout jumps while action UI/logs update. */
+.stableBattleStage{
+  display:block!important;
+  min-height:0!important;
+  padding:18px!important;
+  overflow:hidden;
+}
+.battleArenaRow{
+  display:grid;
+  grid-template-columns:minmax(290px,350px) minmax(260px,1fr) minmax(290px,350px);
+  gap:18px;
+  align-items:start;
+}
+.battleControlRow{
+  display:grid;
+  grid-template-columns:minmax(290px,350px) minmax(260px,1fr) minmax(290px,350px);
+  gap:18px;
+  align-items:start;
+  margin-top:12px;
+}
+.battleShipOnly,
+.battleControlSlot{
+  min-width:0;
+}
+.battleShipAnchor{
+  height:292px;
+  min-height:292px;
+  max-height:292px;
+  position:relative;
+  contain:layout paint;
+}
+.stableBattleStage .combatShipSide{
+  height:100%;
+  min-height:0!important;
+  box-sizing:border-box;
+  overflow:hidden;
+  transform:none!important;
+  animation:none!important;
+  will-change:auto!important;
+}
+.stableBattleStage .combatShipSide.player{
+  border-color:rgba(69,243,255,.24);
+}
+.stableBattleStage .combatShipSide.enemy{
+  border-color:rgba(255,91,91,.22);
+}
+.battleShipImageFrame{
+  width:100%;
+  height:130px;
+  min-height:130px;
+  max-height:130px;
+  border-radius:14px;
+  border:1px solid rgba(69,243,255,.18);
+  background:#07131c;
+  overflow:hidden;
+  flex:0 0 auto;
+  contain:strict;
+}
+.battleShipImageFrame img{
+  display:block;
+  width:100%!important;
+  height:100%!important;
+  object-fit:cover!important;
+  border:0!important;
+  border-radius:0!important;
+  transform:none!important;
+  animation:none!important;
+}
+.stableBattleLane{
+  height:292px;
+  min-height:292px!important;
+  max-height:292px;
+  align-self:start;
+  border:1px solid rgba(127,255,255,.14);
+  border-radius:18px;
+  background:
+    radial-gradient(circle at 50% 50%,rgba(69,243,255,.13),transparent 42%),
+    linear-gradient(90deg,rgba(69,243,255,.06),rgba(255,255,255,.02),rgba(255,77,109,.06));
+  contain:layout paint;
+  isolation:isolate;
+}
+.battleLaneGrid{
+  position:absolute;
+  inset:0;
+  opacity:.28;
+  pointer-events:none;
+  background:
+    linear-gradient(90deg,transparent 49%,rgba(255,255,255,.14) 50%,transparent 51%),
+    repeating-linear-gradient(0deg,transparent 0 32px,rgba(127,255,255,.08) 33px 34px),
+    repeating-linear-gradient(90deg,transparent 0 42px,rgba(127,255,255,.07) 43px 44px);
+}
+.battleLaneGrid span{
+  position:absolute;
+  top:50%;
+  width:7px;
+  height:7px;
+  margin-top:-3px;
+  border-radius:50%;
+  background:rgba(127,255,255,.38);
+  box-shadow:0 0 14px rgba(127,255,255,.28);
+}
+.battleLaneGrid span:nth-child(1){left:9%}
+.battleLaneGrid span:nth-child(2){left:28%}
+.battleLaneGrid span:nth-child(3){left:50%;background:rgba(255,255,255,.48)}
+.battleLaneGrid span:nth-child(4){left:70%}
+.battleLaneGrid span:nth-child(5){left:89%}
+.stableProjectile{
+  position:absolute;
+  left:10%;
+  top:50%;
+  width:80%;
+  height:28px;
+  margin-top:-14px;
+  pointer-events:none;
+  z-index:2;
+  overflow:visible;
+}
+.stableProjectile.reverse{
+  left:auto;
+  right:10%;
+  transform:scaleX(-1);
+}
+.stableProjectile i{
+  position:absolute;
+  left:0;
+  top:50%;
+  width:35%;
+  height:5px;
+  margin-top:-2px;
+  border-radius:999px;
+  background:linear-gradient(90deg,transparent,#7ff7ff,#ffffff,#7ff7ff,transparent);
+  box-shadow:0 0 18px rgba(69,243,255,.8),0 0 34px rgba(69,243,255,.35);
+  animation:stableLaserTravel 900ms cubic-bezier(.2,.8,.2,1) both;
+}
+.stableProjectile.missile i,
+.stableProjectile.rocket i{
+  height:10px;
+  width:22%;
+  margin-top:-5px;
+  background:linear-gradient(90deg,transparent,#ffd27a,#ff5d5d);
+  box-shadow:0 0 20px rgba(255,115,68,.72);
+  animation-duration:1100ms;
+}
+.stableProjectile.utility i,
+.stableProjectile.defend i{
+  width:46%;
+  height:16px;
+  margin-top:-8px;
+  background:linear-gradient(90deg,transparent,rgba(172,122,255,.82),rgba(255,255,255,.92),transparent);
+  box-shadow:0 0 24px rgba(172,122,255,.62);
+}
+.stableProjectile.miss i{
+  top:35%;
+  opacity:.55;
+  transform:rotate(-8deg);
+}
+@keyframes stableLaserTravel{
+  from{transform:translateX(-12%);opacity:0;filter:blur(2px)}
+  18%{opacity:1;filter:blur(0)}
+  82%{opacity:1}
+  to{transform:translateX(210%);opacity:0;filter:blur(1px)}
+}
+.battleImpactPulse{
+  position:absolute;
+  top:50%;
+  width:56px;
+  height:56px;
+  margin-top:-28px;
+  border-radius:50%;
+  pointer-events:none;
+  z-index:1;
+  opacity:0;
+  background:radial-gradient(circle,rgba(255,255,255,.8),rgba(69,243,255,.35),transparent 68%);
+  animation:stableImpactPulse 900ms ease-out both;
+}
+.battleImpactPulse.player{right:11%}
+.battleImpactPulse.enemy{left:11%}
+.battleImpactPulse.miss{top:36%;opacity:.18;background:radial-gradient(circle,rgba(255,255,255,.38),transparent 62%)}
+@keyframes stableImpactPulse{
+  0%,55%{transform:scale(.2);opacity:0}
+  70%{opacity:.85}
+  100%{transform:scale(1.7);opacity:0}
+}
+.stableDamageFloater{
+  position:absolute!important;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%)!important;
+  white-space:nowrap;
+  min-width:150px;
+  text-align:center;
+  pointer-events:none;
+}
+.battleSafetyHint{
+  min-height:72px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  gap:4px;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid rgba(127,255,255,.14);
+  background:rgba(3,13,22,.72);
+  color:#a9bdc8;
+}
+.battleSafetyHint b{color:#dffbff;font-size:12px;letter-spacing:.12em}
+.battleSafetyHint span{font-size:12px;line-height:1.35}
+@media(max-width:1100px){
+  .battleArenaRow,.battleControlRow{grid-template-columns:1fr}
+  .battleShipAnchor,.stableBattleLane{height:260px;min-height:260px!important;max-height:260px}
+}
+
+/* Phase 33: battle HP/effect visibility and active utility lockouts. */
+.stableBattleStage .battleShipAnchor{
+  height:390px;
+  min-height:390px;
+  max-height:390px;
+}
+.stableBattleStage .stableBattleLane{
+  height:390px;
+  min-height:390px!important;
+  max-height:390px;
+}
+.stableBattleStage .combatShipSide{
+  gap:4px;
+  overflow:hidden;
+  padding:10px;
+}
+.stableBattleStage .combatShipSide h3{
+  margin-bottom:0;
+}
+.stableBattleStage .combatShipSide > b{
+  line-height:1.1;
+}
+.stableBattleStage .combatShipSide > small{
+  line-height:1.1;
+}
+.stableBattleStage .combatShipVitals{
+  display:grid;
+  gap:5px;
+  flex:1 1 auto;
+  min-height:0;
+}
+.stableBattleStage .combatShipSide .miniMeter{
+  padding:7px 9px;
+}
+.stableBattleStage .combatShipSide .miniMeter b{
+  margin-top:2px;
+}
+.shipEffectRack{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  margin-top:0;
+  padding:6px;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:12px;
+  background:rgba(0,0,0,.22);
+  min-height:0;
+  flex:1 1 auto;
+  overflow:visible;
+}
+.shipEffectRackBody{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:4px;
+  align-content:start;
+  flex:1 1 auto;
+  min-height:0;
+}
+.shipEffectRackTitle{
+  color:#8ea9b8;
+  font-size:10px;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+  font-weight:850;
+  line-height:1;
+}
+.combatEffectBadge{
+  display:grid;
+  grid-template-columns:14px minmax(0,1fr) auto;
+  align-items:center;
+  gap:4px;
+  padding:4px 5px;
+  border-radius:8px;
+  font-size:10px;
+  border:1px solid rgba(255,255,255,.12);
+  min-width:0;
+}
+.combatEffectBadge svg{display:block}
+.combatEffectBadge b{
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:11px;
+}
+.combatEffectBadge em{
+  font-style:normal;
+  font-size:10px;
+  color:rgba(255,255,255,.76);
+}
+.combatEffectBadge.buff{
+  color:#cffff1;
+  border-color:rgba(89,255,163,.30);
+  background:rgba(32,160,100,.11);
+}
+.combatEffectBadge.repair{
+  color:#dffbff;
+  border-color:rgba(69,243,255,.30);
+  background:rgba(69,243,255,.10);
+}
+.combatEffectBadge.debuff{
+  color:#ffd5dd;
+  border-color:rgba(255,77,109,.36);
+  background:rgba(255,77,109,.10);
+}
+.effectEmpty{
+  color:#667d8c;
+  font-size:11px;
+  grid-column:1 / -1;
+}
+.combatActionBtn.activeLocked{
+  opacity:.58;
+  border-style:dashed!important;
+  box-shadow:inset 0 0 0 1px rgba(255,210,122,.10);
+}
+.combatActionBtn.activeLocked small{
+  color:#ffd27a!important;
+}
+@media(max-width:1100px){
+  .stableBattleStage .battleShipAnchor,.stableBattleStage .stableBattleLane{height:340px;min-height:340px!important;max-height:340px}
+}
+
+/* Phase 34: active battle log placement and complete-state cleanup. */
+.activeBattleScreen .battleFooter{
+  display:none!important;
+}
+.completeBattleScreen .battleHeader,
+.completeBattleScreen .battleEnergyStrip,
+.completeBattleScreen .escapeResult{
+  display:none!important;
+}
+.completeBattleScreen .stableBattleStage{
+  padding-top:8px!important;
+}
+.completeBattleScreen .battleControlRow{
+  display:none!important;
+}
+.completeBattleFooter{
+  grid-template-columns:minmax(420px,1.15fr) minmax(340px,.75fr)!important;
+  align-items:start;
+  border-top:1px solid rgba(255,255,255,.06);
+  background:linear-gradient(90deg,rgba(0,12,20,.58),rgba(12,4,12,.48));
+}
+.battleLogPanel{
+  min-width:0;
+  display:grid;
+  gap:8px;
+}
+.battleLogPanel.compact{
+  min-height:120px;
+  max-height:210px;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid rgba(127,255,255,.14);
+  background:rgba(3,13,22,.78);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
+}
+.battleLogTitle{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.battleLogTitle b{
+  color:#dffbff;
+  font-size:12px;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+}
+.battleLogTitle span{
+  color:#8ea9b8;
+  font-size:11px;
+}
+.battleLogPanel.compact .battleLog{
+  max-height:154px;
+  padding-right:4px;
+}
+.battleLogPanel.compact .battleLog div{
+  padding:7px 8px;
+  border-radius:10px;
+  grid-template-columns:40px 1fr;
+}
+.battleLogPanel.compact .battleLog span{
+  font-size:12px;
+  line-height:1.25;
+}
+.completeBattleFooter .battleLog{
+  max-height:330px;
+}
+.completeBattleFooter .battleRewards{
+  position:sticky;
+  top:10px;
+}
+.completeBattleScreen .battleArenaRow{
+  align-items:start;
+}
+.completeBattleScreen .stableBattleStage .battleShipAnchor,
+.completeBattleScreen .stableBattleStage .stableBattleLane{
+  height:390px;
+  min-height:390px!important;
+  max-height:390px;
+}
+@media(max-width:1100px){
+  .completeBattleFooter{grid-template-columns:1fr!important}
+  .completeBattleFooter .battleRewards{position:static}
+}
+
+
+/* Admin console actor/action tables. */
+.adminConsoleStack{
+  display:grid;
+  gap:14px;
+}
+.adminTableToolbar{
+  display:grid;
+  grid-template-columns:auto minmax(260px,1fr) minmax(160px,220px) auto;
+  gap:10px;
+  align-items:center;
+  margin-bottom:10px;
+}
+.adminTableToolbar input,
+.adminTableToolbar select{
+  min-height:38px;
+}
+.adminTableToolbar span{
+  color:#9db4c1;
+  font-size:12px;
+  justify-self:end;
+}
+.adminTableWrap{
+  overflow:auto;
+  border:1px solid rgba(69,243,255,.14);
+  border-radius:14px;
+  background:rgba(2,10,18,.62);
+}
+.adminDataTable{
+  min-width:1050px;
+  width:100%;
+  border-collapse:separate;
+  border-spacing:0;
+}
+.adminDataTable th{
+  position:sticky;
+  top:0;
+  z-index:1;
+  background:#061722;
+  color:#9ff7ff;
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  border-bottom:1px solid rgba(69,243,255,.18);
+}
+.adminDataTable td{
+  vertical-align:top;
+  border-bottom:1px solid rgba(255,255,255,.06);
+  color:#dffbff;
+}
+.adminDataTable td small,
+.adminDataTable td span + small,
+.adminDataTable td b + small{
+  display:block;
+  margin-top:3px;
+  color:#82a7b5;
+  font-size:11px;
+}
+.adminDataTable tr:hover td{
+  background:rgba(69,243,255,.045);
+}
+.adminTypePill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width:62px;
+  padding:4px 8px;
+  border-radius:999px;
+  border:1px solid rgba(69,243,255,.22);
+  background:rgba(69,243,255,.08);
+  color:#bffcff;
+  font-size:11px;
+  font-weight:850;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+}
+.adminTypePill.npc{
+  border-color:rgba(255,210,122,.28);
+  background:rgba(255,210,122,.09);
+  color:#ffe0a0;
+}
+.adminTypePill.player{
+  border-color:rgba(89,255,163,.28);
+  background:rgba(89,255,163,.08);
+  color:#d4ffe8;
+}
+.adminTypePill.action{
+  border-color:rgba(172,122,255,.28);
+  background:rgba(172,122,255,.10);
+  color:#dfd0ff;
+}
+.adminPager{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:8px;
+  margin:8px 0;
+}
+.adminPager span{
+  color:#9db4c1;
+  font-size:12px;
+}
+.adminPager button{
+  padding:7px 9px;
+  font-size:11px;
+}
+.adminPager button:disabled{
+  opacity:.42;
+  cursor:not-allowed;
+}
+.adminActorModal{
+  width:min(1180px,94vw);
+  max-height:88vh;
+  overflow:auto;
+  padding:22px;
+}
+.adminProfileGrid{
+  display:grid;
+  grid-template-columns:1.1fr 1fr;
+  gap:14px;
+}
+.adminProfileHero{
+  grid-column:1 / -1;
+  display:flex;
+  gap:14px;
+  align-items:center;
+  border:1px solid rgba(69,243,255,.18);
+  border-radius:16px;
+  background:rgba(2,10,18,.68);
+  padding:12px;
+}
+.adminProfileHero img,
+.adminProfileHero .gameImage{
+  width:190px;
+  height:112px;
+  object-fit:cover;
+  border-radius:14px;
+  border:1px solid rgba(69,243,255,.20);
+  background:#06131c;
+}
+.adminProfileHero b{
+  display:block;
+  color:#dffbff;
+  font-size:18px;
+}
+.adminProfileHero span,
+.adminProfileHero small{
+  display:block;
+  color:#9db4c1;
+  margin-top:4px;
+}
+.adminActorModal h3{
+  color:#9ff7ff;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  font-size:13px;
+  margin:0 0 8px;
+}
+@media(max-width:900px){
+  .adminTableToolbar{grid-template-columns:1fr}
+  .adminTableToolbar span{justify-self:start}
+  .adminProfileGrid{grid-template-columns:1fr}
+  .adminProfileHero{display:grid}
+  .adminProfileHero img,.adminProfileHero .gameImage{width:100%}
+}
+
+
+/* Phase 35 admin world progression controls. */
+.adminTabBar{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  margin-top:12px;
+  padding-top:12px;
+  border-top:1px solid rgba(255,255,255,.08);
+}
+.adminTabBar button{
+  border-radius:999px;
+  padding:8px 12px;
+  font-size:12px;
+}
+.adminTabBar button.active{
+  background:linear-gradient(180deg,#28d9df,#0d788b);
+  color:#001014;
+  border-color:#9dffff;
+}
+.adminTierWeight{
+  display:inline-flex;
+  margin:2px 4px 2px 0;
+  padding:4px 7px;
+  border-radius:999px;
+  border:1px solid rgba(69,243,255,.18);
+  background:rgba(69,243,255,.07);
+  color:#dffbff;
+  font-size:11px;
+  font-weight:800;
+}
+
+
+/* Galaxy-scoped player market + planet storage */
+.galaxyMarketFilters{
+  display:grid;
+  grid-template-columns:minmax(260px,1fr) minmax(180px,260px) minmax(160px,220px);
+  gap:10px;
+  align-items:center;
+}
+.marketScopeNotice{
+  margin-top:10px;
+  padding:9px 11px;
+  border:1px solid rgba(255,210,122,.24);
+  border-radius:12px;
+  background:rgba(255,210,122,.08);
+  color:#ffd88a;
+  font-size:12px;
+  line-height:1.35;
+}
+.remoteMarketRow td{
+  opacity:.68;
+}
+.remoteMarketRow td:last-child{
+  opacity:1;
+}
+.remoteMarketRow button:disabled{
+  opacity:.45;
+  cursor:not-allowed;
+}
+@media(max-width:900px){
+  .galaxyMarketFilters{
+    grid-template-columns:1fr;
+  }
+}
+
+
+/* Planet contracts and active mission map screen */
+.missionContractList{display:grid;gap:10px}
+.missionContractList.compact{max-height:520px;overflow:auto;padding-right:4px}
+.missionContractCard{
+  display:grid;
+  gap:8px;
+  padding:12px;
+  border:1px solid rgba(69,243,255,.14);
+  border-radius:14px;
+  background:linear-gradient(135deg,rgba(7,22,35,.82),rgba(12,7,24,.72));
+}
+.missionContractCard b{color:#dffbff}
+.missionContractCard span,.missionContractCard small{color:#9db4c1}
+.missionActiveMini{
+  display:grid;
+  gap:8px;
+  padding:12px;
+  border:1px solid rgba(127,255,206,.22);
+  border-radius:14px;
+  background:rgba(20,60,48,.22);
+}
+.missionScreen{
+  display:grid;
+  grid-template-columns:minmax(260px,360px) minmax(0,1fr);
+  gap:16px;
+  align-items:stretch;
+}
+.missionRadar{
+  position:relative;
+  min-height:300px;
+  border-radius:22px;
+  border:1px solid rgba(69,243,255,.20);
+  background:
+    radial-gradient(circle at center, rgba(69,243,255,.16), transparent 34%),
+    repeating-radial-gradient(circle at center, rgba(69,243,255,.12) 0 1px, transparent 1px 38px),
+    linear-gradient(135deg,rgba(3,14,24,.95),rgba(4,6,20,.95));
+  overflow:hidden;
+}
+.missionRadar:before,.missionRadar:after{
+  content:"";
+  position:absolute;
+  inset:12%;
+  border:1px solid rgba(69,243,255,.12);
+  border-radius:50%;
+}
+.missionRadar:after{inset:28%}
+.missionSweep{
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:48%;
+  height:2px;
+  transform-origin:left center;
+  background:linear-gradient(90deg,rgba(111,255,224,.8),transparent);
+  animation:missionSweep 4s linear infinite;
+}
+@keyframes missionSweep{to{transform:rotate(360deg)}}
+.missionCore{
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%);
+  text-align:center;
+  color:#9ff7ff;
+  font-size:12px;
+  letter-spacing:.12em;
+}
+.missionCore b{font-size:32px;color:#fff}
+.missionBlip{
+  position:absolute;
+  width:12px;
+  height:12px;
+  border-radius:50%;
+  background:#8dffd8;
+  box-shadow:0 0 18px #8dffd8;
+}
+.missionBlip.b0{left:22%;top:34%}.missionBlip.b1{left:69%;top:27%}.missionBlip.b2{left:57%;top:68%}.missionBlip.b3{left:32%;top:73%}.missionBlip.b4{left:76%;top:55%}.missionBlip.b5{left:43%;top:18%}
+.missionIntel{
+  display:grid;
+  gap:10px;
+  align-content:start;
+}
+.missionIntel h2{margin:0;color:#dffbff}
+.missionIntel p{margin:0;color:#9db4c1}
+.missionEventFeed{
+  display:grid;
+  gap:8px;
+  max-height:220px;
+  overflow:auto;
+  padding-right:4px;
+}
+.missionEventFeed div{
+  display:grid;
+  gap:2px;
+  padding:8px 10px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,.08);
+  background:rgba(255,255,255,.04);
+}
+.missionEventFeed b{color:#9ff7ff;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.missionEventFeed span{color:#d5edf4}
+@media(max-width:900px){
+  .missionScreen{grid-template-columns:1fr}
+}
+
+/* --- Planet mission revamp --- */
+.missionContractList{display:grid;gap:12px}
+.missionCooldownBanner{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:14px 16px;border-radius:16px;border:1px solid rgba(255,170,86,.32);
+  background:linear-gradient(135deg,rgba(82,42,10,.72),rgba(43,18,6,.78));
+  box-shadow:0 14px 30px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.06);
+}
+.missionCooldownBanner b{display:block;color:#fff2db;font-size:14px;letter-spacing:.06em;text-transform:uppercase}
+.missionCooldownBanner span{display:block;color:#f6c991;font-size:13px}
+.missionCooldownBanner small{padding:8px 12px;border-radius:999px;background:rgba(255,255,255,.08);color:#fff;font-weight:700}
+.missionContractCard{
+  display:grid;gap:10px;padding:14px;border-radius:18px;
+  border:1px solid rgba(83,230,255,.18);
+  background:linear-gradient(145deg,rgba(7,20,35,.88),rgba(12,10,26,.82));
+  box-shadow:0 16px 34px rgba(0,0,0,.22), inset 0 1px 0 rgba(255,255,255,.04);
+}
+.missionCardHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.missionCardHeader b{color:#eafcff;font-size:16px}
+.missionCardHeader span,.missionContractCard small{color:#9db4c1}
+.missionActiveMini{
+  display:grid;gap:10px;padding:14px;border-radius:18px;
+  border:1px solid rgba(127,255,206,.22);
+  background:linear-gradient(145deg,rgba(11,50,41,.48),rgba(8,18,30,.72));
+  box-shadow:0 16px 34px rgba(0,0,0,.22);
+}
+.missionActiveMiniTop{display:flex;justify-content:space-between;gap:10px;align-items:flex-start}
+.missionActiveMiniTop b{display:block;color:#fff}
+.missionActiveMiniTop span{display:block;color:#b8d8d8}
+.missionMiniBadges{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+.missionMiniBadges span,.missionHeaderBadges span{
+  padding:7px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.08);
+  background:rgba(255,255,255,.06);color:#dff8ff;font-size:12px;font-weight:700;
+}
+.missionScreen{display:grid;grid-template-columns:minmax(0,1fr)}
+.missionSceneCard{
+  display:grid;gap:14px;padding:16px;border-radius:22px;
+  border:1px solid rgba(83,230,255,.18);
+  background:linear-gradient(160deg,rgba(3,10,25,.96),rgba(8,10,28,.92));
+  box-shadow:0 26px 60px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.04);
+  overflow:hidden;
+}
+.missionSceneHeader{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.missionSceneHeader h2{margin:0;color:#f0fdff;font-size:26px}
+.missionSceneHeader p{margin:4px 0 0;color:#9ab9c8}
+.missionHeaderBadges{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;max-width:50%}
+.missionAdventureStage{
+  position:relative;min-height:330px;overflow:hidden;border-radius:24px;
+  border:1px solid rgba(255,255,255,.07);
+  background:linear-gradient(180deg,rgba(22,48,79,.96) 0%, rgba(17,32,61,.94) 44%, rgba(22,19,36,.98) 100%);
+}
+.missionAdventureStage:before,.missionAdventureStage:after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+}
+.missionAdventureStage:before{background:radial-gradient(circle at 80% 18%,rgba(255,255,255,.15),transparent 24%),radial-gradient(circle at 20% 22%,rgba(255,255,255,.07),transparent 18%),radial-gradient(circle at 10% 8%,rgba(255,255,255,.9) 0 1px,transparent 1.6px),radial-gradient(circle at 38% 14%,rgba(255,255,255,.72) 0 1px,transparent 1.6px),radial-gradient(circle at 72% 10%,rgba(255,255,255,.62) 0 1px,transparent 1.6px),radial-gradient(circle at 85% 28%,rgba(255,255,255,.8) 0 1px,transparent 1.6px)}
+.missionAdventureStage:after{background:linear-gradient(180deg,transparent,rgba(4,6,16,.10) 42%, rgba(9,6,19,.55) 75%, rgba(15,10,26,.92) 100%)}
+.missionSkyGlow{position:absolute;inset:-10% 30% auto -10%;height:78%;background:radial-gradient(circle,rgba(255,255,255,.18),transparent 56%);filter:blur(18px);opacity:.55}
+.missionBackdropPlanet{position:absolute;right:4%;top:6%;width:180px;height:180px;object-fit:contain;opacity:.28;filter:drop-shadow(0 0 30px rgba(255,255,255,.22))}
+.missionSceneParallax{position:absolute;left:-5%;right:-5%;border-radius:42% 58% 0 0/40% 40% 0 0;opacity:.9}
+.missionSceneParallax.p1{bottom:16%;height:34%;background:linear-gradient(180deg,rgba(255,255,255,.06),rgba(18,31,47,.72));transform:translateX(-3%) scale(1.05)}
+.missionSceneParallax.p2{bottom:10%;height:26%;background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(28,25,44,.84));transform:translateX(5%) scale(1.08)}
+.missionSceneParallax.p3{bottom:0;height:18%;background:linear-gradient(180deg,rgba(121,85,54,.48),rgba(53,36,25,.96))}
+.missionGroundLine{position:absolute;left:0;right:0;bottom:12%;height:4px;background:linear-gradient(90deg,rgba(255,255,255,.2),rgba(255,255,255,.05),rgba(255,255,255,.2));box-shadow:0 0 20px rgba(255,255,255,.08)}
+.missionRunnerWrap{position:absolute;left:5%;bottom:10%;display:grid;justify-items:center;gap:4px;z-index:4;animation:missionRunnerMove 1.15s ease-in-out infinite}
+.missionRunnerArt{width:80px;height:80px;object-fit:contain;filter:drop-shadow(0 14px 22px rgba(0,0,0,.35))}
+.missionRunnerLabel{padding:4px 10px;border-radius:999px;background:rgba(0,0,0,.34);border:1px solid rgba(255,255,255,.12);color:#fff;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+@keyframes missionRunnerMove{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+.missionEncounter{
+  position:absolute;z-index:5;display:grid;justify-items:center;gap:4px;
+  min-width:88px;padding:8px 8px 10px;border-radius:16px;
+  background:linear-gradient(160deg,rgba(11,18,30,.75),rgba(21,21,42,.84));
+  border:1px solid rgba(255,255,255,.12);backdrop-filter:blur(5px);
+  box-shadow:0 16px 26px rgba(0,0,0,.26);animation:missionEncounterEnter .45s ease both;
+}
+.missionEncounter img{width:52px;height:52px;object-fit:contain;filter:drop-shadow(0 10px 16px rgba(0,0,0,.30))}
+.missionEncounter small{max-width:90px;text-align:center;color:#f3fbff;font-size:10px;line-height:1.25}
+.missionEncounterPulse{position:absolute;inset:-8px;border-radius:20px;background:radial-gradient(circle,rgba(116,255,234,.28),transparent 65%);opacity:.75;animation:missionPulse 2s ease-in-out infinite}
+.missionEncounter.failure .missionEncounterPulse,.missionEncounter.crit_fail .missionEncounterPulse{background:radial-gradient(circle,rgba(255,110,110,.28),transparent 65%)}
+.missionEncounter.crit_success .missionEncounterPulse{background:radial-gradient(circle,rgba(255,222,104,.28),transparent 65%)}
+@keyframes missionEncounterEnter{from{opacity:0;transform:translateX(120px) translateY(10px) scale(.9)}to{opacity:1;transform:translateX(0) translateY(0) scale(1)}}
+@keyframes missionPulse{0%,100%{transform:scale(.92);opacity:.5}50%{transform:scale(1.04);opacity:.95}}
+.missionStageHud{position:absolute;left:16px;right:16px;top:14px;display:flex;justify-content:space-between;gap:10px;z-index:6}
+.missionStageHud span,.missionStageHud b{padding:8px 12px;border-radius:999px;background:rgba(0,0,0,.28);border:1px solid rgba(255,255,255,.10);backdrop-filter:blur(6px);color:#e9fbff;font-size:12px}
+.missionProgressShell{display:grid;gap:8px}
+.missionProgressMeta{display:flex;justify-content:space-between;gap:10px;color:#d9eff7;font-size:12px;letter-spacing:.06em;text-transform:uppercase}
+.missionBottomGrid{display:grid;gap:12px}
+.missionSummaryStrip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.missionSummaryCard{display:grid;gap:6px;padding:12px;border-radius:16px;border:1px solid rgba(255,255,255,.08);background:linear-gradient(160deg,rgba(255,255,255,.06),rgba(255,255,255,.03))}
+.missionSummaryCard b{color:#8edfff;font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.missionSummaryCard span{color:#f4fcff;font-size:14px;font-weight:700}
+.missionRewardItems{gap:8px}
+.missionFeedWrap{display:grid;gap:10px}
+.missionFeedHeader{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.missionFeedHeader b{color:#f1fdff}
+.missionFeedHeader span{color:#93acb9;font-size:12px}
+.missionEventFeed{display:grid;gap:8px;max-height:260px;overflow:auto;padding-right:6px}
+.missionFeedItem{display:grid;gap:6px;padding:12px;border-radius:14px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04)}
+.missionFeedItem.success,.missionFeedItem.crit_success{border-color:rgba(112,252,197,.22);background:linear-gradient(160deg,rgba(18,66,47,.26),rgba(255,255,255,.03))}
+.missionFeedItem.failure,.missionFeedItem.crit_fail{border-color:rgba(255,122,122,.22);background:linear-gradient(160deg,rgba(84,30,30,.24),rgba(255,255,255,.03))}
+.missionFeedItem.crit_success{border-color:rgba(255,214,102,.28);background:linear-gradient(160deg,rgba(89,66,16,.24),rgba(255,255,255,.03))}
+.missionFeedItemTop{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.missionFeedItemTop b{color:#dff9ff;font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.missionFeedItemTop span{color:#ffc6a1;font-size:12px;font-weight:700}
+.missionFeedItem > span{color:#d0e6ef;line-height:1.5}
+.missionAdventureStage.survey-v0{background:linear-gradient(180deg,#6ec7ff 0%,#4b88cf 32%,#223f6d 65%,#2d2135 100%)}
+.missionAdventureStage.survey-v1{background:linear-gradient(180deg,#ffd08b 0%,#dd9e64 30%,#6f586c 64%,#302436 100%)}
+.missionAdventureStage.survey-v2{background:linear-gradient(180deg,#97f4ff 0%,#71b7ee 30%,#4e6caa 60%,#2a2749 100%)}
+.missionAdventureStage.survey-v3{background:linear-gradient(180deg,#8ef2c8 0%,#4ebf9f 28%,#386a7b 60%,#232644 100%)}
+.missionAdventureStage.salvage-v0{background:linear-gradient(180deg,#c7d1ea 0%,#828fb7 26%,#4c516a 56%,#291c24 100%)}
+.missionAdventureStage.salvage-v1{background:linear-gradient(180deg,#ffbe7a 0%,#ce7f4d 28%,#6a4e58 62%,#251c24 100%)}
+.missionAdventureStage.salvage-v2{background:linear-gradient(180deg,#97c6d9 0%,#648fa1 26%,#434457 58%,#261d27 100%)}
+.missionAdventureStage.salvage-v3{background:linear-gradient(180deg,#d0d6ff 0%,#7c7fb4 26%,#40395f 58%,#211a28 100%)}
+.missionAdventureStage.hazard-v0{background:linear-gradient(180deg,#88d4ff 0%,#3d9ae6 24%,#2f4888 52%,#251a35 100%)}
+.missionAdventureStage.hazard-v1{background:linear-gradient(180deg,#b9ff9b 0%,#5ec46f 24%,#355e4c 55%,#241d2e 100%)}
+.missionAdventureStage.hazard-v2{background:linear-gradient(180deg,#ffb787 0%,#ff7b59 24%,#863347 55%,#291822 100%)}
+.missionAdventureStage.hazard-v3{background:linear-gradient(180deg,#d7f1ff 0%,#8bc0ff 26%,#5667b0 54%,#271b39 100%)}
+@media(max-width:900px){
+  .missionSceneHeader,.missionActiveMiniTop{grid-template-columns:1fr;display:grid}
+  .missionHeaderBadges{max-width:none;justify-content:flex-start}
+  .missionSummaryStrip{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .missionAdventureStage{min-height:300px}
+  .missionBackdropPlanet{width:140px;height:140px}
+}
+@media(max-width:640px){
+  .missionSummaryStrip{grid-template-columns:1fr}
+  .missionSceneHeader{display:grid}
+  .missionHeaderBadges{justify-content:flex-start}
+  .missionEncounter{min-width:74px;padding:6px}
+  .missionEncounter img{width:42px;height:42px}
+  .missionRunnerArt{width:64px;height:64px}
+}
+
+/* --- Player base research/building loop --- */
+.playerBaseNode{
+  border-color:rgba(126,255,206,.65)!important;
+  background:radial-gradient(circle at center,rgba(126,255,206,.26),rgba(3,14,22,.92) 65%)!important;
+  box-shadow:0 0 28px rgba(126,255,206,.28),0 0 70px rgba(126,255,206,.12)!important;
+}
+.playerBaseNode.ownBase{
+  border-color:rgba(255,222,108,.72)!important;
+  box-shadow:0 0 34px rgba(255,222,108,.36),0 0 90px rgba(126,255,206,.16)!important;
+}
+.playerBaseNode em{background:rgba(0,0,0,.62);color:#d9fff2;border-color:rgba(126,255,206,.4)}
+.baseStatusCard{display:grid;gap:10px;padding:14px;border-radius:16px;border:1px solid rgba(69,243,255,.16);background:linear-gradient(145deg,rgba(5,21,32,.82),rgba(7,12,25,.76))}
+.baseStatusCard b{color:#e8feff;font-size:18px}.baseStatusCard span{color:#a8bfca;line-height:1.45}.baseStatusCard button{justify-self:start}
+.baseTechGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-top:12px}
+.baseTechCard{display:grid;gap:10px;padding:14px;border-radius:18px;border:1px solid rgba(83,230,255,.14);background:linear-gradient(145deg,rgba(7,20,35,.86),rgba(12,10,26,.82));box-shadow:0 16px 34px rgba(0,0,0,.20),inset 0 1px 0 rgba(255,255,255,.04)}
+.baseTechCard b{color:#f2feff}.baseTechCard span,.baseTechCard p,.baseTechCard small{color:#9db4c1}.baseTechCard p{margin:0;line-height:1.45}.baseTechCard.complete{border-color:rgba(126,255,206,.28);background:linear-gradient(145deg,rgba(8,42,34,.72),rgba(8,16,28,.78))}.baseTechCard.researching,.baseTechCard.building{border-color:rgba(255,214,102,.34);background:linear-gradient(145deg,rgba(54,41,12,.70),rgba(8,16,28,.78))}.baseTechCard.locked{opacity:.72;filter:saturate(.7)}
+.baseTechCard button{justify-self:start}.baseTechCard .progress{height:8px}
+
+/* Ecosystem balance admin */
+.ecosystemHero div{
+  min-height:82px;
+}
+.economyTuningLayout .adminJsonEditor textarea{
+  min-height:520px;
+}
+.economyTuningLayout .adminConfigList button b{
+  overflow-wrap:anywhere;
+}
+
+/* Map interaction fixes: uninhabitable planets + mission launch buttons */
+.mapNode.uninhabitableNode{
+  border:2px solid rgba(172,184,196,.92)!important;
+  box-shadow:0 0 0 5px rgba(172,184,196,.16),0 0 24px rgba(196,208,220,.22)!important;
+  background:linear-gradient(180deg,rgba(50,57,64,.92),rgba(10,15,22,.96))!important;
+}
+.mapNode.uninhabitableNode img{
+  filter:grayscale(.65) contrast(1.08) drop-shadow(0 0 12px rgba(210,220,230,.32));
+}
+.mapNode.uninhabitableNode b:after{
+  content:"  UNINHABITABLE";
+  display:inline-block;
+  margin-left:6px;
+  padding:2px 6px;
+  border-radius:999px;
+  border:1px solid rgba(200,210,220,.45);
+  color:#d6dee8;
+  background:rgba(190,200,210,.12);
+  font-size:9px;
+  letter-spacing:.08em;
+  vertical-align:middle;
+}
+.missionContextGroup{
+  display:grid;
+  gap:6px;
+  padding:8px;
+  border:1px solid rgba(180,190,205,.25);
+  border-radius:12px;
+  background:rgba(12,17,24,.74);
+}
+.missionContextGroup b{
+  color:#dce6ef;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.missionContextGroup button{
+  justify-content:flex-start;
+}
+
+
+/* Mission reward roll correction */
+.successBtn{
+  width:100%;
+  padding:12px 16px;
+  border-radius:14px;
+  border:1px solid rgba(84,255,185,.58);
+  background:linear-gradient(135deg,rgba(18,122,75,.88),rgba(6,69,55,.92));
+  color:#eafff7;
+  font-weight:900;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  box-shadow:0 0 22px rgba(75,255,188,.18), inset 0 1px 0 rgba(255,255,255,.08);
+}
+.successBtn:hover{filter:brightness(1.08)}
+.missionScreen.missionDone .missionSceneCard{
+  border-color:rgba(84,255,185,.38);
+  box-shadow:0 0 30px rgba(75,255,188,.12), inset 0 1px 0 rgba(255,255,255,.04);
+}
+.missionEventRewards{
+  margin-top:4px;
+}
+.missionEventRewards span{
+  border-color:rgba(108,255,216,.28);
+  background:rgba(36,255,184,.08);
+}
+.missionFeedItem.general{
+  border-color:rgba(180,196,210,.12);
+}
+
+.mapToolbarMissionCooldown{
+  margin-left:auto;
+  display:grid;
+  gap:2px;
+  min-width:190px;
+  border-radius:12px;
+  padding:8px 12px !important;
+  box-shadow:0 0 16px rgba(0,0,0,.18);
+}
+.mapToolbarMissionCooldown b{
+  color:#e8fbff;
+  font-size:12px;
+  line-height:1.1;
+}
+.mapToolbarMissionCooldown small{
+  color:#b8d3dd;
+  font-size:11px;
+  line-height:1.2;
+}
+.mapToolbarMissionCooldown.active{
+  border:1px solid #6e8f1d !important;
+  background:linear-gradient(180deg,#2a3410,#1a220d) !important;
+}
+.mapToolbarMissionCooldown.ready{
+  border:1px solid #175c49 !important;
+  background:linear-gradient(180deg,#0c2b22,#071b16) !important;
+}
+@media(max-width:1100px){
+  .mapToolbarMissionCooldown{
+    margin-left:0;
+    width:100%;
+  }
+}
+
+
+/* Map real-estate enforcement */
+.content.wideMapContent{
+  max-width:none!important;
+  width:100%!important;
+  padding-left:18px;
+  padding-right:18px;
+}
+.content.wideMapContent .pageHead{
+  display:none;
+}
+.content.wideMapContent .panel{
+  width:100%!important;
+  max-width:none!important;
+}
+.content.wideMapContent .mapShell{
+  width:100%!important;
+  max-width:none!important;
+}
+.content.wideMapContent .mapViewport{
+  width:100%!important;
+  max-width:none!important;
+  height:calc(100vh - 250px);
+  min-height:620px;
+}
+.enhancedMapToolbar{
+  display:flex!important;
+  flex-direction:row!important;
+  align-items:center!important;
+  flex-wrap:wrap!important;
+  width:100%;
+}
+.enhancedMapToolbar>button,
+.enhancedMapToolbar>span{
+  flex:0 0 auto;
+}
+.enhancedMapToolbar .mapToolbarMissionCooldown{
+  margin-left:auto!important;
+}
+@media(min-width:1500px){
+  .enhancedMapToolbar{
+    flex-wrap:nowrap!important;
+  }
+  .enhancedMapToolbar>span:not(.mapToolbarMissionCooldown){
+    white-space:nowrap;
+  }
+}
+
+
+/* Single-row map toolbar layout */
+.singleRowMapToolbar{
+  display:flex!important;
+  align-items:center!important;
+  justify-content:space-between!important;
+  gap:10px!important;
+  width:100%!important;
+  flex-wrap:wrap!important;
+}
+.mapToolbarLeft,
+.mapToolbarRight{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+  min-width:0;
+}
+.mapToolbarLeft{
+  flex:1 1 900px;
+}
+.mapToolbarRight{
+  flex:0 1 auto;
+  margin-left:auto;
+  justify-content:flex-end;
+}
+.inlineMapLayerToggles{
+  display:flex!important;
+  align-items:center!important;
+  gap:6px!important;
+  flex-wrap:wrap!important;
+  margin:0!important;
+}
+.inlineMapLayerToggles .chip{
+  margin:0!important;
+}
+.singleRowMapToolbar .mapToolbarMissionCooldown{
+  margin-left:0!important;
+  flex:0 0 auto;
+}
+.mapInsightStrip{
+  display:none!important;
+}
+@media (min-width: 1600px){
+  .singleRowMapToolbar{
+    flex-wrap:nowrap!important;
+  }
+  .mapToolbarLeft,
+  .mapToolbarRight,
+  .inlineMapLayerToggles{
+    flex-wrap:nowrap!important;
+  }
+}
+
+/* --- NPC spawn tuning, faction-color map pass, and mission flyby stage --- */
+.adminSplitEditors{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.adminJsonEditor.compactEditor{border:1px solid #123849;background:#06141e;padding:12px;border-radius:12px;display:grid;gap:8px}
+.adminJsonEditor.compactEditor b{color:#dffbff}
+.adminJsonEditor.compactEditor span{color:var(--muted);font-size:12px;line-height:1.35}
+.adminJsonEditor.compactEditor textarea{min-height:170px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.openWorldMap .mapNode{border-color:var(--faction-color,#1d637a)!important;box-shadow:0 0 18px color-mix(in srgb,var(--faction-color,#35f2ff) 35%,transparent)}
+.openWorldMap .mapNode img{border-color:var(--faction-color,#176277)!important;box-shadow:0 0 16px color-mix(in srgb,var(--faction-color,#35f2ff) 32%,transparent)}
+.openWorldMap .mapNode.current{box-shadow:0 0 26px color-mix(in srgb,var(--faction-color,#ffc247) 58%,transparent),0 0 0 2px color-mix(in srgb,var(--faction-color,#ffc247) 38%,transparent)}
+.shipMarker.selfShip .selfShipImg,.trafficShip.player img,.trafficShip[data-self="true"] img{border:2px solid var(--ship-faction-color,#ffc247)!important;box-shadow:0 0 18px color-mix(in srgb,var(--ship-faction-color,#ffc247) 62%,transparent)!important}
+.shipMarker.selfShip span{border-color:var(--ship-faction-color,#ffc247)!important;color:var(--ship-faction-color,#ffc247)!important}
+.trafficShip.player{border-color:var(--ship-faction-color,#ffc247)!important;box-shadow:0 0 20px color-mix(in srgb,var(--ship-faction-color,#ffc247) 45%,transparent)!important}
+.trafficShip.patrol{border-color:#4da3ff!important;box-shadow:0 0 0 4px rgba(77,163,255,.22),0 0 24px rgba(77,163,255,.48)!important}
+.trafficShip.patrol:after{content:'';position:absolute;inset:-8px;border:2px solid rgba(77,163,255,.72);border-radius:999px;pointer-events:none;animation:patrolBlueRing 1.8s ease-in-out infinite}
+@keyframes patrolBlueRing{50%{transform:scale(1.13);opacity:.45}}
+.missionAdventureStage{overflow:hidden;isolation:isolate}
+.missionFlyby{position:absolute;left:112%;bottom:var(--fly-bottom);z-index:3;display:grid;place-items:center;gap:3px;pointer-events:none;transform:translateY(var(--fly-drift,0)) scale(var(--fly-scale,1));animation:missionFlybyMove var(--fly-duration,18s) linear infinite;animation-delay:var(--fly-delay,0s);filter:drop-shadow(0 0 12px rgba(0,0,0,.58))}
+.missionFlyby i{display:block;width:44px;height:32px;border:1px solid rgba(255,255,255,.22);background:linear-gradient(135deg,rgba(120,180,210,.72),rgba(18,38,50,.86));box-shadow:inset 0 0 18px rgba(255,255,255,.08),0 0 16px rgba(90,220,255,.16)}
+.missionFlyby small{font-size:9px;letter-spacing:.04em;text-transform:uppercase;color:#dffbff;background:rgba(2,8,16,.62);border:1px solid rgba(130,210,240,.24);border-radius:999px;padding:2px 5px;white-space:nowrap;opacity:.74}
+.missionLandscapeFlyby{z-index:2;opacity:.72}
+.missionLandscapeFlyby i{border-radius:42% 58% 50% 44%;background:linear-gradient(135deg,rgba(122,113,102,.95),rgba(31,37,43,.92));border-color:rgba(255,255,255,.14)}
+.landscapeType1 i{border-radius:60% 35% 55% 42%;background:linear-gradient(140deg,rgba(167,122,72,.94),rgba(54,39,31,.94))}
+.landscapeType2 i{clip-path:polygon(50% 0,100% 36%,82% 100%,20% 88%,0 38%);background:linear-gradient(135deg,rgba(155,210,218,.8),rgba(38,63,75,.96))}
+.landscapeType3 i{clip-path:polygon(6% 50%,28% 6%,76% 0,100% 44%,72% 100%,22% 86%)}
+.landscapeType4 i{border-radius:28% 70% 32% 68%;background:linear-gradient(135deg,rgba(210,203,177,.78),rgba(77,68,54,.94))}
+.landscapeType5 i{width:58px;height:20px;border-radius:999px;background:linear-gradient(90deg,rgba(90,84,78,.8),rgba(30,33,38,.94))}
+.landscapeType6 i{clip-path:polygon(0 70%,20% 18%,54% 0,100% 30%,74% 100%)}
+.landscapeType7 i{width:30px;height:48px;border-radius:40% 44% 36% 50%}
+.landscapeType8 i{background:linear-gradient(135deg,rgba(102,82,145,.75),rgba(25,25,45,.95))}
+.landscapeType9 i{clip-path:polygon(50% 0,64% 38%,100% 44%,70% 64%,82% 100%,50% 75%,18% 100%,30% 64%,0 44%,36% 38%)}
+.missionAlienFlyby{z-index:5;opacity:.95;animation-name:missionAlienMove}
+.missionAlienFlyby i{width:38px;height:28px;border-radius:54% 46% 48% 52%;background:radial-gradient(circle at 68% 35%,#f4fbff 0 8%,transparent 9%),linear-gradient(135deg,rgba(112,255,190,.88),rgba(29,71,89,.92));border-color:rgba(127,255,212,.45);box-shadow:0 0 22px rgba(127,255,212,.34)}
+.missionAlienFlyby:after{content:'';position:absolute;width:26px;height:2px;background:rgba(190,255,240,.45);bottom:20px;left:8px;box-shadow:15px -6px 0 rgba(190,255,240,.22),-11px 5px 0 rgba(190,255,240,.18)}
+.alienType1 i{border-radius:999px 50% 999px 50%;background:linear-gradient(135deg,rgba(255,184,77,.9),rgba(70,45,18,.94))}
+.alienType2 i{clip-path:polygon(50% 0,100% 45%,72% 100%,25% 84%,0 32%);background:linear-gradient(135deg,rgba(183,146,255,.9),rgba(38,24,70,.95))}
+.alienType3 i{width:26px;height:44px;border-radius:999px;background:linear-gradient(180deg,rgba(83,220,255,.88),rgba(21,56,92,.94))}
+.alienType4 i{clip-path:polygon(0 45%,25% 0,76% 10%,100% 54%,72% 100%,20% 86%)}
+.alienType5 i{background:linear-gradient(135deg,rgba(255,111,145,.88),rgba(71,20,40,.95))}
+.alienType6 i{width:52px;height:18px;border-radius:999px;background:linear-gradient(90deg,rgba(214,255,111,.86),rgba(55,81,26,.95))}
+.alienType7 i{clip-path:polygon(50% 0,100% 100%,0 100%);background:linear-gradient(135deg,rgba(174,236,255,.86),rgba(37,68,84,.95))}
+.alienType8 i{border-radius:40% 65% 35% 70%;background:linear-gradient(135deg,rgba(204,148,255,.9),rgba(47,24,68,.95))}
+.alienType9 i{width:34px;height:34px;border-radius:999px;background:radial-gradient(circle at 50% 50%,rgba(255,255,255,.95) 0 10%,rgba(255,202,90,.9) 12% 40%,rgba(80,48,17,.95) 42%)}
+.missionEventFlyby{z-index:6;opacity:.96;animation-name:missionEventMove}
+.missionEventFlyby i{width:26px;height:26px;border-radius:8px;transform:rotate(45deg);background:linear-gradient(135deg,rgba(255,221,124,.92),rgba(255,138,65,.82));box-shadow:0 0 20px rgba(255,190,90,.42)}
+.missionEventFlyby.hazard i,.missionEventFlyby.failure i{background:linear-gradient(135deg,rgba(255,77,109,.95),rgba(74,14,24,.92));box-shadow:0 0 20px rgba(255,77,109,.48)}
+.missionEventFlyby.loot i,.missionEventFlyby.reward i,.missionEventFlyby.success i{background:linear-gradient(135deg,rgba(77,255,145,.92),rgba(18,82,52,.92));box-shadow:0 0 20px rgba(77,255,145,.45)}
+@keyframes missionFlybyMove{from{left:112%;transform:translateY(var(--fly-drift,0)) scale(var(--fly-scale,1)) rotate(0deg)}to{left:-18%;transform:translateY(calc(var(--fly-drift,0) * -1)) scale(var(--fly-scale,1)) rotate(-16deg)}}
+@keyframes missionAlienMove{0%{left:112%;transform:translateY(0) scale(var(--fly-scale,1))}52%{transform:translateY(-26px) scale(var(--fly-scale,1))}58%{transform:translateY(12px) scale(calc(var(--fly-scale,1) * .96))}100%{left:-18%;transform:translateY(-8px) scale(var(--fly-scale,1))}}
+@keyframes missionEventMove{0%{left:110%;transform:scale(var(--fly-scale,1)) rotate(45deg)}100%{left:-16%;transform:scale(var(--fly-scale,1)) rotate(405deg)}}
+
+/* --- Pirate station docking, party HUD, shared radar, and remote galaxy view --- */
+.partyInviteToast{
+  position:fixed;right:24px;bottom:24px;z-index:1200;background:#071722;border:1px solid #45d8ff;color:#e8fbff;border-radius:14px;padding:14px 18px;font-weight:900;box-shadow:0 0 28px rgba(69,216,255,.35);cursor:pointer
+}
+.partyMemberList,.inviteList,.partySearchResults{display:grid;gap:10px}
+.partyMemberCard,.partySearchRow,.inviteRow{display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #17384a;background:#06131c;border-radius:12px}
+.partyMemberCard.leader{border-color:#ffc247;box-shadow:0 0 16px rgba(255,194,71,.16)}
+.partyMemberMain{flex:1;display:grid;gap:4px;min-width:0}.partyMemberMain span,.partySearchRow span{color:var(--muted);font-size:12px}.partyMemberActions{display:flex;gap:6px;flex-wrap:wrap}.miniBars{display:grid;gap:3px}.miniBars i{height:5px;background:#061018;border:1px solid #183345;border-radius:99px;overflow:hidden}.miniBars b{display:block;height:100%;background:linear-gradient(90deg,#45d8ff,#4dff91)}
+.galaxyCardButtons{display:flex;gap:8px;flex-wrap:wrap}
+.partyMapHud{position:absolute;z-index:60;left:10px;top:10px;display:grid;gap:6px;width:190px;pointer-events:auto}.partyHudCard{display:flex;align-items:center;gap:7px;width:100%;padding:6px 8px;background:rgba(2,9,15,.82);border:1px solid rgba(69,216,255,.38);border-radius:11px;box-shadow:0 0 14px rgba(69,216,255,.12);cursor:pointer}.partyHudCard.leader{border-color:rgba(255,194,71,.75)}.partyHudCard span{display:grid;gap:2px;flex:1;min-width:0}.partyHudCard b{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.partyHudCard i{height:4px;background:#031018;border:1px solid #173244;border-radius:99px;overflow:hidden}.partyHudCard em{display:block;height:100%;background:linear-gradient(90deg,#45d8ff,#4dff91)}
+.partyRadarRing{position:absolute;translate:-50% -50%;width:22%;height:22%;border:1px dashed rgba(255,194,71,.58);border-radius:999px;background:radial-gradient(circle,rgba(255,194,71,.07),transparent 62%);pointer-events:none;animation:partyRadarPulse 2.5s ease-in-out infinite}.trafficShip.partyMember{border-color:#ffc247!important;box-shadow:0 0 0 4px rgba(255,194,71,.18),0 0 24px rgba(255,194,71,.4)!important}.trafficShip.partyMember:after{content:'';position:absolute;inset:-10px;border:2px dashed rgba(255,194,71,.75);border-radius:999px;pointer-events:none}@keyframes partyRadarPulse{50%{opacity:.46;transform:scale(1.05)}}
+.pirateArena{min-height:520px;aspect-ratio:16/9;width:100%;position:relative;overflow:hidden;border-radius:18px;border:1px solid rgba(255,77,109,.32);background:radial-gradient(circle at 50% 50%,rgba(150,20,38,.22),transparent 38%),linear-gradient(135deg,#05080d,#10040a)}.pirateArena .escapeBand{position:absolute;background:repeating-linear-gradient(45deg,rgba(255,194,71,.18) 0 10px,rgba(255,77,109,.08) 10px 20px);border:1px solid rgba(255,194,71,.24);z-index:2;pointer-events:none}.pirateArena .escapeBand.top{left:0;top:0;width:100%;height:var(--escape-edge,10%)}.pirateArena .escapeBand.bottom{left:0;bottom:0;width:100%;height:var(--escape-edge,10%)}.pirateArena .escapeBand.left{left:0;top:0;width:var(--escape-edge,10%);height:100%}.pirateArena .escapeBand.right{right:0;top:0;width:var(--escape-edge,10%);height:100%}.escapeSlashLayer{position:absolute;inset:0;z-index:3;pointer-events:none}.escapeSlashLayer span{position:absolute;color:rgba(255,221,124,.52);font-size:10px;font-weight:900;letter-spacing:.16em;text-transform:uppercase;transform:rotate(-45deg)}.escapeSlashLayer span:nth-child(4n+1){top:4%;left:calc(var(--i) * 3.4%)}.escapeSlashLayer span:nth-child(4n+2){bottom:4%;left:calc(var(--i) * 3.4%)}.escapeSlashLayer span:nth-child(4n+3){left:2%;top:calc(var(--i) * 3.4%)}.escapeSlashLayer span:nth-child(4n){right:2%;top:calc(var(--i) * 3.4%)}
+
+/* Social / trade systems */
+.toastStack{position:fixed;right:22px;top:78px;z-index:2000;display:grid;gap:10px;width:min(360px,calc(100vw - 44px));pointer-events:none}.gameToast{pointer-events:auto;text-align:left;border:1px solid rgba(69,216,255,.45);background:linear-gradient(135deg,rgba(4,18,28,.97),rgba(20,12,30,.97));box-shadow:0 14px 42px rgba(0,0,0,.45),0 0 24px rgba(69,216,255,.14);border-radius:14px;padding:12px 14px;color:var(--text);display:grid;gap:5px;animation:toastIn .18s ease-out}.gameToast b{font-size:13px;line-height:1.3}.gameToast span{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:var(--accent)}.gameToast.trade{border-color:rgba(255,159,61,.55)}.gameToast.social{border-color:rgba(120,190,255,.55)}@keyframes toastIn{from{opacity:0;transform:translateX(16px)}to{opacity:1;transform:none}}
+.socialList{display:grid;gap:10px;max-height:520px;overflow:auto}.socialPersonRow{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.035);border-radius:13px;padding:10px}.socialPersonRow.online{box-shadow:inset 3px 0 0 rgba(69,255,185,.75)}.socialPersonRow.offline{opacity:.82}.socialPersonMain{display:grid;gap:3px}.socialPersonMain b{font-size:14px}.socialPersonMain span{font-size:12px;color:var(--muted)}.socialPersonActions{display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}.socialPersonActions button{padding:7px 9px}.pilotActionButtons{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 6px}.pilotActionButtons button{padding:8px 11px}.tradeModalBackdrop{z-index:2100}.tradeModal{width:min(1180px,94vw);max-height:92vh;overflow:auto;border:1px solid rgba(69,216,255,.35);border-radius:20px;background:linear-gradient(160deg,rgba(3,13,22,.98),rgba(20,9,24,.98));box-shadow:0 24px 90px rgba(0,0,0,.7);padding:20px;position:relative}.tradeModal h2{margin:0 0 12px;letter-spacing:.08em;text-transform:uppercase}.tradePendingBox{border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.04);border-radius:14px;padding:16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.tradeBoard{display:grid;grid-template-columns:1fr 1fr;gap:14px}.tradeSide{border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:14px;background:rgba(255,255,255,.035);min-height:250px}.tradeSide.mine{border-color:rgba(69,216,255,.35)}.tradeSide.theirs{border-color:rgba(255,159,61,.32)}.tradeSide.locked{box-shadow:inset 0 0 0 1px rgba(69,255,185,.35)}.tradeSideHeader{display:flex;gap:10px;align-items:center;margin-bottom:10px}.tradeSideHeader div{display:grid}.tradeSideHeader span,.tradeStatusRow span,.tradeGoldBox span{font-size:12px;color:var(--muted)}.tradeGoldBox{display:flex;gap:8px;align-items:center;border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.18);border-radius:12px;padding:9px;margin-bottom:12px}.tradeItemGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}.tradeItemCard,.tradeInventoryItem{border:1px solid rgba(255,255,255,.1);background:rgba(0,0,0,.18);border-radius:12px;padding:9px;display:grid;gap:6px}.tradeItemCard b,.tradeInventoryItem b{font-size:12px}.tradeItemCard span,.tradeInventoryItem span{font-size:11px;color:var(--muted)}.tradeItemCard details{font-size:11px}.tradeStatusRow{display:flex;gap:8px;margin-top:10px}.tradeStatusRow span{border:1px solid rgba(255,255,255,.1);border-radius:999px;padding:4px 8px}.tradeControls{display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-top:14px}.tradeGoldInput{display:flex;gap:8px;margin-bottom:12px}.tradeGoldInput input{max-width:180px}.tradeInventoryGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;max-height:300px;overflow:auto}.tradeInventoryItem input{width:100%;padding:7px;border-radius:8px}.tradeFinalizeButtons{display:grid;gap:8px}.actionableEvent{display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center}.actionableEvent span{min-width:0}@media(max-width:900px){.tradeBoard,.tradeControls{grid-template-columns:1fr}.socialPersonRow{grid-template-columns:auto 1fr}.socialPersonActions{grid-column:1/-1;justify-content:flex-start}.actionableEvent{grid-template-columns:1fr}.toastStack{left:14px;right:14px;width:auto}.tradeModal{width:96vw}}
+
+.insuranceMini {
+  color: var(--muted);
+  border-top: 1px solid rgba(255,255,255,.08);
+  padding-top: 6px;
+  margin-top: 4px;
+}
+.insuranceBox {
+  border: 1px solid rgba(116, 241, 255, .22);
+  background: linear-gradient(135deg, rgba(23, 54, 71, .42), rgba(10, 17, 28, .70));
+  border-radius: 16px;
+  padding: 12px;
+  margin: 12px 0;
+  box-shadow: inset 0 0 24px rgba(53, 213, 255, .04);
+}
+.insuranceHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  margin-bottom: 10px;
+}
+.insuranceHeader b,
+.insuranceOptions b {
+  display: block;
+  color: var(--text);
+  letter-spacing: .04em;
+}
+.insuranceHeader span,
+.insuranceOptions span,
+.insuranceBox small,
+.insuranceNote {
+  color: var(--muted);
+}
+.insuranceValue {
+  text-align: right;
+  min-width: 190px;
+}
+.insuranceValue b {
+  font-size: 1.1rem;
+}
+.insuranceValue small {
+  display: block;
+  max-width: 260px;
+}
+.insuranceOptions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.insuranceOptions button {
+  text-align: left;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(116, 241, 255, .22);
+  background: rgba(3, 12, 20, .68);
+}
+.insuranceOptions button.active {
+  border-color: rgba(91, 255, 220, .70);
+  background: rgba(40, 122, 104, .22);
+}
+.insuranceOptions button:disabled:not(.active) {
+  opacity: .55;
+}
+.insuranceOptions small {
+  display: block;
+  margin-top: 4px;
+}
+.insuranceNote {
+  margin: 10px 0 0;
+  font-size: .82rem;
+}
+@media (max-width: 760px) {
+  .insuranceHeader { grid-template-columns: 1fr; }
+  .insuranceValue { text-align: left; min-width: 0; }
+}
+
+
+/* Phase expansion: server events, fuel economy, scans, artifacts, and war supply. */
+.phaseHeroGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:14px;
+  align-items:stretch;
+}
+.eventGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:12px;
+}
+.serverEventRow,.serverEventCard{
+  display:grid;
+  gap:5px;
+  border:1px solid #164e63;
+  background:linear-gradient(180deg,rgba(7,27,41,.92),rgba(3,16,25,.95));
+  padding:12px;
+  border-radius:14px;
+}
+.serverEventRow.active,.serverEventCard.alien_raid{
+  border-color:#8a5b12;
+  box-shadow:0 0 18px rgba(255,194,71,.14);
+}
+.serverEventRow.warning,.serverEventCard.wormhole_control{
+  border-color:#6e3ca0;
+  box-shadow:0 0 18px rgba(166,92,255,.15);
+}
+.serverEventRow b,.serverEventCard b{
+  color:#dffbff;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+}
+.serverEventRow span,.serverEventCard span,.serverEventCard small{
+  color:var(--muted);
+}
+.serverEventCard p{
+  margin:4px 0 0;
+  color:#b9e9f3;
+  line-height:1.35;
+}
+.blipGrid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  gap:10px;
+  margin-top:12px;
+}
+.blipCard{
+  border:1px dashed #1d637a;
+  background:rgba(6,20,30,.74);
+  border-radius:14px;
+  padding:10px;
+  display:grid;
+  gap:3px;
+}
+.blipCard b{color:#9dfcff}.blipCard span,.blipCard small{color:var(--muted)}
+.blipCard.ship{border-color:#ffae35}.blipCard.mining{border-color:#4dff91}.blipCard.artifact{border-color:#a65cff}.blipCard.derelict{border-color:#8edbff}.blipCard.salvage{border-color:#ffc247}
+.stat.warningStat{border-color:#8a5b12;color:#ffc247;background:rgba(255,174,53,.08);padding:8px 12px;border-radius:12px}
+.stat.dangerStat{border-color:#8a2c38;color:#ff9aa3;background:rgba(255,77,87,.10);padding:8px 12px;border-radius:12px}
+.stat.warningStat svg{color:#ffc247}.stat.dangerStat svg{color:#ff6b75}
+.stat small{display:block;font-size:11px;color:inherit;max-width:210px;line-height:1.25}
+.warningLine.danger{border-color:#8a2c38;background:#2a0910;color:#ffb5bc}
+.compactFeed{display:grid;gap:8px}.compactFeed>div{display:grid;gap:2px;border:1px solid #123849;background:#06141e;padding:9px;border-radius:10px}.compactFeed b{color:#dffbff}.compactFeed span{color:var(--muted)}
+.dangerBtn{border-color:#8a2c38!important;background:#2a0910!important;color:#ffb5bc!important}
+@media(max-width:760px){.phaseHeroGrid,.eventGrid,.blipGrid{grid-template-columns:1fr}.serverEventRow,.serverEventCard{border-radius:10px}}
+
+
+.phaseBonusBar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.phaseBonusBar span {
+  border: 1px solid rgba(110, 231, 255, 0.28);
+  background: rgba(47, 197, 255, 0.10);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.phaseHeroGrid .warningLine.danger,
+.warningLine.danger {
+  border-color: rgba(255, 85, 85, .45);
+  background: rgba(255, 85, 85, .12);
+  color: #ffd0d0;
+}
+
+/* NPC/player multi-combat support bands. */
+.battleSupportBands{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:18px;
+  margin-top:10px;
+}
+.battleSupportBand{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-height:38px;
+  padding:8px 10px;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,.10);
+  background:rgba(0,0,0,.20);
+  overflow:hidden;
+}
+.battleSupportBand b{
+  flex:0 0 auto;
+  font-size:11px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  color:#dffbff;
+}
+.battleSupportBand span,
+.battleSupportBand em{
+  flex:0 1 auto;
+  max-width:180px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  border-radius:999px;
+  padding:5px 8px;
+  font-size:11px;
+  font-style:normal;
+  color:#c8d8e4;
+  background:rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.08);
+}
+.battleSupportBand.player{border-color:rgba(69,243,255,.18)}
+.battleSupportBand.enemy{border-color:rgba(255,91,91,.20)}
+@media(max-width:1100px){.battleSupportBands{grid-template-columns:1fr}}

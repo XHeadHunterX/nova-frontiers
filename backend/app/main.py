@@ -2,23 +2,28 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import random
 import re
+import secrets
 import shutil
 import sqlite3
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+import urllib.request
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 APP_DIR = Path(__file__).resolve().parent
@@ -71,7 +76,7 @@ CORS_ORIGINS = [
     for origin in os.getenv("NOVA_CORS_ORIGINS", ",".join(DEFAULT_CORS_ORIGINS)).split(",")
     if origin.strip()
 ]
-CORS_ORIGIN_REGEX = os.getenv("NOVA_CORS_ORIGIN_REGEX", r"https://.*\.pages\.dev")
+CORS_ORIGIN_REGEX = os.getenv("NOVA_CORS_ORIGIN_REGEX", "").strip() or None
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,6 +86,69 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+PERF_ACTIVE_SYSTEM_NPC_LIMIT = int(os.getenv("NOVA_ACTIVE_SYSTEM_NPC_LIMIT", "18"))
+PERF_GALAXY_MAP_TRAFFIC = os.getenv("NOVA_GALAXY_MAP_TRAFFIC", "0").strip().lower() in {"1", "true", "yes", "y"}
+PERF_RETURN_STATE_ON_ACTION = os.getenv("NOVA_RETURN_STATE_ON_ACTION", "0").strip().lower() in {"1", "true", "yes", "y"}
+PERF_NPC_LOGS_ENABLED = os.getenv("NOVA_NPC_LOGS_ENABLED", "0").strip().lower() in {"1", "true", "yes", "y"}
+
+API_MAX_BODY_BYTES = int(os.getenv("NOVA_API_MAX_BODY_BYTES", "131072"))
+RATE_LIMITS_ENABLED = os.getenv("NOVA_RATE_LIMITS", "1").strip().lower() in {"1", "true", "yes", "y"}
+RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], List[float]] = {}
+RATE_LIMIT_LOCK = threading.Lock()
+
+
+def rate_limit_rule(method: str, path: str) -> Tuple[int, int]:
+    if path in {"/api/auth/login", "/api/auth/google"}:
+        return 10, 60
+    if path == "/api/auth/register":
+        return 5, 3600
+    if path == "/api/action":
+        return 120, 60
+    if method == "POST" and path in {"/api/chat/messages", "/api/messages/send"}:
+        return 30, 60
+    if method == "POST" and (path.startswith("/api/guild/") or path.startswith("/api/admin/")):
+        return 60, 60
+    if path.startswith("/api/"):
+        return 360, 60
+    return 1000, 60
+
+
+def rate_limit_identity(request: Request) -> str:
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return "token:" + hashlib.sha256(auth.encode("utf-8")).hexdigest()[:32]
+    return "ip:" + (request.client.host if request.client else "unknown")
+
+
+@app.middleware("http")
+async def api_abuse_guard(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    if request.method in {"POST", "PUT", "PATCH"}:
+        content_length = int(request.headers.get("content-length") or 0)
+        if content_length > API_MAX_BODY_BYTES:
+            return JSONResponse({"detail": "API request body is too large"}, status_code=413)
+    if RATE_LIMITS_ENABLED:
+        limit, window = rate_limit_rule(request.method, path)
+        now = time.time()
+        key = (rate_limit_identity(request), f"{request.method}:{path}")
+        with RATE_LIMIT_LOCK:
+            hits = [ts for ts in RATE_LIMIT_BUCKETS.get(key, []) if now - ts < window]
+            if len(hits) >= limit:
+                return JSONResponse({"detail": "Too many requests. Slow down and try again shortly."}, status_code=429)
+            hits.append(now)
+            RATE_LIMIT_BUCKETS[key] = hits
+            if len(RATE_LIMIT_BUCKETS) > 5000:
+                for stale_key, stale_hits in list(RATE_LIMIT_BUCKETS.items())[:1000]:
+                    fresh_hits = [ts for ts in stale_hits if now - ts < 3600]
+                    if fresh_hits:
+                        RATE_LIMIT_BUCKETS[stale_key] = fresh_hits
+                    else:
+                        RATE_LIMIT_BUCKETS.pop(stale_key, None)
+    return await call_next(request)
 
 
 def utcnow() -> datetime:
@@ -97,8 +165,49 @@ def parse_dt(value: Optional[str]) -> Optional[datetime]:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = int(os.getenv("NOVA_PASSWORD_HASH_ITERATIONS", "260000"))
+
+
 def pw_hash(password: str) -> str:
-    return hashlib.sha256(("nova-frontiers:" + password).encode("utf-8")).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        (password or "").encode("utf-8"),
+        salt.encode("ascii"),
+        PASSWORD_HASH_ITERATIONS,
+    ).hex()
+    return f"{PASSWORD_HASH_ALGORITHM}${PASSWORD_HASH_ITERATIONS}${salt}${digest}"
+
+
+def legacy_pw_hash(password: str) -> str:
+    return hashlib.sha256(("nova-frontiers:" + (password or "")).encode("utf-8")).hexdigest()
+
+
+def pw_verify(password: str, stored_hash: str) -> bool:
+    stored = str(stored_hash or "")
+    if stored.startswith(f"{PASSWORD_HASH_ALGORITHM}$"):
+        try:
+            _algo, iterations, salt, expected = stored.split("$", 3)
+            digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt.encode("ascii"), int(iterations)).hex()
+            return hmac.compare_digest(digest, expected)
+        except Exception:
+            return False
+    return hmac.compare_digest(legacy_pw_hash(password), stored)
+
+
+def pw_needs_rehash(stored_hash: str) -> bool:
+    stored = str(stored_hash or "")
+    if not stored.startswith(f"{PASSWORD_HASH_ALGORITHM}$"):
+        return True
+    try:
+        return int(stored.split("$", 3)[1]) < PASSWORD_HASH_ITERATIONS
+    except Exception:
+        return True
+
+
+def new_session_token() -> str:
+    return secrets.token_urlsafe(32)
 
 
 def connect() -> sqlite3.Connection:
@@ -124,6 +233,42 @@ def scalar(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Any:
     return conn.execute(sql, params).fetchone()[0]
 
 
+def auth_context_from_header(authorization: Optional[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(401, "Missing bearer token")
+    token = authorization.split(" ", 1)[1].strip()
+    conn = connect()
+    try:
+        sess = row(conn, "SELECT * FROM sessions WHERE token=?", (token,))
+        if not sess or parse_dt(sess["expires_at"]) < utcnow():
+            raise HTTPException(401, "Invalid or expired session")
+        user = row(conn, "SELECT * FROM users WHERE id=?", (sess["user_id"],))
+        player = row(conn, "SELECT * FROM players WHERE user_id=?", (user["id"],)) if user else None
+        if not user or not player:
+            raise HTTPException(401, "Missing player")
+        user["_session_token"] = token
+        player["_session_token"] = token
+        return user, player
+    finally:
+        conn.close()
+
+
+def require_bound_player_id(ctx: Tuple[Dict[str, Any], Dict[str, Any]], requested_player_id: Optional[int] = None) -> int:
+    user, player = ctx
+    session_player_id = int(player["id"])
+    requested = int(requested_player_id or session_player_id)
+    if requested != session_player_id and not bool(user.get("god_mode")):
+        raise HTTPException(403, "Player id does not match authenticated session")
+    return requested
+
+
+def require_admin_context(ctx: Tuple[Dict[str, Any], Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    user, _player = ctx
+    if not bool(user.get("god_mode")):
+        raise HTTPException(403, "Admin only")
+    return ctx
+
+
 def decode_json(value: Any, default: Any = None) -> Any:
     if value in (None, ""):
         return default
@@ -140,9 +285,1515 @@ def encode_json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=_default)
 
 
+
+
+# NOVA_AUTO_BATTLE_MAP_PATCH_HELPERS_V1
+def nova_patch_planet_distribution_xy(galaxy_code: str, index: int, total: int) -> tuple[float, float]:
+    """Deterministic spread for local planet maps.
+
+    Keeps planets away from corners while spreading them across a much larger galaxy canvas.
+    Existing planets are rewritten once by nova_patch_redistribute_planets_once().
+    """
+    total = max(1, int(total or 1))
+    index = max(0, int(index or 0))
+    seed = int(hashlib.sha256(str(galaxy_code or 'galaxy').encode('utf-8')).hexdigest()[:8], 16)
+    angle_offset = math.radians(seed % 360)
+    golden_angle = math.pi * (3 - math.sqrt(5))
+    # Stored x/y later become map percent through x/2.3 and y/2.3.
+    # Max radius 64 -> about 22%..78% before any frontend spread, avoiding corner clamps.
+    radius = 12.0 + (52.0 * math.sqrt((index + 0.5) / total))
+    angle = angle_offset + index * golden_angle
+    return round(math.cos(angle) * radius, 2), round(math.sin(angle) * radius, 2)
+
+
+def nova_patch_redistribute_planets_once(conn: sqlite3.Connection) -> None:
+    key = 'nova_planet_sunflower_distribution_v1'
+    try:
+        if row(conn, 'SELECT value FROM app_state WHERE key=?', (key,)):
+            return
+        galaxy_rows = rows(conn, 'SELECT id, code FROM galaxies ORDER BY id')
+        for galaxy in galaxy_rows:
+            planet_rows = rows(conn, 'SELECT id FROM planets WHERE galaxy_id=? ORDER BY id', (galaxy['id'],))
+            total = len(planet_rows)
+            for idx, planet in enumerate(planet_rows):
+                x, y = nova_patch_planet_distribution_xy(str(galaxy.get('code') or galaxy.get('id')), idx, total)
+                conn.execute('UPDATE planets SET x=?, y=? WHERE id=?', (x, y, planet['id']))
+        conn.execute(
+            'INSERT OR REPLACE INTO app_state(key,value,updated_at) VALUES(?,?,?)',
+            (key, '1', iso()),
+        )
+    except Exception:
+        # Never break /api/state if an older DB is missing a column/table.
+        return
+
+
+
+
+# NOVA_MMO_100_USER_HARDENING_V1
+# Conservative MMO hardening for a small browser MMO target around ~100 concurrent users.
+# This does not change gameplay rules. It reduces SQLite write stalls, adds common indexes,
+# and avoids crashing startup on older local databases.
+import os as _nova_mmo_os
+import sqlite3 as _nova_mmo_sqlite3
+from pathlib import Path as _NovaMmoPath
+
+_NOVA_MMO_HARDENED_ONCE = False
+
+
+def _nova_mmo_candidate_db_paths() -> list[_NovaMmoPath]:
+    found: list[_NovaMmoPath] = []
+    for name in ('NOVA_DB_PATH', 'DB_PATH', 'DATABASE_PATH', 'SQLITE_PATH'):
+        value = globals().get(name) or _nova_mmo_os.environ.get(name)
+        if value:
+            found.append(_NovaMmoPath(str(value)))
+    try:
+        here = _NovaMmoPath(__file__).resolve().parent
+    except Exception:
+        here = _NovaMmoPath.cwd()
+    for root in [here, *list(here.parents)[:4]]:
+        for rel in (
+            'data/nova_frontiers.db',
+            'nova_frontiers.db',
+            'data/game.db',
+            'game.db',
+            'database.db',
+            'app.db',
+            'db.sqlite3',
+        ):
+            found.append(root / rel)
+        try:
+            found.extend(root.glob('*.db'))
+            found.extend((root / 'data').glob('*.db'))
+        except Exception:
+            pass
+    out: list[_NovaMmoPath] = []
+    seen = set()
+    for p in found:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _nova_mmo_table_cols(conn: _nova_mmo_sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(r[1]) for r in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+    except Exception:
+        return set()
+
+
+def _nova_mmo_table_exists(conn: _nova_mmo_sqlite3.Connection, table: str) -> bool:
+    try:
+        row = conn.execute('SELECT 1 FROM sqlite_master WHERE type="table" AND name=? LIMIT 1', (table,)).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _nova_mmo_create_index_if_columns(conn: _nova_mmo_sqlite3.Connection, table: str, index: str, columns: tuple[str, ...]) -> None:
+    try:
+        if not _nova_mmo_table_exists(conn, table):
+            return
+        cols = _nova_mmo_table_cols(conn, table)
+        if not all(c in cols for c in columns):
+            return
+        col_sql = ', '.join(columns)
+        conn.execute(f'CREATE INDEX IF NOT EXISTS {index} ON {table} ({col_sql})')
+    except Exception:
+        return
+
+
+def nova_mmo_apply_sqlite_hardening_once() -> None:
+    global _NOVA_MMO_HARDENED_ONCE
+    if _NOVA_MMO_HARDENED_ONCE:
+        return
+    _NOVA_MMO_HARDENED_ONCE = True
+    db_path = None
+    for candidate in _nova_mmo_candidate_db_paths():
+        try:
+            if candidate.exists():
+                db_path = candidate
+                break
+        except Exception:
+            continue
+    if not db_path:
+        return
+    try:
+        conn = _nova_mmo_sqlite3.connect(str(db_path), timeout=30, isolation_level=None, check_same_thread=False)
+        try:
+            conn.execute('PRAGMA busy_timeout=30000')
+            conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('PRAGMA synchronous=NORMAL')
+            conn.execute('PRAGMA temp_store=MEMORY')
+            conn.execute('PRAGMA foreign_keys=ON')
+            conn.execute('PRAGMA wal_autocheckpoint=1000')
+
+            # Read-path indexes used heavily by state, maps, inventory, combat, messages, and chat.
+            index_specs = [
+                ('players', 'idx_nova_players_user_id', ('user_id',)),
+                ('players', 'idx_nova_players_username', ('username',)),
+                ('players', 'idx_nova_players_faction', ('faction',)),
+                ('players', 'idx_nova_players_galaxy_planet', ('galaxy_id', 'planet_id')),
+                ('ships', 'idx_nova_ships_player_active', ('player_id', 'active')),
+                ('ships', 'idx_nova_ships_player_location', ('player_id', 'galaxy_id', 'planet_id')),
+                ('ship_cargo', 'idx_nova_ship_cargo_ship', ('ship_id',)),
+                ('inventory', 'idx_nova_inventory_player_location', ('player_id', 'planet_id')),
+                ('inventory', 'idx_nova_inventory_player_item', ('player_id', 'item_code')),
+                ('materials', 'idx_nova_materials_player_location', ('player_id', 'planet_id')),
+                ('planets', 'idx_nova_planets_galaxy', ('galaxy_id',)),
+                ('stations', 'idx_nova_stations_planet', ('planet_id',)),
+                ('map_objects', 'idx_nova_map_objects_galaxy_active', ('galaxy_id', 'active')),
+                ('map_objects', 'idx_nova_map_objects_planet_active', ('planet_id', 'active')),
+                ('travel_state', 'idx_nova_travel_state_player_active', ('player_id', 'active')),
+                ('battles', 'idx_nova_battles_status_updated', ('status', 'updated_at')),
+                ('battle_participants', 'idx_nova_battle_participants_battle_side', ('battle_id', 'side')),
+                ('combat_logs', 'idx_nova_combat_logs_battle_id', ('battle_id',)),
+                ('chat_messages', 'idx_nova_chat_messages_scope_id', ('channel', 'faction_key', 'guild_key', 'id')),
+                ('direct_messages', 'idx_nova_direct_messages_recipient_time', ('recipient_id', 'created_at')),
+                ('direct_messages', 'idx_nova_direct_messages_sender_time', ('sender_id', 'created_at')),
+                ('server_events', 'idx_nova_server_events_active_time', ('active', 'starts_at', 'ends_at')),
+                ('player_tutorial_state', 'idx_nova_tutorial_player', ('player_id',)),
+            ]
+            for table, index, columns in index_specs:
+                _nova_mmo_create_index_if_columns(conn, table, index, columns)
+        finally:
+            conn.close()
+    except Exception:
+        return
+
+
+nova_mmo_apply_sqlite_hardening_once()
+
+
+
+
+# NOVA_SECURITY_DEFENSE_SYSTEM_V1
+# Security-band gate turrets + patrol scaling system.
+# Model:
+# - home galaxies trend to 1.0 security
+# - dead-center/contested/null center trends to 0.0 security
+# - gate turrets exist in safer space, are stationary, and respawn after admin-configured delay
+# - if all turrets in a galaxy are wiped, turret count multiplier doubles until quiet for 1 hour
+# - patrols scale by security, but increase gradually after repeated galaxy losses instead of hard-ganking players
+# - active war galaxies stop spawning new turrets/patrols; current defenders remain until defeated
+import math as _nova_sec_math
+import random as _nova_sec_random
+import sqlite3 as _nova_sec_sqlite3
+import time as _nova_sec_time
+from datetime import datetime as _NovaSecDatetime, timezone as _NovaSecTimezone
+try:
+    from fastapi import HTTPException as _NovaSecHTTPException
+except Exception:  # pragma: no cover
+    _NovaSecHTTPException = Exception
+try:
+    from pydantic import BaseModel as _NovaSecBaseModel
+except Exception:  # pragma: no cover
+    _NovaSecBaseModel = object
+
+
+class NovaSecuritySettingsRequest(_NovaSecBaseModel):
+    turret_respawn_seconds: int | None = None
+    turret_respawn_min_seconds: int | None = None
+    turret_respawn_max_seconds: int | None = None
+    turret_escalation_quiet_seconds: int | None = None
+    turret_range_multiplier: float | None = None
+    max_turret_multiplier: int | None = None
+    turrets_at_security_one: int | None = None
+    turrets_min_per_gate: int | None = None
+    patrol_respawn_seconds: int | None = None
+    patrol_respawn_min_seconds: int | None = None
+    patrol_respawn_max_seconds: int | None = None
+    patrol_escalation_quiet_seconds: int | None = None
+    max_patrol_bonus: int | None = None
+    patrols_at_security_one: int | None = None
+    zero_security_center_galaxies: int | None = None
+    set_war_galaxy_id: str | None = None
+    set_war_active: bool | None = None
+
+
+def _nova_sec_now_iso() -> str:
+    return _NovaSecDatetime.now(_NovaSecTimezone.utc).isoformat()
+
+
+def _nova_sec_raise(status_code: int, detail: str):
+    try:
+        raise _NovaSecHTTPException(status_code=status_code, detail=detail)
+    except TypeError:
+        raise _NovaSecHTTPException(detail)
+
+
+def _nova_sec_rows(conn, sql: str, params: tuple = ()) -> list[dict]:
+    cur = conn.execute(sql, params)
+    out = []
+    for r in cur.fetchall():
+        try:
+            out.append(dict(r))
+        except Exception:
+            cols = [d[0] for d in cur.description or []]
+            out.append({cols[i]: r[i] for i in range(min(len(cols), len(r)))})
+    return out
+
+
+def _nova_sec_row(conn, sql: str, params: tuple = ()) -> dict | None:
+    rows = _nova_sec_rows(conn, sql, params)
+    return rows[0] if rows else None
+
+
+def _nova_sec_table_exists(conn, table: str) -> bool:
+    try:
+        return bool(_nova_sec_row(conn, 'SELECT 1 FROM sqlite_master WHERE type="table" AND name=? LIMIT 1', (table,)))
+    except Exception:
+        return False
+
+
+def _nova_sec_cols(conn, table: str) -> set[str]:
+    try:
+        return {str(r.get('name')) for r in _nova_sec_rows(conn, f'PRAGMA table_info({table})')}
+    except Exception:
+        return set()
+
+
+def _nova_sec_first_col(cols: set[str], choices: tuple[str, ...]) -> str | None:
+    for c in choices:
+        if c in cols:
+            return c
+    return None
+
+
+def _nova_sec_num(v, default=0.0) -> float:
+    try:
+        if v is None or v == '':
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _nova_sec_int(v, default=0) -> int:
+    try:
+        if v is None or v == '':
+            return int(default)
+        return int(float(v))
+    except Exception:
+        return int(default)
+
+
+def _nova_sec_table_columns(conn, table: str) -> set[str]:
+    try:
+        return {str(r.get('name') or r.get(1)) for r in _nova_sec_rows(conn, f'PRAGMA table_info({table})')}
+    except Exception:
+        return set()
+
+
+def _nova_sec_ensure_column(conn, table: str, column: str, ddl: str) -> None:
+    try:
+        if column not in _nova_sec_table_columns(conn, table):
+            conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+    except Exception:
+        pass
+
+
+def nova_security_ensure_tables(conn) -> None:
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS security_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    ''')
+    defaults = {
+        'turret_respawn_seconds': '2400',
+        'turret_respawn_min_seconds': '1800',
+        'turret_respawn_max_seconds': '2700',
+        'turret_escalation_quiet_seconds': '3600',
+        'turret_range_multiplier': '6',
+        'max_turret_multiplier': '8',
+        'turrets_at_security_one': '6',
+        'turrets_min_per_gate': '4',
+        'patrol_respawn_seconds': '420',
+        'patrol_respawn_min_seconds': '240',
+        'patrol_respawn_max_seconds': '720',
+        'patrol_escalation_quiet_seconds': '3600',
+        'max_patrol_bonus': '0',
+        'patrols_at_security_one': '8',
+        'zero_security_center_galaxies': '3',
+        'turret_base_range': '520',
+        'patrol_threat_range': '360',
+        'security_tick_seconds': '8',
+    }
+    now = _nova_sec_now_iso()
+    for k, v in defaults.items():
+        conn.execute('INSERT OR IGNORE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (k, v, now))
+    try:
+        migration_key = 'security_rebalance_patrol_cap_v2'
+        if not _nova_sec_row(conn, 'SELECT 1 FROM security_settings WHERE key=?', (migration_key,)):
+            old_bonus = _nova_sec_row(conn, 'SELECT value FROM security_settings WHERE key=?', ('max_patrol_bonus',))
+            if str((old_bonus or {}).get('value') or '') == '6':
+                conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', ('max_patrol_bonus', '0', now))
+            conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (migration_key, '1', now))
+    except Exception:
+        pass
+    try:
+        migration_key = 'security_gate_turret_ring_v3'
+        if not _nova_sec_row(conn, 'SELECT 1 FROM security_settings WHERE key=?', (migration_key,)):
+            old_range = _nova_sec_row(conn, 'SELECT value FROM security_settings WHERE key=?', ('turret_range_multiplier',))
+            if str((old_range or {}).get('value') or '') == '3':
+                conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', ('turret_range_multiplier', '6', now))
+            conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (migration_key, '1', now))
+    except Exception:
+        pass
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS galaxy_security_state (
+            galaxy_id TEXT PRIMARY KEY,
+            security_level REAL NOT NULL DEFAULT 0.5,
+            owner_faction TEXT NOT NULL DEFAULT 'contested',
+            war_active INTEGER NOT NULL DEFAULT 0,
+            turret_multiplier INTEGER NOT NULL DEFAULT 1,
+            turret_last_loss_ts REAL NOT NULL DEFAULT 0,
+            turret_wipe_count INTEGER NOT NULL DEFAULT 0,
+            patrol_bonus INTEGER NOT NULL DEFAULT 0,
+            patrol_last_loss_ts REAL NOT NULL DEFAULT 0,
+            last_tick_ts REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    ''')
+    _nova_sec_ensure_column(conn, 'galaxy_security_state', 'last_turret_active_count', 'INTEGER NOT NULL DEFAULT 0')
+    _nova_sec_ensure_column(conn, 'galaxy_security_state', 'last_patrol_active_count', 'INTEGER NOT NULL DEFAULT 0')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS security_defense_registry (
+            npc_id TEXT PRIMARY KEY,
+            galaxy_id TEXT NOT NULL,
+            defense_type TEXT NOT NULL,
+            gate_id TEXT,
+            faction_id TEXT NOT NULL,
+            base_slot INTEGER NOT NULL DEFAULT 0,
+            spawned_at REAL NOT NULL,
+            respawn_after REAL NOT NULL DEFAULT 0,
+            last_seen_alive REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'active'
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_security_defense_registry_galaxy_type ON security_defense_registry(galaxy_id, defense_type, status)')
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS security_auto_engagements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            galaxy_id TEXT NOT NULL,
+            defender_npc_id TEXT NOT NULL,
+            target_player_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_ts REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            resolved INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_security_auto_engagements_target ON security_auto_engagements(target_player_id, resolved, created_ts)')
+
+    # Keep this table compatible with the existing traffic builder. Older builds crashed when npcs was missing.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS npcs (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'patrol',
+            level INTEGER NOT NULL DEFAULT 1,
+            avatar TEXT NOT NULL DEFAULT '◌',
+            guild_tag TEXT NOT NULL DEFAULT '',
+            faction_id TEXT NOT NULL DEFAULT 'contested',
+            x INTEGER NOT NULL DEFAULT 5000,
+            y INTEGER NOT NULL DEFAULT 5000,
+            location_id TEXT,
+            galaxy_id TEXT NOT NULL DEFAULT 'unknown',
+            traveling INTEGER NOT NULL DEFAULT 0,
+            origin_x INTEGER,
+            origin_y INTEGER,
+            destination_x INTEGER,
+            destination_y INTEGER,
+            destination_id TEXT,
+            start_time REAL,
+            arrival_time REAL,
+            stance TEXT NOT NULL DEFAULT 'lawful',
+            counter_scan_id TEXT NOT NULL DEFAULT 'none',
+            equipment_summary TEXT NOT NULL DEFAULT '',
+            hp INTEGER NOT NULL DEFAULT 100,
+            max_hp INTEGER NOT NULL DEFAULT 100,
+            active INTEGER NOT NULL DEFAULT 1,
+            updated_at TEXT
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_npcs_galaxy_active ON npcs(galaxy_id, active)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_npcs_role_galaxy ON npcs(role, galaxy_id)')
+
+
+def _nova_sec_setting_map(conn) -> dict[str, str]:
+    nova_security_ensure_tables(conn)
+    return {str(r.get('key')): str(r.get('value')) for r in _nova_sec_rows(conn, 'SELECT key,value FROM security_settings')}
+
+
+def _nova_sec_setting(conn, key: str, default):
+    return _nova_sec_setting_map(conn).get(key, str(default))
+
+
+def _nova_sec_get_galaxies(conn) -> list[dict]:
+    galaxies: dict[str, dict] = {}
+    if _nova_sec_table_exists(conn, 'galaxies'):
+        cols = _nova_sec_cols(conn, 'galaxies')
+        id_col = _nova_sec_first_col(cols, ('id', 'galaxy_id', 'code', 'slug'))
+        name_col = _nova_sec_first_col(cols, ('name', 'label', 'title'))
+        x_col = _nova_sec_first_col(cols, ('x', 'x_pct', 'map_x', 'pos_x'))
+        y_col = _nova_sec_first_col(cols, ('y', 'y_pct', 'map_y', 'pos_y'))
+        faction_col = _nova_sec_first_col(cols, ('faction_id', 'owner_faction', 'controlling_faction', 'faction'))
+        sector_col = _nova_sec_first_col(cols, ('sector', 'region'))
+        home_depth_col = _nova_sec_first_col(cols, ('home_depth', 'depth'))
+        capturable_col = _nova_sec_first_col(cols, ('capturable', 'is_capturable'))
+        if id_col:
+            parts = [f'{id_col} AS galaxy_id']
+            if name_col: parts.append(f'{name_col} AS name')
+            if x_col: parts.append(f'{x_col} AS x')
+            if y_col: parts.append(f'{y_col} AS y')
+            if faction_col: parts.append(f'{faction_col} AS faction_id')
+            if sector_col: parts.append(f'{sector_col} AS sector')
+            if home_depth_col: parts.append(f'{home_depth_col} AS home_depth')
+            if capturable_col: parts.append(f'{capturable_col} AS capturable')
+            try:
+                for row in _nova_sec_rows(conn, f"SELECT {', '.join(parts)} FROM galaxies"):
+                    gid = str(row.get('galaxy_id') or '').strip()
+                    if gid:
+                        galaxies[gid] = row
+            except Exception:
+                pass
+    for table in ('planets', 'npcs'):
+        if _nova_sec_table_exists(conn, table):
+            cols = _nova_sec_cols(conn, table)
+            gal_col = _nova_sec_first_col(cols, ('galaxy_id', 'galaxy'))
+            faction_col = _nova_sec_first_col(cols, ('faction_id', 'owner_faction', 'controlling_faction', 'faction'))
+            if gal_col:
+                sql = f'SELECT DISTINCT {gal_col} AS galaxy_id' + (f', {faction_col} AS faction_id' if faction_col else '') + f' FROM {table} WHERE {gal_col} IS NOT NULL'
+                try:
+                    for row in _nova_sec_rows(conn, sql):
+                        gid = str(row.get('galaxy_id') or '').strip()
+                        if gid and gid not in galaxies:
+                            galaxies[gid] = {'galaxy_id': gid, 'name': gid, 'faction_id': row.get('faction_id') or ''}
+                except Exception:
+                    pass
+    return list(galaxies.values())
+
+
+def _nova_sec_owner_from_galaxy(galaxy_id: str, row: dict | None = None) -> str:
+    raw = str((row or {}).get('faction_id') or '').strip().lower()
+    if raw and raw not in {'none', 'null', 'unknown'}:
+        return raw
+    gid = str(galaxy_id or '').lower()
+    for key in ('helios', 'aurelian', 'umbra', 'solari', 'orion', 'vanguard'):
+        if key in gid:
+            return key
+    if 'home' in gid:
+        return gid.split('-home')[0].replace('_', '-').strip('-') or 'contested'
+    return 'contested'
+
+
+def _nova_sec_is_percent_pair(x: float | None, y: float | None) -> bool:
+    return x is not None and y is not None and 0 <= float(x) <= 100 and 0 <= float(y) <= 100
+
+
+def _nova_sec_galaxy_distance_from_center(row: dict | None) -> float | None:
+    x = _nova_sec_num((row or {}).get('x'), None)
+    y = _nova_sec_num((row or {}).get('y'), None)
+    if x is None or y is None:
+        return None
+    if _nova_sec_is_percent_pair(x, y):
+        return _nova_sec_math.sqrt((x - 50.0) ** 2 + (y - 50.0) ** 2)
+    return _nova_sec_math.sqrt((x ** 2) + (y ** 2))
+
+
+def _nova_sec_zero_security_galaxy_ids(galaxies: list[dict], count: int = 3) -> set[str]:
+    count = max(0, int(count or 0))
+    measured: list[tuple[float, str]] = []
+    for g in galaxies:
+        gid = str(g.get('galaxy_id') or '').strip()
+        dist = _nova_sec_galaxy_distance_from_center(g)
+        if gid and dist is not None:
+            measured.append((dist, gid))
+    measured.sort(key=lambda item: (item[0], item[1]))
+    return {gid for _, gid in measured[:count]}
+
+
+def _nova_sec_security_from_galaxy(galaxy_id: str, row: dict | None, max_radius: float, zero_security_ids: set[str] | None = None) -> float:
+    gid = str(galaxy_id or '').lower()
+    if str(galaxy_id) in (zero_security_ids or set()):
+        return 0.0
+    if 'home' in gid or 'safe' in gid or 'capital' in gid:
+        return 1.0
+    if 'null' in gid or 'dead-center' in gid or 'dead_center' in gid or gid in {'core', 'central', 'void'}:
+        return 0.0
+    if _nova_sec_int((row or {}).get('home_depth'), 99) == 0 or _nova_sec_int((row or {}).get('capturable'), 1) == 0 and 'home' in str((row or {}).get('sector') or '').lower():
+        return 1.0
+    dist_raw = _nova_sec_galaxy_distance_from_center(row)
+    if dist_raw is not None and max_radius > 0:
+        # Normalize: exact center is 0.0, far rim/home edge is 1.0.
+        dist = dist_raw / max_radius
+        return max(0.0, min(1.0, round(dist, 2)))
+    if 'border' in gid or 'frontier' in gid or 'war' in gid:
+        return 0.35
+    if 'low' in gid:
+        return 0.25
+    return 0.5
+
+
+def _nova_sec_galaxy_max_radius(galaxies: list[dict]) -> float:
+    max_r = 0.0
+    for g in galaxies:
+        dist = _nova_sec_galaxy_distance_from_center(g)
+        if dist is not None:
+            max_r = max(max_r, dist)
+    return max_r or 1.0
+
+
+def _nova_sec_sync_galaxy_state(conn) -> None:
+    galaxies = _nova_sec_get_galaxies(conn)
+    max_radius = _nova_sec_galaxy_max_radius(galaxies)
+    settings = _nova_sec_setting_map(conn)
+    zero_security_ids = _nova_sec_zero_security_galaxy_ids(galaxies, _nova_sec_int(settings.get('zero_security_center_galaxies'), 3))
+    now = _nova_sec_now_iso()
+    for g in galaxies:
+        gid = str(g.get('galaxy_id') or '').strip()
+        if not gid:
+            continue
+        sec = _nova_sec_security_from_galaxy(gid, g, max_radius, zero_security_ids)
+        owner = _nova_sec_owner_from_galaxy(gid, g)
+        conn.execute('''
+            INSERT INTO galaxy_security_state(galaxy_id, security_level, owner_faction, war_active, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(galaxy_id) DO UPDATE SET
+              security_level=excluded.security_level,
+              owner_faction=CASE WHEN galaxy_security_state.owner_faction='' OR galaxy_security_state.owner_faction='contested' THEN excluded.owner_faction ELSE galaxy_security_state.owner_faction END,
+              updated_at=excluded.updated_at
+        ''', (gid, sec, owner, 0, now))
+
+
+def _nova_sec_base_turrets(security_level: float, settings: dict[str, str] | None = None) -> int:
+    s = max(0.0, min(1.0, float(security_level)))
+    if s <= 0.05:
+        return 0
+    top = max(1, min(24, _nova_sec_int((settings or {}).get('turrets_at_security_one'), 6)))
+    return max(1, min(top, int(_nova_sec_math.ceil(s * top))))
+
+
+def _nova_sec_min_turrets_per_gate(settings: dict[str, str] | None = None) -> int:
+    return max(3, min(8, _nova_sec_int((settings or {}).get('turrets_min_per_gate'), 4)))
+
+
+def _nova_sec_desired_turrets(g: dict, settings: dict[str, str] | None = None, gate_count: int = 0) -> int:
+    sec = _nova_sec_num(g.get('security_level'), 0.5)
+    base = _nova_sec_base_turrets(sec, settings)
+    if base <= 0:
+        return 0
+    multiplier = max(1, min(_nova_sec_int((settings or {}).get('max_turret_multiplier'), 8), _nova_sec_int(g.get('turret_multiplier'), 1)))
+    desired = base * multiplier
+    if gate_count > 0:
+        desired = max(desired, int(gate_count) * _nova_sec_min_turrets_per_gate(settings))
+    return desired
+
+
+def _nova_sec_base_patrols(security_level: float, settings: dict[str, str] | None = None) -> int:
+    s = max(0.0, min(1.0, float(security_level)))
+    if s <= 0.05:
+        return 0
+    top = max(1, min(40, _nova_sec_int((settings or {}).get('patrols_at_security_one'), 8)))
+    return max(1, min(top, int(_nova_sec_math.ceil(s * top))))
+
+
+def _nova_sec_gate_rows(conn, galaxy_id: str) -> list[dict]:
+    out: list[dict] = []
+    if _nova_sec_table_exists(conn, 'planets'):
+        cols = _nova_sec_cols(conn, 'planets')
+        gal_col = _nova_sec_first_col(cols, ('galaxy_id', 'galaxy'))
+        id_col = _nova_sec_first_col(cols, ('id', 'planet_id', 'code', 'slug'))
+        name_col = _nova_sec_first_col(cols, ('name', 'label', 'title'))
+        x_col = _nova_sec_first_col(cols, ('x', 'x_pct', 'map_x', 'pos_x'))
+        y_col = _nova_sec_first_col(cols, ('y', 'y_pct', 'map_y', 'pos_y'))
+        if gal_col and id_col:
+            parts = [f'{id_col} AS id']
+            if name_col: parts.append(f'{name_col} AS name')
+            if x_col: parts.append(f'{x_col} AS x')
+            if y_col: parts.append(f'{y_col} AS y')
+            try:
+                rows = _nova_sec_rows(conn, f"SELECT {', '.join(parts)} FROM planets WHERE {gal_col}=?", (galaxy_id,))
+                for r in rows:
+                    label = (str(r.get('id') or '') + ' ' + str(r.get('name') or '')).lower()
+                    if 'gate' in label or 'crossing' in label or 'jump' in label or 'relay' in label:
+                        out.append(r)
+            except Exception:
+                pass
+    if not out:
+        # Deterministic fallback gates. Keeps system functional even before real gate schema exists.
+        points = [(50, 9), (91, 50), (50, 91), (9, 50)]
+        for i, (x, y) in enumerate(points, 1):
+            out.append({'id': f'{galaxy_id}-auto-gate-{i}', 'name': f'Gate {i}', 'x': x, 'y': y})
+    return out[:6]
+
+
+def _nova_sec_local_point_to_pct(x, y) -> tuple[float, float]:
+    raw_x = _nova_sec_num(x, 50)
+    raw_y = _nova_sec_num(y, 50)
+    if _nova_sec_is_percent_pair(raw_x, raw_y):
+        return max(2.0, min(98.0, raw_x)), max(2.0, min(98.0, raw_y))
+    # Mirrors frontend localPointForPlanet(): planet x/y are centered local coordinates.
+    px = max(7.0, min(93.0, 50.0 + raw_x / 2.3))
+    py = max(8.0, min(92.0, 50.0 + raw_y / 2.3))
+    return max(2.0, min(98.0, (px - 50.0) * 1.45 + 50.0)), max(2.0, min(98.0, (py - 50.0) * 1.45 + 50.0))
+
+
+def _nova_sec_pct_to_coord(value) -> int:
+    return int(max(100, min(9900, round(_nova_sec_num(value, 50) * 100))))
+
+
+def _nova_sec_coord_to_pct(value) -> float:
+    return max(1.0, min(99.0, _nova_sec_num(value, 5000) / 100.0))
+
+
+def _nova_sec_upsert_npc(conn, npc: dict) -> None:
+    now = _nova_sec_now_iso()
+    conn.execute('''
+        INSERT INTO npcs(id,name,role,level,avatar,guild_tag,faction_id,x,y,location_id,galaxy_id,traveling,
+                         origin_x,origin_y,destination_x,destination_y,destination_id,start_time,arrival_time,
+                         stance,counter_scan_id,equipment_summary,hp,max_hp,active,updated_at)
+        VALUES(:id,:name,:role,:level,:avatar,:guild_tag,:faction_id,:x,:y,:location_id,:galaxy_id,:traveling,
+               :origin_x,:origin_y,:destination_x,:destination_y,:destination_id,:start_time,:arrival_time,
+               :stance,:counter_scan_id,:equipment_summary,:hp,:max_hp,:active,:updated_at)
+        ON CONFLICT(id) DO UPDATE SET
+          name=excluded.name,
+          role=excluded.role,
+          level=excluded.level,
+          avatar=excluded.avatar,
+          guild_tag=excluded.guild_tag,
+          faction_id=excluded.faction_id,
+          x=excluded.x,
+          y=excluded.y,
+          location_id=excluded.location_id,
+          galaxy_id=excluded.galaxy_id,
+          traveling=0,
+          stance=excluded.stance,
+          counter_scan_id=excluded.counter_scan_id,
+          equipment_summary=excluded.equipment_summary,
+          max_hp=excluded.max_hp,
+          hp=CASE WHEN npcs.hp <= 0 OR npcs.active=0 THEN npcs.hp ELSE MIN(npcs.hp, excluded.max_hp) END,
+          active=CASE WHEN npcs.hp <= 0 THEN 0 ELSE excluded.active END,
+          updated_at=excluded.updated_at
+    ''', {
+        'id': npc['id'],
+        'name': npc['name'],
+        'role': npc.get('role') or 'patrol',
+        'level': _nova_sec_int(npc.get('level'), 1),
+        'avatar': npc.get('avatar') or '◌',
+        'guild_tag': npc.get('guild_tag') or 'SEC',
+        'faction_id': npc.get('faction_id') or 'contested',
+        'x': _nova_sec_int(npc.get('x'), 5000),
+        'y': _nova_sec_int(npc.get('y'), 5000),
+        'location_id': npc.get('location_id'),
+        'galaxy_id': npc.get('galaxy_id') or 'unknown',
+        'traveling': 0,
+        'origin_x': None,
+        'origin_y': None,
+        'destination_x': None,
+        'destination_y': None,
+        'destination_id': None,
+        'start_time': None,
+        'arrival_time': None,
+        'stance': npc.get('stance') or 'lawful',
+        'counter_scan_id': npc.get('counter_scan_id') or 'none',
+        'equipment_summary': npc.get('equipment_summary') or '',
+        'hp': _nova_sec_int(npc.get('hp'), 100),
+        'max_hp': _nova_sec_int(npc.get('max_hp'), 100),
+        'active': _nova_sec_int(npc.get('active'), 1),
+        'updated_at': now,
+    })
+
+
+def _nova_sec_seeded_point(galaxy_id: str, slot: int, base_x=5000, base_y=5000, radius=3200) -> tuple[int, int]:
+    seed = abs(hash(f'{galaxy_id}:{slot}:nova-sec')) % 1000003
+    rng = _nova_sec_random.Random(seed)
+    angle = rng.random() * _nova_sec_math.tau
+    dist = radius * (0.25 + rng.random() * 0.75)
+    return int(max(650, min(9350, base_x + _nova_sec_math.cos(angle) * dist))), int(max(650, min(9350, base_y + _nova_sec_math.sin(angle) * dist)))
+
+
+def _nova_sec_spawn_turrets(conn, g: dict, settings: dict[str, str]) -> None:
+    gid = str(g.get('galaxy_id'))
+    sec = _nova_sec_num(g.get('security_level'), 0.5)
+    owner = str(g.get('owner_faction') or 'contested')
+    gates = _nova_sec_gate_rows(conn, gid)
+    if not gates:
+        return
+    desired_total = _nova_sec_desired_turrets(g, settings, len(gates))
+    if desired_total <= 0:
+        return
+    per_gate = max(_nova_sec_min_turrets_per_gate(settings), int(_nova_sec_math.ceil(desired_total / max(1, len(gates)))))
+    desired_total = per_gate * len(gates)
+    hp = int(120 + sec * 240)
+    level = int(10 + sec * 35)
+    slot = 0
+    for gate_index, gate in enumerate(gates):
+        gate_x_pct, gate_y_pct = _nova_sec_local_point_to_pct(gate.get('x'), gate.get('y'))
+        gate_id = str(gate.get('id') or gate.get('name') or f'gate-{slot}')
+        for i in range(per_gate):
+            if slot >= desired_total:
+                break
+            angle = (i / max(1, per_gate)) * _nova_sec_math.tau + ((gate_index % 2) * _nova_sec_math.tau / max(2, per_gate * 2))
+            offset_pct = 2.70 + (i % 2) * 1.50
+            x = _nova_sec_pct_to_coord(max(1.0, min(99.0, gate_x_pct + _nova_sec_math.cos(angle) * offset_pct)))
+            y = _nova_sec_pct_to_coord(max(1.0, min(99.0, gate_y_pct + _nova_sec_math.sin(angle) * offset_pct)))
+            npc_id = f'sec_turret:{gid}:{gate_id}:{slot}'
+            row = _nova_sec_row(conn, 'SELECT active,hp FROM npcs WHERE id=?', (npc_id,))
+            if row and (_nova_sec_int(row.get('active'), 1) == 0 or _nova_sec_int(row.get('hp'), hp) <= 0):
+                continue
+            _nova_sec_upsert_npc(conn, {
+                'id': npc_id,
+                'name': f'{owner.title()} Gate Turret {slot + 1}',
+                'role': 'turret',
+                'level': level,
+                'avatar': '◉',
+                'guild_tag': 'SEC',
+                'faction_id': owner,
+                'x': x,
+                'y': y,
+                'location_id': gate_id,
+                'galaxy_id': gid,
+                'stance': 'lawful',
+                'counter_scan_id': 'gate_turret',
+                'equipment_summary': 'defense turret; stationary; targets bounties and opposing factions',
+                'hp': hp,
+                'max_hp': hp,
+                'active': 1,
+            })
+            conn.execute('''
+                INSERT OR REPLACE INTO security_defense_registry(npc_id,galaxy_id,defense_type,gate_id,faction_id,base_slot,spawned_at,respawn_after,last_seen_alive,status)
+                VALUES(?,?,?,?,?,?,?,?,?,?)
+            ''', (npc_id, gid, 'turret', gate_id, owner, slot, _nova_sec_time.time(), 0, _nova_sec_time.time(), 'active'))
+            slot += 1
+
+
+def _nova_sec_spawn_patrols(conn, g: dict, settings: dict[str, str]) -> None:
+    gid = str(g.get('galaxy_id'))
+    sec = _nova_sec_num(g.get('security_level'), 0.5)
+    owner = str(g.get('owner_faction') or 'contested')
+    base = _nova_sec_base_patrols(sec, settings)
+    if base <= 0:
+        return
+    max_bonus = _nova_sec_int(settings.get('max_patrol_bonus'), 6)
+    bonus = max(0, min(max_bonus, _nova_sec_int(g.get('patrol_bonus'), 0)))
+    desired = base + bonus
+    hp = int(90 + sec * 160)
+    level = int(6 + sec * 30)
+    for slot in range(desired):
+        npc_id = f'sec_patrol:{gid}:{slot}'
+        row = _nova_sec_row(conn, 'SELECT active,hp FROM npcs WHERE id=?', (npc_id,))
+        if row and (_nova_sec_int(row.get('active'), 1) == 0 or _nova_sec_int(row.get('hp'), hp) <= 0):
+            continue
+        x, y = _nova_sec_seeded_point(gid, slot, 5000, 5000, 3900)
+        _nova_sec_upsert_npc(conn, {
+            'id': npc_id,
+            'name': f'{owner.title()} Patrol {slot + 1}',
+            'role': 'patrol',
+            'level': level,
+            'avatar': '◌',
+            'guild_tag': 'SEC',
+            'faction_id': owner,
+            'x': x,
+            'y': y,
+            'location_id': f'{gid}-patrol-zone-{slot}',
+            'galaxy_id': gid,
+            'stance': 'lawful',
+            'counter_scan_id': 'security_patrol',
+            'equipment_summary': 'security patrol; targets bounties and opposing factions',
+            'hp': hp,
+            'max_hp': hp,
+            'active': 1,
+        })
+        conn.execute('''
+            INSERT OR REPLACE INTO security_defense_registry(npc_id,galaxy_id,defense_type,gate_id,faction_id,base_slot,spawned_at,respawn_after,last_seen_alive,status)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+        ''', (npc_id, gid, 'patrol', None, owner, slot, _nova_sec_time.time(), 0, _nova_sec_time.time(), 'active'))
+
+
+def _nova_sec_update_patrol_routes(conn, now_ts: float) -> None:
+    try:
+        patrols = _nova_sec_rows(conn, '''
+            SELECT id,x,y,origin_x,origin_y,destination_x,destination_y,start_time,arrival_time,traveling,galaxy_id
+            FROM npcs
+            WHERE id LIKE 'sec_patrol:%' AND COALESCE(active,1)=1 AND COALESCE(hp,1)>0
+        ''')
+    except Exception:
+        return
+    for p in patrols:
+        npc_id = str(p.get('id') or '')
+        current_x = _nova_sec_num(p.get('x'), 5000)
+        current_y = _nova_sec_num(p.get('y'), 5000)
+        start_ts = _nova_sec_num(p.get('start_time'), 0)
+        arrival_ts = _nova_sec_num(p.get('arrival_time'), 0)
+        traveling = _nova_sec_int(p.get('traveling'), 0)
+        if traveling and arrival_ts > now_ts and arrival_ts > start_ts:
+            progress = max(0.0, min(1.0, (now_ts - start_ts) / max(1.0, arrival_ts - start_ts)))
+            ox = _nova_sec_num(p.get('origin_x'), current_x)
+            oy = _nova_sec_num(p.get('origin_y'), current_y)
+            dx = _nova_sec_num(p.get('destination_x'), current_x)
+            dy = _nova_sec_num(p.get('destination_y'), current_y)
+            current_x = ox + (dx - ox) * progress
+            current_y = oy + (dy - oy) * progress
+            conn.execute('UPDATE npcs SET x=?, y=?, updated_at=? WHERE id=?', (int(current_x), int(current_y), _nova_sec_now_iso(), npc_id))
+            continue
+        if traveling and arrival_ts:
+            current_x = _nova_sec_num(p.get('destination_x'), current_x)
+            current_y = _nova_sec_num(p.get('destination_y'), current_y)
+        rng = _nova_sec_random.Random(f'nova-sec-patrol-route:{npc_id}:{int(now_ts // 300)}')
+        # Pick broad patrol destinations across the local map, with enough time
+        # between waypoints that patrols feel like searching rather than jittering.
+        dest_x_pct = rng.uniform(8.0, 92.0)
+        dest_y_pct = rng.uniform(9.0, 91.0)
+        dest_x = _nova_sec_pct_to_coord(dest_x_pct)
+        dest_y = _nova_sec_pct_to_coord(dest_y_pct)
+        dist = _nova_sec_math.sqrt((dest_x - current_x) ** 2 + (dest_y - current_y) ** 2) / 100.0
+        seconds = max(150, min(520, int(95 + dist * rng.uniform(4.2, 6.4))))
+        conn.execute('''
+            UPDATE npcs
+            SET x=?, y=?, traveling=1, origin_x=?, origin_y=?, destination_x=?, destination_y=?,
+                start_time=?, arrival_time=?, updated_at=?
+            WHERE id=?
+        ''', (int(current_x), int(current_y), int(current_x), int(current_y), dest_x, dest_y, now_ts, now_ts + seconds, _nova_sec_now_iso(), npc_id))
+
+
+def _nova_sec_active_count(conn, galaxy_id: str, prefix: str) -> int:
+    try:
+        row = _nova_sec_row(conn, 'SELECT COUNT(*) AS n FROM npcs WHERE galaxy_id=? AND id LIKE ? AND COALESCE(active,1)=1 AND COALESCE(hp,1)>0', (galaxy_id, prefix + '%'))
+        return _nova_sec_int((row or {}).get('n'), 0)
+    except Exception:
+        return 0
+
+
+def _nova_sec_prune_excess_defenders(conn, g: dict, settings: dict[str, str]) -> None:
+    gid = str(g.get('galaxy_id'))
+    sec = _nova_sec_num(g.get('security_level'), 0.5)
+    desired_turrets = _nova_sec_desired_turrets(g, settings, len(_nova_sec_gate_rows(conn, gid)))
+    patrol_base = _nova_sec_base_patrols(sec, settings)
+    patrol_bonus = max(0, min(_nova_sec_int(settings.get('max_patrol_bonus'), 6), _nova_sec_int(g.get('patrol_bonus'), 0)))
+    desired_patrols = patrol_base + patrol_bonus if patrol_base > 0 else 0
+    for prefix, desired in (('sec_turret:', desired_turrets), ('sec_patrol:', desired_patrols)):
+        try:
+            active = _nova_sec_rows(conn, '''
+                SELECT id FROM npcs
+                WHERE galaxy_id=? AND id LIKE ? AND COALESCE(active,1)=1 AND COALESCE(hp,1)>0
+                ORDER BY id
+            ''', (gid, prefix + '%'))
+        except Exception:
+            continue
+        extras = active[max(0, int(desired)):]
+        for npc in extras:
+            npc_id = str(npc.get('id') or '')
+            if not npc_id:
+                continue
+            conn.execute('DELETE FROM npcs WHERE id=?', (npc_id,))
+            conn.execute('DELETE FROM security_defense_registry WHERE npc_id=?', (npc_id,))
+
+
+def _nova_sec_respawn_delay(settings: dict[str, str], defense_type: str, npc_id: str, now_ts: float) -> int:
+    kind = 'turret' if str(defense_type or '').lower().startswith('turret') else 'patrol'
+    fallback = _nova_sec_int(settings.get(f'{kind}_respawn_seconds'), 2400 if kind == 'turret' else 420)
+    lo = _nova_sec_int(settings.get(f'{kind}_respawn_min_seconds'), fallback)
+    hi = _nova_sec_int(settings.get(f'{kind}_respawn_max_seconds'), fallback)
+    lo = max(1, lo)
+    hi = max(lo, hi)
+    rng = _nova_sec_random.Random(f'nova-sec-respawn:{kind}:{npc_id}:{int(now_ts // 60)}')
+    return int(rng.uniform(lo, hi))
+
+
+def _nova_sec_handle_escalation(conn, g: dict, settings: dict[str, str], now_ts: float) -> dict:
+    gid = str(g.get('galaxy_id'))
+    sec = _nova_sec_num(g.get('security_level'), 0.5)
+    base_turrets = _nova_sec_base_turrets(sec, settings)
+    base_patrols = _nova_sec_base_patrols(sec, settings)
+    quiet_turret = _nova_sec_int(settings.get('turret_escalation_quiet_seconds'), 3600)
+    quiet_patrol = _nova_sec_int(settings.get('patrol_escalation_quiet_seconds'), 3600)
+    max_mult = max(1, _nova_sec_int(settings.get('max_turret_multiplier'), 8))
+    max_patrol_bonus = max(0, _nova_sec_int(settings.get('max_patrol_bonus'), 6))
+    turret_mult = max(1, min(max_mult, _nova_sec_int(g.get('turret_multiplier'), 1)))
+    patrol_bonus = max(0, min(max_patrol_bonus, _nova_sec_int(g.get('patrol_bonus'), 0)))
+    turret_last_loss = _nova_sec_num(g.get('turret_last_loss_ts'), 0)
+    patrol_last_loss = _nova_sec_num(g.get('patrol_last_loss_ts'), 0)
+    prev_turret_active = _nova_sec_int(g.get('last_turret_active_count'), base_turrets)
+    prev_patrol_active = _nova_sec_int(g.get('last_patrol_active_count'), base_patrols)
+
+    active_turrets = _nova_sec_active_count(conn, gid, 'sec_turret:')
+    active_patrols = _nova_sec_active_count(conn, gid, 'sec_patrol:')
+
+    if turret_last_loss and now_ts - turret_last_loss >= quiet_turret:
+        turret_mult = 1
+        turret_last_loss = 0
+    if patrol_last_loss and now_ts - patrol_last_loss >= quiet_patrol:
+        patrol_bonus = 0
+        patrol_last_loss = 0
+
+    # Escalate only on a fresh transition from some defenders to zero defenders.
+    if base_turrets > 0 and active_turrets == 0 and prev_turret_active > 0:
+        turret_mult = min(max_mult, max(2, turret_mult * 2))
+        turret_last_loss = now_ts
+        conn.execute('UPDATE galaxy_security_state SET turret_wipe_count=COALESCE(turret_wipe_count,0)+1 WHERE galaxy_id=?', (gid,))
+    if base_patrols > 0 and active_patrols == 0 and prev_patrol_active > 0:
+        patrol_bonus = min(max_patrol_bonus, patrol_bonus + 1)
+        patrol_last_loss = now_ts
+
+    conn.execute('''
+        UPDATE galaxy_security_state
+        SET turret_multiplier=?, turret_last_loss_ts=?, patrol_bonus=?, patrol_last_loss_ts=?,
+            last_turret_active_count=?, last_patrol_active_count=?, updated_at=?
+        WHERE galaxy_id=?
+    ''', (turret_mult, turret_last_loss, patrol_bonus, patrol_last_loss, active_turrets, active_patrols, _nova_sec_now_iso(), gid))
+    g['turret_multiplier'] = turret_mult
+    g['patrol_bonus'] = patrol_bonus
+    g['turret_last_loss_ts'] = turret_last_loss
+    g['patrol_last_loss_ts'] = patrol_last_loss
+    return g
+
+
+def _nova_sec_respawn_dead_defenders(conn, settings: dict[str, str], now_ts: float, war_active_by_galaxy: dict[str, int]) -> None:
+    try:
+        dead = _nova_sec_rows(conn, "SELECT id, galaxy_id FROM npcs WHERE id LIKE 'sec_%' AND (COALESCE(active,1)=0 OR COALESCE(hp,0)<=0)")
+    except Exception:
+        return
+    for npc in dead:
+        npc_id = str(npc.get('id'))
+        gid = str(npc.get('galaxy_id'))
+        if war_active_by_galaxy.get(gid):
+            continue
+        is_turret = npc_id.startswith('sec_turret:')
+        delay = _nova_sec_respawn_delay(settings, 'turret' if is_turret else 'patrol', npc_id, now_ts)
+        reg = _nova_sec_row(conn, 'SELECT respawn_after FROM security_defense_registry WHERE npc_id=?', (npc_id,))
+        due = _nova_sec_num((reg or {}).get('respawn_after'), 0)
+        if due <= 0:
+            due = now_ts + delay
+            conn.execute('UPDATE security_defense_registry SET status=?, respawn_after=? WHERE npc_id=?', ('destroyed', due, npc_id))
+        elif now_ts >= due:
+            # Delete the dead row. Next spawn pass recreates it at proper count/faction.
+            conn.execute('DELETE FROM npcs WHERE id=?', (npc_id,))
+            conn.execute('DELETE FROM security_defense_registry WHERE npc_id=?', (npc_id,))
+
+
+def _nova_sec_player_context(conn, player_like=None) -> dict:
+    p = player_like or {}
+    if not isinstance(p, dict):
+        try:
+            p = dict(p)
+        except Exception:
+            p = {}
+    ctx = {
+        'id': p.get('id') or p.get('player_id') or p.get('userid') or p.get('user_id'),
+        'galaxy_id': p.get('galaxy_id') or p.get('galaxy'),
+        'x': p.get('x') or p.get('x_pct'),
+        'y': p.get('y') or p.get('y_pct'),
+        'faction_id': p.get('faction_id') or p.get('faction'),
+        'bounty': p.get('bounty') or p.get('bounty_amount') or p.get('wanted_level') or 0,
+        'heat': p.get('heat') or 0,
+        'security_status': p.get('security_status') or '',
+    }
+    if not ctx.get('id'):
+        return ctx
+    # Fill from player/ship tables if the build_state player dict did not carry open-space position.
+    if _nova_sec_table_exists(conn, 'players'):
+        cols = _nova_sec_cols(conn, 'players')
+        id_col = _nova_sec_first_col(cols, ('id', 'player_id'))
+        faction_col = _nova_sec_first_col(cols, ('faction_id', 'faction'))
+        bounty_col = _nova_sec_first_col(cols, ('bounty', 'bounty_amount', 'wanted_level'))
+        heat_col = _nova_sec_first_col(cols, ('heat',))
+        security_status_col = _nova_sec_first_col(cols, ('security_status', 'wanted_status', 'legal_status'))
+        gal_col = _nova_sec_first_col(cols, ('galaxy_id', 'galaxy'))
+        x_col = _nova_sec_first_col(cols, ('x', 'x_pct'))
+        y_col = _nova_sec_first_col(cols, ('y', 'y_pct'))
+        if id_col:
+            parts = [f'{id_col} AS id']
+            if faction_col: parts.append(f'{faction_col} AS faction_id')
+            if bounty_col: parts.append(f'{bounty_col} AS bounty')
+            if heat_col: parts.append(f'{heat_col} AS heat')
+            if security_status_col: parts.append(f'{security_status_col} AS security_status')
+            if gal_col: parts.append(f'{gal_col} AS galaxy_id')
+            if x_col: parts.append(f'{x_col} AS x')
+            if y_col: parts.append(f'{y_col} AS y')
+            try:
+                row = _nova_sec_row(conn, f"SELECT {', '.join(parts)} FROM players WHERE {id_col}=?", (ctx.get('id'),))
+                if row:
+                    for k in ctx:
+                        if ctx.get(k) in (None, '') and row.get(k) not in (None, ''):
+                            ctx[k] = row.get(k)
+            except Exception:
+                pass
+    if _nova_sec_table_exists(conn, 'ships'):
+        cols = _nova_sec_cols(conn, 'ships')
+        player_col = _nova_sec_first_col(cols, ('player_id', 'owner_id', 'user_id'))
+        active_col = _nova_sec_first_col(cols, ('active', 'is_active', 'selected'))
+        gal_col = _nova_sec_first_col(cols, ('galaxy_id', 'galaxy'))
+        x_col = _nova_sec_first_col(cols, ('x', 'x_pct'))
+        y_col = _nova_sec_first_col(cols, ('y', 'y_pct'))
+        if player_col and (not ctx.get('galaxy_id') or ctx.get('x') is None or ctx.get('y') is None):
+            parts = []
+            if gal_col: parts.append(f'{gal_col} AS galaxy_id')
+            if x_col: parts.append(f'{x_col} AS x')
+            if y_col: parts.append(f'{y_col} AS y')
+            if parts:
+                where = f'{player_col}=?'
+                if active_col:
+                    where += f' AND COALESCE({active_col},1)=1'
+                try:
+                    row = _nova_sec_row(conn, f"SELECT {', '.join(parts)} FROM ships WHERE {where} LIMIT 1", (ctx.get('id'),))
+                    if row:
+                        for k in ('galaxy_id', 'x', 'y'):
+                            if ctx.get(k) in (None, '') and row.get(k) not in (None, ''):
+                                ctx[k] = row.get(k)
+                except Exception:
+                    pass
+    try:
+        get_player_fn = globals().get('get_player')
+        pos_fn = globals().get('current_player_map_position')
+        faction_fn = globals().get('player_faction')
+        if callable(get_player_fn):
+            live_player = get_player_fn(conn, int(ctx.get('id')))
+            if not ctx.get('galaxy_id') and live_player.get('location_planet_id'):
+                pl = _nova_sec_row(conn, 'SELECT galaxy_id FROM planets WHERE id=?', (live_player.get('location_planet_id'),))
+                if pl and pl.get('galaxy_id') is not None:
+                    ctx['galaxy_id'] = pl.get('galaxy_id')
+            if callable(pos_fn):
+                pt = pos_fn(conn, live_player, 'system')
+                if pt and pt.get('x_pct') is not None and pt.get('y_pct') is not None:
+                    ctx['x'] = pt.get('x_pct')
+                    ctx['y'] = pt.get('y_pct')
+            if not ctx.get('faction_id') and callable(faction_fn):
+                faction = faction_fn(conn, live_player) or {}
+                if faction.get('id') is not None:
+                    ctx['faction_id'] = faction.get('id')
+            if not ctx.get('heat') and live_player.get('heat') is not None:
+                ctx['heat'] = live_player.get('heat')
+            if not ctx.get('security_status') and live_player.get('security_status') is not None:
+                ctx['security_status'] = live_player.get('security_status')
+    except Exception:
+        pass
+    return ctx
+
+
+def _nova_sec_should_target(player_ctx: dict, defender_faction: str) -> tuple[bool, str]:
+    bounty = _nova_sec_num(player_ctx.get('bounty'), 0)
+    heat = _nova_sec_num(player_ctx.get('heat'), 0)
+    status = str(player_ctx.get('security_status') or '').lower().strip()
+    if bounty > 0 or heat >= 40 or status in {'wanted', 'hunted', 'lockdown', 'bounty', 'wanted target'}:
+        return True, 'bounty'
+    pf = str(player_ctx.get('faction_id') or '').lower().strip()
+    df = str(defender_faction or '').lower().strip()
+    if df and df != 'contested' and pf and pf != df:
+        return True, 'opposing_faction'
+    return False, ''
+
+
+def _nova_sec_try_existing_battle_helper(conn, defender: dict, player_ctx: dict, reason: str) -> bool:
+    # Compatibility layer only. Uses existing battle helpers if the project has them.
+    # Every call is guarded because helper signatures changed across Nova builds.
+    candidates = (
+        'start_security_battle',
+        'start_npc_battle',
+        'start_open_space_battle',
+        'start_intercept_battle',
+        'create_battle',
+        'start_battle',
+        'begin_battle',
+    )
+    for name in candidates:
+        fn = globals().get(name)
+        if not callable(fn):
+            continue
+        attempts = (
+            lambda: fn(conn, player_ctx.get('id'), defender.get('id'), reason=reason, multi_attackers=True),
+            lambda: fn(conn, player_ctx.get('id'), defender.get('id')),
+            lambda: fn(conn, player_ctx, defender),
+            lambda: fn(player_ctx, defender),
+        )
+        for call in attempts:
+            try:
+                result = call()
+                if result is not False:
+                    return True
+            except TypeError:
+                continue
+            except Exception:
+                continue
+    return False
+
+
+def _nova_sec_record_or_start_engagement(conn, defender: dict, player_ctx: dict, reason: str) -> None:
+    pid = str(player_ctx.get('id') or '')
+    if not pid:
+        return
+    now_ts = _nova_sec_time.time()
+    recent = _nova_sec_row(conn, '''
+        SELECT id FROM security_auto_engagements
+        WHERE target_player_id=? AND defender_npc_id=? AND created_ts>=? AND resolved=0
+        LIMIT 1
+    ''', (pid, defender.get('id'), now_ts - 20))
+    if recent:
+        return
+    start_fn = globals().get('_nova_sec_start_security_battle')
+    if callable(start_fn) and start_fn(conn, defender, player_ctx, reason):
+        resolved = 1
+    elif _nova_sec_try_existing_battle_helper(conn, defender, player_ctx, reason):
+        resolved = 1
+    else:
+        resolved = 0
+    conn.execute('''
+        INSERT INTO security_auto_engagements(galaxy_id,defender_npc_id,target_player_id,reason,created_ts,created_at,resolved)
+        VALUES(?,?,?,?,?,?,?)
+    ''', (defender.get('galaxy_id'), defender.get('id'), pid, reason, now_ts, _nova_sec_now_iso(), resolved))
+
+
+def _nova_sec_scan_player_engagements(conn, player_like, settings: dict[str, str]) -> None:
+    player_ctx = _nova_sec_player_context(conn, player_like)
+    try:
+        pid = str(player_ctx.get('id') or '')
+        immunity_fn = globals().get('combat_actor_is_immune')
+        if pid and callable(immunity_fn) and immunity_fn(conn, f'player:{pid}'):
+            return
+    except Exception:
+        pass
+    gid = str(player_ctx.get('galaxy_id') or '')
+    if not gid or player_ctx.get('x') is None or player_ctx.get('y') is None:
+        return
+    px = _nova_sec_num(player_ctx.get('x'), 5000)
+    py = _nova_sec_num(player_ctx.get('y'), 5000)
+    if 0 <= px <= 100 and 0 <= py <= 100:
+        px *= 100.0
+        py *= 100.0
+    turret_range = _nova_sec_num(settings.get('turret_base_range'), 520) * _nova_sec_num(settings.get('turret_range_multiplier'), 6)
+    patrol_range = _nova_sec_num(settings.get('patrol_threat_range'), 360)
+    try:
+        defenders = _nova_sec_rows(conn, '''
+            SELECT id,name,role,level,faction_id,x,y,galaxy_id,equipment_summary,hp,max_hp
+            FROM npcs
+            WHERE galaxy_id=?
+              AND id LIKE 'sec_%'
+              AND COALESCE(active,1)=1
+              AND COALESCE(hp,1)>0
+        ''', (gid,))
+    except Exception:
+        return
+    for d in defenders:
+        should, reason = _nova_sec_should_target(player_ctx, str(d.get('faction_id') or ''))
+        if not should:
+            continue
+        dx = _nova_sec_num(d.get('x'), 5000) - px
+        dy = _nova_sec_num(d.get('y'), 5000) - py
+        dist = _nova_sec_math.sqrt(dx * dx + dy * dy)
+        is_turret = str(d.get('id') or '').startswith('sec_turret:')
+        rng = turret_range if is_turret else patrol_range
+        if dist <= rng:
+            _nova_sec_record_or_start_engagement(conn, d, player_ctx, reason)
+
+
+def nova_security_defense_tick(conn, player_like=None) -> None:
+    nova_security_ensure_tables(conn)
+    settings = _nova_sec_setting_map(conn)
+    now_ts = _nova_sec_time.time()
+    last_global = _nova_sec_row(conn, 'SELECT value FROM security_settings WHERE key=?', ('last_global_security_tick_ts',))
+    tick_seconds = _nova_sec_int(settings.get('security_tick_seconds'), 8)
+    if last_global and now_ts - _nova_sec_num(last_global.get('value'), 0) < tick_seconds:
+        _nova_sec_scan_player_engagements(conn, player_like, settings)
+        try:
+            conn.commit()
+        except Exception:
+            pass
+        return
+    conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', ('last_global_security_tick_ts', str(now_ts), _nova_sec_now_iso()))
+    _nova_sec_sync_galaxy_state(conn)
+    states = _nova_sec_rows(conn, 'SELECT * FROM galaxy_security_state')
+    war_by_galaxy = {str(g.get('galaxy_id')): _nova_sec_int(g.get('war_active'), 0) for g in states}
+    _nova_sec_respawn_dead_defenders(conn, settings, now_ts, war_by_galaxy)
+    for g in _nova_sec_rows(conn, 'SELECT * FROM galaxy_security_state'):
+        gid = str(g.get('galaxy_id'))
+        if _nova_sec_int(g.get('war_active'), 0):
+            continue
+        g = _nova_sec_handle_escalation(conn, g, settings, now_ts)
+        _nova_sec_spawn_turrets(conn, g, settings)
+        _nova_sec_spawn_patrols(conn, g, settings)
+        _nova_sec_prune_excess_defenders(conn, g, settings)
+        conn.execute(
+            'UPDATE galaxy_security_state SET last_tick_ts=?, last_turret_active_count=?, last_patrol_active_count=?, updated_at=? WHERE galaxy_id=?',
+            (now_ts, _nova_sec_active_count(conn, gid, 'sec_turret:'), _nova_sec_active_count(conn, gid, 'sec_patrol:'), _nova_sec_now_iso(), gid),
+        )
+    _nova_sec_update_patrol_routes(conn, now_ts)
+    _nova_sec_scan_player_engagements(conn, player_like, settings)
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _nova_sec_ts_iso(ts) -> str | None:
+    try:
+        value = float(ts)
+        if value <= 0:
+            return None
+        return _NovaSecDatetime.fromtimestamp(value, _NovaSecTimezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def nova_security_defense_traffic(conn, player: dict, map_type: str, nodes: list[dict]) -> list[dict]:
+    if str(map_type or '').lower() != 'system':
+        return []
+    nova_security_ensure_tables(conn)
+    try:
+        scope_fn = globals().get('current_map_scope')
+        scope = scope_fn(conn, player, 'system') if callable(scope_fn) else {}
+        gid = str(scope.get('galaxy_id') or '')
+        if not gid and player.get('location_planet_id'):
+            pl = _nova_sec_row(conn, 'SELECT galaxy_id FROM planets WHERE id=?', (player.get('location_planet_id'),))
+            gid = str((pl or {}).get('galaxy_id') or '')
+    except Exception:
+        gid = str(player.get('galaxy_id') or '')
+    if not gid:
+        return []
+    try:
+        defenders = _nova_sec_rows(conn, '''
+            SELECT n.*, r.defense_type, r.gate_id, r.base_slot, r.status
+            FROM npcs n
+            LEFT JOIN security_defense_registry r ON r.npc_id=n.id
+            WHERE n.galaxy_id=?
+              AND n.id LIKE 'sec_%'
+              AND COALESCE(n.active,1)=1
+              AND COALESCE(n.hp,1)>0
+            ORDER BY CASE WHEN n.id LIKE 'sec_turret:%' THEN 0 ELSE 1 END, n.id
+        ''', (gid,))
+    except Exception:
+        return []
+    if not defenders:
+        return []
+    faction_rows = _nova_sec_rows(conn, 'SELECT * FROM factions') if _nova_sec_table_exists(conn, 'factions') else []
+    faction_by_id = {str(f.get('id')): f for f in faction_rows}
+    faction_by_code = {str(f.get('code') or '').lower(): f for f in faction_rows}
+    player_ctx = _nova_sec_player_context(conn, player)
+    immune_fn = globals().get('combat_actor_is_immune')
+    visual_fn = globals().get('ship_visual_payload')
+    now_ts = _nova_sec_time.time()
+    out: list[dict] = []
+    for d in defenders:
+        npc_id = str(d.get('id') or '')
+        defense_type = str(d.get('defense_type') or ('turret' if npc_id.startswith('sec_turret:') else 'patrol')).lower()
+        is_turret = defense_type == 'turret'
+        x_pct = _nova_sec_coord_to_pct(d.get('x'))
+        y_pct = _nova_sec_coord_to_pct(d.get('y'))
+        faction_key = str(d.get('faction_id') or '')
+        faction = faction_by_id.get(faction_key) or faction_by_code.get(faction_key.lower()) or {}
+        should_target, hostile_reason = _nova_sec_should_target(player_ctx, faction_key)
+        security_ref = f'security:{npc_id}'
+        locked = bool(immune_fn(conn, security_ref)) if callable(immune_fn) else False
+        moving = (not is_turret) and _nova_sec_int(d.get('traveling'), 0) and _nova_sec_num(d.get('arrival_time'), 0) > now_ts
+        start_ts = _nova_sec_num(d.get('start_time'), 0)
+        arrival_ts = _nova_sec_num(d.get('arrival_time'), 0)
+        progress = 100.0
+        if moving and arrival_ts > start_ts:
+            progress = round(max(0.0, min(1.0, (now_ts - start_ts) / max(1.0, arrival_ts - start_ts))) * 100.0, 1)
+        role = 'turret' if is_turret else 'patrol'
+        ship_class = 'Gate Defense Turret' if is_turret else 'Security Patrol Frigate'
+        try:
+            image_url = visual_fn(ship_class, role) if callable(visual_fn) else ''
+        except Exception:
+            image_url = ''
+        out.append({
+            'id': security_ref,
+            'combatTargetRef': security_ref,
+            'kind': 'npc',
+            'role': role,
+            'securityDefense': True,
+            'securityDefenseType': defense_type,
+            'isGateTurret': bool(is_turret),
+            'stationary': bool(is_turret),
+            'name': d.get('name') or ('Gate Defense Turret' if is_turret else 'Security Patrol'),
+            'label': 'Gate turret: shoots wanted or opposing-faction pilots on sight.' if is_turret else 'Security patrol: roaming sweep for wanted or opposing-faction pilots.',
+            'selectedSummary': 'Automated gate turret. It is intentionally close to the gate and can start or join shared battles.' if is_turret else 'Roaming security patrol. It replenishes slowly unless the whole patrol screen is wiped.',
+            'outcomeFactors': 'Destroyed security defenders respawn after the configured security delay. Full wipes escalate the next response until the galaxy stays quiet.',
+            'x_pct': x_pct,
+            'y_pct': y_pct,
+            'routeOriginX': _nova_sec_coord_to_pct(d.get('origin_x') or d.get('x')),
+            'routeOriginY': _nova_sec_coord_to_pct(d.get('origin_y') or d.get('y')),
+            'routeDestinationX': _nova_sec_coord_to_pct(d.get('destination_x') or d.get('x')),
+            'routeDestinationY': _nova_sec_coord_to_pct(d.get('destination_y') or d.get('y')),
+            'npcStartedAt': _nova_sec_ts_iso(start_ts) if moving else None,
+            'npcArrivalAt': _nova_sec_ts_iso(arrival_ts) if moving else None,
+            'npcActionStateRaw': 'moving' if moving else 'working',
+            'npcObjective': 'gate_defense' if is_turret else 'security_sweep',
+            'npcObjectiveLabel': 'Gate defense grid' if is_turret else 'Security sweep',
+            'progress': progress,
+            'npcLevel': _nova_sec_int(d.get('level'), 1),
+            'hull': _nova_sec_int(d.get('hp'), 1),
+            'maxHull': _nova_sec_int(d.get('max_hp'), 1),
+            'npcFactionId': _nova_sec_int(faction.get('id'), 0),
+            'npcFactionColor': faction.get('color') or ('#ffc247' if is_turret else '#4da3ff'),
+            'faction_name': faction.get('name') or faction_key or 'Security',
+            'ship_class': ship_class,
+            'class_name': ship_class,
+            'image_url': image_url,
+            'attackable': not locked,
+            'canAttack': not locked,
+            'blockedReason': 'Battle locked / temporary immunity' if locked else '',
+            'hostile': bool(should_target),
+            'hostileReason': hostile_reason,
+            'radarVisible': True,
+            'radarBypass': 'security_defense',
+            'radarSource': 'security_grid',
+        })
+    return out
+
+
+def nova_security_snapshot(conn, galaxy_id: str | None = None, player_id: str | int | None = None) -> dict:
+    nova_security_ensure_tables(conn)
+    _nova_sec_sync_galaxy_state(conn)
+    params: list = []
+    where = ''
+    if galaxy_id:
+        where = 'WHERE galaxy_id=?'
+        params.append(galaxy_id)
+    rows = _nova_sec_rows(conn, f'SELECT * FROM galaxy_security_state {where} ORDER BY security_level DESC, galaxy_id', tuple(params))
+    settings = _nova_sec_setting_map(conn)
+    for g in rows:
+        if not _nova_sec_int(g.get('war_active'), 0):
+            _nova_sec_prune_excess_defenders(conn, g, settings)
+    rows = _nova_sec_rows(conn, f'SELECT * FROM galaxy_security_state {where} ORDER BY security_level DESC, galaxy_id', tuple(params))
+    out = []
+    for g in rows:
+        gid = str(g.get('galaxy_id'))
+        turrets = _nova_sec_active_count(conn, gid, 'sec_turret:')
+        patrols = _nova_sec_active_count(conn, gid, 'sec_patrol:')
+        out.append({
+            'galaxy_id': gid,
+            'security_level': round(_nova_sec_num(g.get('security_level'), 0.5), 2),
+            'owner_faction': g.get('owner_faction'),
+            'war_active': bool(_nova_sec_int(g.get('war_active'), 0)),
+            'turret_count': turrets,
+            'turret_multiplier': _nova_sec_int(g.get('turret_multiplier'), 1),
+            'patrol_count': patrols,
+            'patrol_bonus': _nova_sec_int(g.get('patrol_bonus'), 0),
+        })
+    alerts = []
+    if player_id is not None:
+        alerts = _nova_sec_rows(conn, '''
+            SELECT id, galaxy_id, defender_npc_id, reason, created_at, resolved
+            FROM security_auto_engagements
+            WHERE target_player_id=? AND created_ts>=? AND resolved=0
+            ORDER BY id DESC LIMIT 5
+        ''', (str(player_id), _nova_sec_time.time() - 120))
+    return {'galaxies': out, 'settings': settings, 'alerts': alerts, 'server_time': _nova_sec_now_iso()}
+
+
+@app.get('/api/security/state')
+def nova_security_state(galaxy_id: str | None = None, player_id: str | None = None, authorization: Optional[str] = Header(default=None)):
+    ctx = auth_context_from_header(authorization)
+    pid = require_bound_player_id(ctx, int(player_id or 0) if player_id else None)
+    # Uses same connection style as current main.py endpoints when possible.
+    conn = None
+    try:
+        if callable(globals().get('get_conn')):
+            conn = globals()['get_conn']()
+        elif callable(globals().get('get_connection')):
+            conn = globals()['get_connection']()
+        elif callable(globals().get('connect_db')):
+            conn = globals()['connect_db']()
+        else:
+            db_path = None
+            for candidate in ('backend/app/data/nova_frontiers.db', 'app/data/nova_frontiers.db', 'data/nova_frontiers.db', 'nova_frontiers.db'):
+                try:
+                    from pathlib import Path as _NovaSecPath
+                    p = _NovaSecPath(candidate)
+                    if p.exists():
+                        db_path = p
+                        break
+                except Exception:
+                    pass
+            if db_path is None:
+                _nova_sec_raise(500, 'Security database connection could not be resolved')
+            conn = _nova_sec_sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.row_factory = _nova_sec_sqlite3.Row
+        nova_security_defense_tick(conn, {'id': pid})
+        return nova_security_snapshot(conn, galaxy_id, pid)
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
+@app.post('/api/admin/security/settings')
+def nova_security_update_settings(req: NovaSecuritySettingsRequest, authorization: Optional[str] = Header(default=None)):
+    require_admin_context(auth_context_from_header(authorization))
+    conn = None
+    try:
+        if callable(globals().get('get_conn')):
+            conn = globals()['get_conn']()
+        elif callable(globals().get('get_connection')):
+            conn = globals()['get_connection']()
+        elif callable(globals().get('connect_db')):
+            conn = globals()['connect_db']()
+        else:
+            from pathlib import Path as _NovaSecPath
+            db_path = _NovaSecPath('backend/app/data/nova_frontiers.db')
+            if not db_path.exists():
+                db_path = _NovaSecPath('data/nova_frontiers.db')
+            conn = _nova_sec_sqlite3.connect(str(db_path), check_same_thread=False)
+            conn.row_factory = _nova_sec_sqlite3.Row
+        nova_security_ensure_tables(conn)
+        data = req.dict() if hasattr(req, 'dict') else req.__dict__
+        allowed = {
+            'turret_respawn_seconds', 'turret_respawn_min_seconds', 'turret_respawn_max_seconds',
+            'turret_escalation_quiet_seconds', 'turret_range_multiplier', 'max_turret_multiplier',
+            'turrets_at_security_one', 'turrets_min_per_gate', 'patrol_respawn_seconds', 'patrol_respawn_min_seconds',
+            'patrol_respawn_max_seconds', 'patrol_escalation_quiet_seconds', 'max_patrol_bonus',
+            'patrols_at_security_one', 'zero_security_center_galaxies'
+        }
+        for key in allowed:
+            value = data.get(key)
+            if value is not None:
+                conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (key, str(value), _nova_sec_now_iso()))
+        if data.get('set_war_galaxy_id'):
+            conn.execute('''
+                INSERT INTO galaxy_security_state(galaxy_id, security_level, owner_faction, war_active, updated_at)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(galaxy_id) DO UPDATE SET war_active=excluded.war_active, updated_at=excluded.updated_at
+            ''', (str(data.get('set_war_galaxy_id')), 0.5, 'contested', 1 if data.get('set_war_active') else 0, _nova_sec_now_iso()))
+        conn.commit()
+        return nova_security_snapshot(conn)
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    callsign: Optional[str] = None
+    faction_id: Optional[int] = None
+    email: Optional[str] = None
+    avatar_id: Optional[str] = None
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: str
+    callsign: Optional[str] = None
+    faction_id: Optional[int] = None
+    avatar_id: Optional[str] = None
 
 
 class ActionRequest(BaseModel):
@@ -210,25 +1861,37 @@ JOB_PROFILE: Dict[str, Dict[str, Any]] = {
 }
 
 JOB_RANK_THRESHOLDS = [
-    # Early/mid ranks are intentionally medium-grindy. Late ranks are Korean-MMO style.
+    # 12h/day baseline: early careers unlock inside the first month, rank 8-ish sits in the few-month band,
+    # and rank 10 remains part of the brutal completion wall across every career.
     {"rank":1,"xp":0,"primary":0,"value":0},
-    {"rank":2,"xp":3000,"primary":8,"value":25000},
-    {"rank":3,"xp":12000,"primary":28,"value":120000},
-    {"rank":4,"xp":32000,"primary":85,"value":500000},
-    {"rank":5,"xp":85000,"primary":220,"value":1800000},
-    {"rank":6,"xp":210000,"primary":520,"value":7000000},
-    {"rank":7,"xp":520000,"primary":1300,"value":25000000},
-    {"rank":8,"xp":1400000,"primary":3400,"value":110000000},
-    {"rank":9,"xp":4200000,"primary":9500,"value":600000000},
-    {"rank":10,"xp":12500000,"primary":30000,"value":3500000000},
+    {"rank":2,"xp":3200,"primary":9,"value":35000},
+    {"rank":3,"xp":10500,"primary":30,"value":150000},
+    {"rank":4,"xp":26000,"primary":85,"value":560000},
+    {"rank":5,"xp":47000,"primary":180,"value":1550000},
+    {"rank":6,"xp":76000,"primary":360,"value":4200000},
+    {"rank":7,"xp":118000,"primary":720,"value":11000000},
+    {"rank":8,"xp":202000,"primary":1450,"value":36000000},
+    {"rank":9,"xp":342000,"primary":3200,"value":115000000},
+    {"rank":10,"xp":560000,"primary":6500,"value":450000000},
 ]
 
 
 # Phase 16: action-trained skills + focused career bonuses. Skills are grindy; careers amplify matching actions without locking other actions.
 SKILL_XP_BALANCE = {
+    # Piecewise cumulative curve. Level 25 is the starter-quarter target, 75 is the few-month band,
+    # 100 is the completion wall. Keep the old keys for backward-compatible raw JSON overrides.
     "base_curve": 620,
     "curve_power": 1.95,
     "max_level": 100,
+    "early_level_cutoff": 25,
+    "mid_level_cutoff": 75,
+    "early_xp_at_cutoff": 11000,
+    "mid_xp_at_cutoff": 23000,
+    "max_xp_at_cap": 35000,
+    "early_curve_power": 1.55,
+    "mid_curve_power": 1.45,
+    "late_curve_power": 2.20,
+    "action_training_xp_mult": 3.60,
     "breakout_success_cap": 0.80,
     "illicit_risk_floor": 0.04,
     "price_bonus_cap": 0.14,
@@ -369,6 +2032,67 @@ ECONOMY_BALANCE = {
     "npc_stock_nudge_max": 7,
 }
 
+# Ship insurance pays credits only. The insured value includes the market replacement value
+# plus a gold-equivalent estimate of the materials required to rebuild the hull. Cargo,
+# modules, and salvage are deliberately excluded so coordinated PvP deaths cannot mint profit.
+INSURANCE_BALANCE = {
+    "default_tier": "none",
+    "payout_consumes_destroyed_ship_only": True,
+    "include_material_equivalent_in_value": True,
+    "material_value_mult": 1.00,
+    "tier_upgrade_credit_pct": 1.00,
+    "pvp_payout_mult": 0.70,
+    "pvp_reason_markers": ["pvp", "player combat", "player_destroyed", "unlawful combat"],
+    "tiers": {
+        "none": {"label": "Default Coverage", "coverage_pct": 0.15, "premium_pct": 0.00, "buyable": False, "description": "Automatic baseline coverage on non-starter ships."},
+        "basic": {"label": "35% Coverage", "coverage_pct": 0.35, "premium_pct": 0.06, "buyable": True, "description": "Cheap loss cushion for risky early ships."},
+        "standard": {"label": "50% Coverage", "coverage_pct": 0.50, "premium_pct": 0.13, "buyable": True, "description": "Best normal-risk value for active ships."},
+        "premium": {"label": "75% Coverage", "coverage_pct": 0.75, "premium_pct": 0.25, "buyable": True, "description": "High-risk coverage. Still leaves a real loss after destruction."},
+        "starter": {"label": "Starter Ship", "coverage_pct": 0.00, "premium_pct": 0.00, "buyable": False, "description": "Permanent starter hull does not pay insurance."},
+    },
+}
+
+# Whole-account progression target. This is intentionally separate from economy knobs so tuning can
+# preserve the desired wall shape without accidentally breaking prices. Monte Carlo target assumes
+# 12 active hours/day, broad loop rotation, and realistic partial/failure outcomes.
+PROGRESSION_BALANCE = {
+    "baseline_active_hours_per_day": 12,
+    "sim_runs": 1000,
+    "target_first_quarter_days": 30,
+    "target_third_quarter_days": 180,
+    "target_completion_days": 490,
+    "daily_energy_budget": 244,
+    "completion_credit_goal": 300000000,
+    "completion_components": {
+        "skills_weight": 0.42,
+        "career_ranks_weight": 0.32,
+        "player_level_weight": 0.12,
+        "credits_and_assets_weight": 0.14,
+    },
+    "player_level_curve": {
+        "early_cutoff": 25,
+        "mid_cutoff": 75,
+        "early_base": 350,
+        "early_level_mult": 105,
+        "early_power": 1.12,
+        "mid_base": 3100,
+        "mid_level_mult": 62,
+        "mid_power": 1.62,
+        "late_base": 20000,
+        "late_level_mult": 1150,
+        "late_power": 1.72,
+    },
+    "last_1000_run_result": {
+        "mean_days": 490.34,
+        "median_days": 490,
+        "p10_days": 487,
+        "p90_days": 494,
+        "first_quarter_mean_days": 27.52,
+        "third_quarter_mean_days": 176.99,
+        "completion_shape": "quick first quarter, several-month middle, brutal final quarter",
+    },
+}
+
 # High-level economy/progression balance. This is the admin-facing layer that keeps the whole
 # game in the target shape: easy starter loop, expensive mid-game, brutal long-term completion.
 ECOSYSTEM_BALANCE = {
@@ -490,14 +2214,14 @@ INVENTORY_BALANCE = {
 
 # Phase 13 tier system. Tier is tech/progression power; rarity remains drop/quality uniqueness.
 TIER_DEFINITIONS: Dict[int, Dict[str, Any]] = {
-    0: {"id":0,"name":"Scrap / Civilian","short":"T0","style":"scrap","value_mult":0.55,"stat_mult":0.72,"rarity_weight":1.35,"craft_difficulty":0.72,"repair_mult":0.55,"market_availability":1.45,"min_level":1,"description":"Cheap civilian-grade or salvaged equipment."},
-    1: {"id":1,"name":"Basic","short":"T1","style":"basic","value_mult":1.00,"stat_mult":1.00,"rarity_weight":1.00,"craft_difficulty":1.00,"repair_mult":1.00,"market_availability":1.00,"min_level":1,"description":"Standard starter-grade equipment and materials."},
-    2: {"id":2,"name":"Improved","short":"T2","style":"improved","value_mult":1.75,"stat_mult":1.18,"rarity_weight":0.78,"craft_difficulty":1.22,"repair_mult":1.30,"market_availability":0.72,"min_level":3,"description":"Improved commercial-grade technology."},
-    3: {"id":3,"name":"Advanced","short":"T3","style":"advanced","value_mult":3.10,"stat_mult":1.38,"rarity_weight":0.52,"craft_difficulty":1.55,"repair_mult":1.75,"market_availability":0.48,"min_level":7,"description":"Advanced equipment for specialized pilots."},
-    4: {"id":4,"name":"Military Grade","short":"T4","style":"military","value_mult":5.50,"stat_mult":1.62,"rarity_weight":0.32,"craft_difficulty":2.05,"repair_mult":2.35,"market_availability":0.28,"min_level":12,"description":"Restricted military-grade hardware with high upkeep."},
-    5: {"id":5,"name":"Prototype","short":"T5","style":"prototype","value_mult":9.50,"stat_mult":1.92,"rarity_weight":0.16,"craft_difficulty":2.85,"repair_mult":3.25,"market_availability":0.13,"min_level":18,"description":"Powerful prototype gear with high cost and energy demands."},
-    6: {"id":6,"name":"Exotic","short":"T6","style":"exotic","value_mult":16.0,"stat_mult":2.28,"rarity_weight":0.07,"craft_difficulty":3.90,"repair_mult":4.80,"market_availability":0.05,"min_level":26,"description":"Rare exotic technology with specialized strengths."},
-    7: {"id":7,"name":"Legendary / Relic","short":"T7","style":"relic","value_mult":28.0,"stat_mult":2.75,"rarity_weight":0.02,"craft_difficulty":5.50,"repair_mult":7.00,"market_availability":0.01,"min_level":35,"description":"Relic-class technology. Extremely rare and never routine market stock."},
+    0: {"id":0,"name":"Scrap / Civilian","short":"T0","style":"scrap","color":"#94a3b8","bg":"rgba(148,163,184,.16)","border":"rgba(148,163,184,.55)","glow":"rgba(148,163,184,.24)","value_mult":0.55,"stat_mult":0.72,"rarity_weight":1.35,"craft_difficulty":0.72,"repair_mult":0.55,"market_availability":1.45,"min_level":1,"description":"Cheap civilian-grade or salvaged equipment."},
+    1: {"id":1,"name":"Basic","short":"T1","style":"basic","color":"#e5e7eb","bg":"rgba(229,231,235,.14)","border":"rgba(229,231,235,.42)","glow":"rgba(229,231,235,.18)","value_mult":1.00,"stat_mult":1.00,"rarity_weight":1.00,"craft_difficulty":1.00,"repair_mult":1.00,"market_availability":1.00,"min_level":1,"description":"Standard starter-grade equipment and materials."},
+    2: {"id":2,"name":"Improved","short":"T2","style":"improved","color":"#22c55e","bg":"rgba(34,197,94,.18)","border":"rgba(34,197,94,.62)","glow":"rgba(34,197,94,.34)","value_mult":1.75,"stat_mult":1.18,"rarity_weight":0.78,"craft_difficulty":1.22,"repair_mult":1.30,"market_availability":0.72,"min_level":3,"description":"Improved commercial-grade technology."},
+    3: {"id":3,"name":"Advanced","short":"T3","style":"advanced","color":"#38bdf8","bg":"rgba(56,189,248,.20)","border":"rgba(56,189,248,.68)","glow":"rgba(56,189,248,.38)","value_mult":3.10,"stat_mult":1.38,"rarity_weight":0.52,"craft_difficulty":1.55,"repair_mult":1.75,"market_availability":0.48,"min_level":7,"description":"Advanced equipment for specialized pilots."},
+    4: {"id":4,"name":"Military Grade","short":"T4","style":"military","color":"#f97316","bg":"rgba(249,115,22,.20)","border":"rgba(249,115,22,.72)","glow":"rgba(249,115,22,.38)","value_mult":5.50,"stat_mult":1.62,"rarity_weight":0.32,"craft_difficulty":2.05,"repair_mult":2.35,"market_availability":0.28,"min_level":12,"description":"Restricted military-grade hardware with high upkeep."},
+    5: {"id":5,"name":"Prototype","short":"T5","style":"prototype","color":"#d946ef","bg":"rgba(217,70,239,.22)","border":"rgba(217,70,239,.75)","glow":"rgba(217,70,239,.42)","value_mult":9.50,"stat_mult":1.92,"rarity_weight":0.16,"craft_difficulty":2.85,"repair_mult":3.25,"market_availability":0.13,"min_level":18,"description":"Powerful prototype gear with high cost and energy demands."},
+    6: {"id":6,"name":"Exotic","short":"T6","style":"exotic","color":"#facc15","bg":"rgba(250,204,21,.24)","border":"rgba(250,204,21,.82)","glow":"rgba(250,204,21,.50)","value_mult":16.0,"stat_mult":2.28,"rarity_weight":0.07,"craft_difficulty":3.90,"repair_mult":4.80,"market_availability":0.05,"min_level":26,"description":"Rare exotic technology with specialized strengths."},
+    7: {"id":7,"name":"Legendary / Relic","short":"T7","style":"relic","color":"#ffffff","bg":"linear-gradient(135deg,rgba(250,204,21,.28),rgba(217,70,239,.22),rgba(56,189,248,.22))","border":"rgba(255,255,255,.92)","glow":"rgba(255,255,255,.62)","value_mult":28.0,"stat_mult":2.75,"rarity_weight":0.02,"craft_difficulty":5.50,"repair_mult":7.00,"market_availability":0.01,"min_level":35,"description":"Relic-class technology. Extremely rare and never routine market stock."},
 }
 
 TIER_BALANCE = {
@@ -516,18 +2240,76 @@ TIER_BALANCE = {
 }
 
 
-PROFILE_AVATAR_OPTIONS: List[Dict[str, str]] = [
-    {"id": "default", "label": "Default Pilot", "gender": "neutral", "url": "/assets/avatars/default.svg"},
-] + [
-    {"id": f"male_{i:02d}", "label": f"Male Pilot {i:02d}", "gender": "male", "url": f"/assets/avatars/male-pilot-{i:02d}.svg"}
-    for i in range(1, 13)
-] + [
-    {"id": f"female_{i:02d}", "label": f"Female Pilot {i:02d}", "gender": "female", "url": f"/assets/avatars/female-pilot-{i:02d}.svg"}
-    for i in range(1, 13)
-]
+FACTION_AVATAR_NAMES: Dict[str, Dict[str, List[str]]] = {
+    "solar_accord": {
+        "female": ["Aster Command", "Dawn Wing", "Civic Ace", "Sun Marshal", "Halo Runner", "Aurora Envoy"],
+        "male": ["Atlas Watch", "Bright Lance", "Cobalt Captain", "Sol Ranger", "Beacon Guard", "Zenith Pilot"],
+    },
+    "iron_meridian": {
+        "female": ["Chrome Oracle", "Forge Relay", "Servo Crown", "Vector Saint", "Arc Warden", "Titan Loom"],
+        "male": ["Anvil Prime", "Steel Vector", "Torque Herald", "Bulwark Node", "Cinder Core", "Rail Sentinel"],
+    },
+    "umbral_veil": {
+        "female": ["Nebula Whisper", "Crescent Shade", "Star Siren", "Omen Drift", "Void Seer", "Eclipse Bloom"],
+        "male": ["Night Cartographer", "Grave Star", "Abyss Broker", "Vesper Coil", "Dark Meridian", "Moonless Scout"],
+    },
+}
 
+FACTION_AVATAR_SPECIES = {
+    "solar_accord": "Human",
+    "iron_meridian": "Robot",
+    "umbral_veil": "Bug-like",
+}
+
+FACTION_AVATAR_FACTION_NAMES = {
+    "solar_accord": "Solar Accord",
+    "iron_meridian": "Iron Meridian",
+    "umbral_veil": "Umbral Veil",
+}
+
+
+def build_profile_avatar_options() -> List[Dict[str, str]]:
+    options: List[Dict[str, str]] = []
+    for faction_code, gender_names in FACTION_AVATAR_NAMES.items():
+        for gender in ("female", "male"):
+            for idx, name in enumerate(gender_names[gender], start=1):
+                options.append({
+                    "id": f"{faction_code}_{gender}_{idx:02d}",
+                    "label": name,
+                    "fullLabel": f"{FACTION_AVATAR_FACTION_NAMES[faction_code]} {name}",
+                    "gender": gender,
+                    "faction_code": faction_code,
+                    "factionCode": faction_code,
+                    "faction": FACTION_AVATAR_FACTION_NAMES[faction_code],
+                    "species": FACTION_AVATAR_SPECIES[faction_code],
+                    "url": f"/assets/factions/{faction_code}/{gender}-{idx:02d}.svg",
+                })
+    return options
+
+
+PROFILE_AVATAR_OPTIONS: List[Dict[str, str]] = build_profile_avatar_options()
 PROFILE_AVATAR_BY_ID = {a["id"]: a for a in PROFILE_AVATAR_OPTIONS}
-DEFAULT_AVATAR_ID = "default"
+DEFAULT_FACTION_CODE = "solar_accord"
+DEFAULT_AVATAR_ID = "solar_accord_male_01"
+
+
+def avatar_options_for_faction_code(faction_code: Optional[str]) -> List[Dict[str, str]]:
+    code = str(faction_code or DEFAULT_FACTION_CODE).strip() or DEFAULT_FACTION_CODE
+    options = [a for a in PROFILE_AVATAR_OPTIONS if a.get("faction_code") == code]
+    if options:
+        return options
+    return [a for a in PROFILE_AVATAR_OPTIONS if a.get("faction_code") == DEFAULT_FACTION_CODE]
+
+
+def default_avatar_id_for_faction_code(faction_code: Optional[str], seed: str = "") -> str:
+    options = avatar_options_for_faction_code(faction_code)
+    if not options:
+        return DEFAULT_AVATAR_ID
+    text = str(seed or "")
+    if not text:
+        return options[0]["id"]
+    idx = sum(ord(ch) for ch in text) % len(options)
+    return options[idx]["id"]
 
 PROFILE_LIMITS = {
     "username_min": 3,
@@ -1001,6 +2783,29 @@ OPEN_WORLD_BALANCE = {
     "investigate_site_energy": 14,
     "ore_mine_min_energy": 8,
     "ore_mine_max_energy": 34,
+    "salvage_site_lifetime_minutes": 10,
+}
+
+SCAN_AREA_BALANCE = {
+    "base_radius_pct": 10.0,
+    "max_radius_pct": 34.0,
+    "radar_power_for_max": 135.0,
+    "base_duration_seconds": 30,
+    "max_duration_bonus_seconds": 15,
+    "base_cooldown_seconds": 120,
+    "min_cooldown_seconds": 45,
+    "ping_animation_seconds": 8.0,
+    "ping_linger_seconds": 8.4,
+    "blip_limit": 28,
+}
+
+SCAN_OBJECT_BALANCE = {
+    "base_success_pct": 20,
+    "max_success_pct": 80,
+    "module_scan_mult": 0.95,
+    "radar_scan_mult": 0.22,
+    "counter_scan_mult": 0.85,
+    "energy": 2,
 }
 
 WORLD_PROGRESSION_BALANCE = {
@@ -1009,6 +2814,7 @@ WORLD_PROGRESSION_BALANCE = {
     "extra_galaxies_per_faction": 2,
     "maintain_equal_faction_galaxies": True,
     "resource_tier_max": 5,
+    "per_galaxy_npc_level_ranges": {},
     "bands": [
         {
             "key": "home_quarter",
@@ -1059,6 +2865,19 @@ WORLD_SERVER_BALANCE = {
     "resource_check_max_seconds": 30 * 60,
     "npcs_per_galaxy_min": 15,
     "npcs_per_galaxy_max": 30,
+    "npc_gameplay_loop_spawn_weights": {
+        "traders": 18,
+        "miners": 18,
+        "explorers": 15,
+        "salvagers": 12,
+        "security": 18,
+        "service": 9,
+        "diplomats": 6,
+        "smugglers": 4,
+        "mercenaries": 3,
+        "pirates": 3
+    },
+    "npc_career_spawn_weight_overrides": {},
     "patrol_check_min_seconds": 60,
     "patrol_check_max_seconds": 120,
     "patrols_per_galaxy_min": 4,
@@ -1191,10 +3010,16 @@ PIRATE_STATION_BALANCE = {
     "enemy_tick_seconds": 10,
     "enemy_attack_range_pct": 4.8,
     "player_move_pct": 6.5,
-    "escape_edge_pct": 4.0,
+    "escape_edge_pct": 10.0,
     "battle_max_rounds": 8,
     "victory_credit_per_tier": 900,
     "victory_xp_per_tier": 70,
+}
+
+
+PARTY_BALANCE = {
+    "max_members": 5,
+    "shared_xp_pct": 0.25,
 }
 
 FACTION_WAR_BALANCE = {
@@ -1244,6 +3069,7 @@ def game_config_targets() -> Dict[str, Dict[str, Any]]:
         "MARKET_LAW_BALANCE": MARKET_LAW_BALANCE,
         "COMBAT_BALANCE": COMBAT_BALANCE,
         "PIRATE_STATION_BALANCE": PIRATE_STATION_BALANCE,
+        "PARTY_BALANCE": PARTY_BALANCE,
         "FACTION_WAR_BALANCE": FACTION_WAR_BALANCE,
         "PVE_BALANCE": PVE_BALANCE,
         "CRAFTING_BALANCE": CRAFTING_BALANCE,
@@ -1255,6 +3081,8 @@ def game_config_targets() -> Dict[str, Dict[str, Any]]:
         "INVENTORY_BALANCE": INVENTORY_BALANCE,
         "TIER_BALANCE": TIER_BALANCE,
         "SKILL_XP_BALANCE": SKILL_XP_BALANCE,
+        "PROGRESSION_BALANCE": PROGRESSION_BALANCE,
+        "INSURANCE_BALANCE": INSURANCE_BALANCE,
         "ECOSYSTEM_BALANCE": ECOSYSTEM_BALANCE,
         "ECONOMY_BALANCE": ECONOMY_BALANCE,
         "ECONOMY_CONFIG": ECONOMY_CONFIG,
@@ -1277,6 +3105,7 @@ GAME_CONFIG_DESCRIPTIONS = {
     "MARKET_LAW_BALANCE": "Contraband law, customs, jail, heat, fines, and illicit market behavior.",
     "COMBAT_BALANCE": "Combat/intercept/attack math, target legality, and reward/failure tuning.",
     "PIRATE_STATION_BALANCE": "Scarce pirate station map objectives, enemy count, convergence, escape, and respawn tuning.",
+    "PARTY_BALANCE": "Party size, shared XP percentage, and party-system tuning.",
     "FACTION_WAR_BALANCE": "Galaxy faction control, war declaration delay, capture ring, hill timer, cooldowns, weak-faction help, and NPC aggression.",
     "PVE_BALANCE": "PvE operation risk/reward/timer tuning.",
     "CRAFTING_BALANCE": "Crafting success, XP, cost, and material behavior.",
@@ -1288,6 +3117,8 @@ GAME_CONFIG_DESCRIPTIONS = {
     "INVENTORY_BALANCE": "Inventory capacity, value, upgrade/salvage item behavior.",
     "TIER_BALANCE": "Tier scaling and upgrade economy.",
     "SKILL_XP_BALANCE": "Skill XP and progression tuning.",
+    "PROGRESSION_BALANCE": "Whole-account progression target, player level curve, 12h/day simulation baseline, and last 1000-run result.",
+    "INSURANCE_BALANCE": "Ship insurance coverage, premium cost, insured-value calculation, and PvP anti-abuse payout multiplier.",
     "ECONOMY_BALANCE": "General economy tuning.",
     "ECONOMY_CONFIG": "Economy config and baseline pressure values.",
 }
@@ -2336,6 +4167,16 @@ CRAFTING_LOOP_SET_BASE_MODULES = [{'code': 'ore_probe_array',
              'jobs': ['medic', 'shipwright'],
              'skill': 'survival',
              'skill_total': 10}}]
+
+MULTI_PROJECTILE_WEAPON_MODULES = [
+    {"code":"splitter_flak_mk1","name":"Splitter Flak Array","slot":"weapon","rarity":"uncommon","price":62000,"stats":{"damage":120,"combat":9,"projectile_count":3,"spread_split":1,"range":12},"set":"vanguard","power_usage":8,"recipe":{"inputs":{"refined_alloy":3,"circuit_bundle":2,"sensor_shards":2},"credits":6200,"energy":24,"minutes":48,"jobs":["mercenary","shipwright"],"skill":"combat","skill_total":9}},
+    {"code":"tri_lance_emitter","name":"Tri-Lance Emitter","slot":"weapon","rarity":"rare","price":98000,"stats":{"damage":185,"combat":16,"projectile_count":3,"spread_split":1,"range":16},"set":"vanguard","power_usage":10,"recipe":{"inputs":{"refined_alloy":4,"quantum_glass":2,"circuit_bundle":2,"helium3_cells":1},"credits":9200,"energy":30,"minutes":64,"jobs":["mercenary","engineer"],"skill":"warfare","skill_total":12}},
+    {"code":"quad_rail_battery","name":"Quad Rail Battery","slot":"weapon","rarity":"rare","price":124000,"stats":{"damage":240,"combat":22,"projectile_count":4,"spread_split":1,"range":18},"set":"marshal","power_usage":12,"recipe":{"inputs":{"refined_alloy":5,"ferrite_bars":4,"iridium_filament":1,"circuit_bundle":2},"credits":11600,"energy":34,"minutes":78,"jobs":["bounty_hunter","shipwright"],"skill":"combat","skill_total":15}},
+    {"code":"penta_swarm_pods","name":"Penta Swarm Pods","slot":"weapon","rarity":"epic","price":182000,"stats":{"damage":310,"combat":30,"projectile_count":5,"spread_split":1,"range":20},"set":"marshal","power_usage":15,"recipe":{"inputs":{"void_crystal_lattice":1,"iridium_filament":2,"circuit_bundle":3,"helium3_cells":3},"credits":15600,"energy":40,"minutes":96,"jobs":["bounty_hunter","engineer"],"skill":"warfare","skill_total":18}},
+    {"code":"hex_star_barrage","name":"Hex-Star Barrage Cannon","slot":"weapon","rarity":"legendary","price":285000,"stats":{"damage":430,"combat":42,"projectile_count":6,"spread_split":1,"range":24},"set":"vanguard","power_usage":18,"recipe":{"inputs":{"void_crystal_lattice":2,"iridium_filament":3,"quantum_glass":3,"circuit_bundle":4,"helium3_cells":4},"credits":24000,"energy":52,"minutes":140,"jobs":["mercenary","shipwright"],"skill":"warfare","skill_total":22,"base_success":0.74}},
+]
+CRAFTING_LOOP_SET_BASE_MODULES.extend(MULTI_PROJECTILE_WEAPON_MODULES)
+
 def loop_set_recipe_from_module(module: Dict[str, Any]) -> Dict[str, Any]:
     recipe = module["recipe"]
     return {
@@ -2395,6 +4236,32 @@ RECIPE_DROP_BALANCE = {
     "excluded_ranks": ["legendary"],
 }
 
+
+SERVER_EVENT_BALANCE = {
+    "warning_seconds": 7200,
+    "alien_raid_duration_seconds": 7200,
+    "wormhole_control_duration_seconds": 7200,
+    "capture_seconds_required": 1200,
+    "capture_tick_seconds": 60,
+    "reward_wormhole_seconds": 172800,
+    "alien_unique_drop_chance": 0.04,
+    "alien_ultra_multi_projectile_drop_chance": 0.008,
+    "pocket_mining_yield_mult": 2.0,
+    "pocket_artifact_spawn_mult": 2.5,
+    "pocket_ore_spawn_mult": 2.0,
+}
+
+SERVER_EVENT_DEFINITIONS = [
+    {"type":"alien_raid","name":"Alien Raid","cadence":"daily","duration_seconds":7200,"summary":"Wormholes open in safe zones. Alien invaders give double XP to participants and rare actual equipment drops to the last hitter."},
+    {"type":"wormhole_control","name":"Wormhole Control","cadence":"weekly","duration_seconds":7200,"summary":"Faction-control event near the battle-line convergence. Hold the ring for 20 minutes to unlock a two-day faction wormhole."},
+    {"type":"solar_storm_harvest","name":"Solar Storm Harvest","cadence":"rotating","duration_seconds":5400,"summary":"Charged ore signatures flare across the local map. Mining yield is boosted while shields are less reliable."},
+    {"type":"derelict_convoy_break","name":"Derelict Convoy Break","cadence":"rotating","duration_seconds":5400,"summary":"A damaged convoy drifts through contested space. Salvage, ship parts, and escort skirmishes spike."},
+    {"type":"relic_comet","name":"Relic Comet","cadence":"twice_weekly","duration_seconds":7200,"summary":"A comet trail seeds artifact sites and exploration caches, with no recipe drops required."},
+    {"type":"blackout_market_surge","name":"Blackout Market Surge","cadence":"weekly_alt","duration_seconds":5400,"summary":"Sensor blackout briefly increases illicit trade margins and customs risk."},
+]
+
+ALIEN_UNIQUE_MODULE_CODES = ["splitter_flak_mk1", "tri_lance_emitter", "quad_rail_battery", "penta_swarm_pods", "hex_star_barrage"]
+
 def get_crafting_rank_configs() -> List[Dict[str, Any]]:
     configs = RANKED_CRAFTING_BALANCE.get("rank_configs") or []
     return [dict(c) for c in configs]
@@ -2440,6 +4307,7 @@ MODULE_SET_FAMILIES = {'ore_probe_array': {'set_code': 'prospector', 'set_name':
  'bio_stasis_chamber': {'set_code': 'lifeline', 'set_name': 'Lifeline Set', 'loop': 'Medical / Survival'},
  'hazard_sealant_grid': {'set_code': 'lifeline', 'set_name': 'Lifeline Set', 'loop': 'Medical / Survival'},
  'med_bay': {'set_code': 'lifeline', 'set_name': 'Lifeline Set', 'loop': 'Medical / Survival'}}
+MODULE_SET_FAMILIES.update({m['code']: {'set_code': m.get('set') or 'vanguard', 'set_name': f"{(m.get('set') or 'vanguard').title()} Set", 'loop': 'Multi-Target Combat'} for m in MULTI_PROJECTILE_WEAPON_MODULES})
 
 SHIP_SET_BONUS_DEFINITIONS = {'prospector': {'name': 'Prospector Set',
                 'loop': 'Mining',
@@ -3219,6 +5087,41 @@ def migrate() -> None:
         );
 
 
+        CREATE TABLE IF NOT EXISTS server_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_key TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          name TEXT NOT NULL,
+          cadence TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL DEFAULT 'scheduled',
+          starts_at TEXT NOT NULL,
+          warning_at TEXT NOT NULL,
+          ends_at TEXT NOT NULL,
+          resolved_at TEXT,
+          winning_faction_id INTEGER,
+          target_galaxy_id INTEGER,
+          target_planet_id INTEGER,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(event_key, starts_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS server_event_participants (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          event_id INTEGER NOT NULL REFERENCES server_events(id) ON DELETE CASCADE,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          faction_id INTEGER,
+          capture_seconds INTEGER NOT NULL DEFAULT 0,
+          damage_score INTEGER NOT NULL DEFAULT 0,
+          last_hit_count INTEGER NOT NULL DEFAULT 0,
+          reward_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(event_id, player_id)
+        );
+
+
         CREATE TABLE IF NOT EXISTS money_sinks (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
@@ -3536,6 +5439,38 @@ def target_npc_count_for_planet(planet: Dict[str, Any]) -> int:
     return clamp_int(base, 18, 120)
 
 
+NPC_CAREER_LOOP_GROUPS = {
+    "trader": "traders",
+    "quartermaster": "traders",
+    "miner": "miners",
+    "explorer": "explorers",
+    "salvager": "salvagers",
+    "security_pilot": "security",
+    "marshal": "security",
+    "bounty_hunter": "security",
+    "engineer": "service",
+    "dockmaster": "service",
+    "shipwright": "service",
+    "medic": "service",
+    "diplomat": "diplomats",
+    "smuggler": "smugglers",
+    "mercenary": "pirates",
+}
+
+NPC_LOOP_WEIGHT_BASELINE = {
+    "traders": 18,
+    "miners": 18,
+    "explorers": 15,
+    "salvagers": 12,
+    "security": 18,
+    "service": 9,
+    "diplomats": 6,
+    "smugglers": 4,
+    "mercenaries": 3,
+    "pirates": 3,
+}
+
+
 def weighted_npc_career_choice(rng: random.Random, planet: Dict[str, Any]) -> str:
     lawful = int(planet.get("lawfulness") or planet.get("security_level") or 50)
     hostile = int(planet.get("hostility") or planet.get("pirate_activity") or 50)
@@ -3559,6 +5494,15 @@ def weighted_npc_career_choice(rng: random.Random, planet: Dict[str, Any]) -> st
         "mercenary": 4 + hostile // 5,
         "diplomat": 2 + friendly // 12,
     }
+    loop_weights = WORLD_SERVER_BALANCE.get("npc_gameplay_loop_spawn_weights") or {}
+    override_weights = WORLD_SERVER_BALANCE.get("npc_career_spawn_weight_overrides") or {}
+    for career in list(weights.keys()):
+        loop = NPC_CAREER_LOOP_GROUPS.get(career, career)
+        configured = float(loop_weights.get(loop, NPC_LOOP_WEIGHT_BASELINE.get(loop, 10)) or 0)
+        baseline = max(1.0, float(NPC_LOOP_WEIGHT_BASELINE.get(loop, 10) or 10))
+        weights[career] = max(0.01, float(weights[career]) * max(0.0, configured) / baseline)
+        if career in override_weights:
+            weights[career] = max(0.01, float(override_weights.get(career) or 0))
     careers = list(weights.keys())
     return rng.choices(careers, weights=[weights[k] for k in careers], k=1)[0]
 
@@ -3599,6 +5543,8 @@ def ensure_persistent_npc_content(conn: sqlite3.Connection) -> None:
             level_min, level_max = world_level_range_for_planet(conn, int(p["id"]))
             mode_level = min(level_max, max(level_min, level_min + int((level_max - level_min) * 0.35)))
             level = clamp_int(int(rng.triangular(level_min, level_max, mode_level)), level_min, level_max)
+            if pirate_like_role(role, career):
+                level = pirate_level_for_security(level, int(p.get("security_level") or 50), rng)
             rank = clamp_int(1 + level // 9, 1, 10)
             power_base = int((p.get("security_level", 50) + p.get("market_activity", 50) + p.get("defense_strength", 50)) / 3)
             # NPCs have similar opportunities, but worse rolls than equal player specialists.
@@ -3890,8 +5836,91 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
         );
     """)
 
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS parties (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          leader_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS party_members (
+          party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          joined_at TEXT NOT NULL,
+          PRIMARY KEY(party_id, player_id),
+          UNIQUE(player_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS party_invites (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          party_id INTEGER NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+          inviter_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          invitee_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          responded_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS player_friend_requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          requester_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          target_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL,
+          responded_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS player_friends (
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          friend_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(player_id, friend_player_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS player_blocks (
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          blocked_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY(player_id, blocked_player_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS player_trades (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          initiator_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          target_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'pending',
+          initiator_gold INTEGER NOT NULL DEFAULT 0,
+          target_gold INTEGER NOT NULL DEFAULT 0,
+          initiator_locked INTEGER NOT NULL DEFAULT 0,
+          target_locked INTEGER NOT NULL DEFAULT 0,
+          initiator_approved INTEGER NOT NULL DEFAULT 0,
+          target_approved INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          responded_at TEXT,
+          completed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS player_trade_items (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          trade_id INTEGER NOT NULL REFERENCES player_trades(id) ON DELETE CASCADE,
+          side_player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          item_code TEXT NOT NULL,
+          item_name TEXT NOT NULL,
+          qty INTEGER NOT NULL,
+          item_json TEXT NOT NULL DEFAULT '{}',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(trade_id, side_player_id, item_code)
+        );
+    """)
+
 
     # SQLite-safe migration helpers for older generated zips/DBs.
+    existing_user_cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "last_login_at" not in existing_user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN last_login_at TEXT")
     existing_player_cols = {r[1] for r in conn.execute("PRAGMA table_info(players)").fetchall()}
     player_cols = {
         "energy": "INTEGER NOT NULL DEFAULT 100",
@@ -4183,19 +6212,82 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
-    add_cols("players", {"cargo_operation_until":"TEXT", "cargo_operation_started_at":"TEXT", "cargo_operation_type":"TEXT", "cargo_operation_summary":"TEXT", "faction_id":"INTEGER", "planet_mission_cooldown_until":"TEXT", "planet_mission_cooldown_reason":"TEXT", "player_base_docked_id":"INTEGER"})
+    add_cols("users", {"email":"TEXT", "google_sub":"TEXT", "auth_provider":"TEXT NOT NULL DEFAULT 'local'", "approved":"INTEGER NOT NULL DEFAULT 1", "last_login_at":"TEXT"})
+    add_cols("players", {"cargo_operation_until":"TEXT", "cargo_operation_started_at":"TEXT", "cargo_operation_type":"TEXT", "cargo_operation_summary":"TEXT", "faction_id":"INTEGER", "planet_mission_cooldown_until":"TEXT", "planet_mission_cooldown_reason":"TEXT", "player_base_docked_id":"INTEGER", "scan_area_cooldown_until":"TEXT"})
     add_cols("planet_mission_runs", {"reward_items_json":"TEXT NOT NULL DEFAULT '[]'"})
     add_cols("guilds", {"level":"INTEGER NOT NULL DEFAULT 1", "xp":"INTEGER NOT NULL DEFAULT 0", "skill_points":"INTEGER NOT NULL DEFAULT 0", "last_planet_xp_at":"TEXT"})
     add_cols("user_profiles", {"selected_badge_code":"TEXT NOT NULL DEFAULT ''"})
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL AND google_sub != ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+    except sqlite3.OperationalError:
+        pass
+
+    # Server events were added after several prototype DBs already existed.
+    # CREATE TABLE IF NOT EXISTS does not update old SQLite tables, so every
+    # column used by process_server_events/ensure_server_event_schedule must be
+    # evolved explicitly or /api/state can 500 on old saves.
+    add_cols("server_events", {
+        "event_key":"TEXT NOT NULL DEFAULT ''",
+        "event_type":"TEXT NOT NULL DEFAULT 'unknown'",
+        "name":"TEXT NOT NULL DEFAULT 'Server Event'",
+        "cadence":"TEXT NOT NULL DEFAULT ''",
+        "status":"TEXT NOT NULL DEFAULT 'scheduled'",
+        "starts_at":"TEXT",
+        "warning_at":"TEXT",
+        "ends_at":"TEXT",
+        "resolved_at":"TEXT",
+        "winning_faction_id":"INTEGER",
+        "target_galaxy_id":"INTEGER",
+        "target_planet_id":"INTEGER",
+        "metadata_json":"TEXT NOT NULL DEFAULT '{}'",
+        "created_at":"TEXT",
+        "updated_at":"TEXT"
+    })
+    if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='server_events'"):
+        now_s = iso()
+        # Backfill required scheduling fields for legacy rows. Keep old rows visible
+        # rather than dropping them; rows with missing keys become harmless unique rows.
+        conn.execute("UPDATE server_events SET created_at=COALESCE(NULLIF(created_at,''), ?) WHERE created_at IS NULL OR created_at=''", (now_s,))
+        conn.execute("UPDATE server_events SET updated_at=COALESCE(NULLIF(updated_at,''), ?) WHERE updated_at IS NULL OR updated_at=''", (now_s,))
+        conn.execute("UPDATE server_events SET starts_at=COALESCE(NULLIF(starts_at,''), created_at, ?) WHERE starts_at IS NULL OR starts_at=''", (now_s,))
+        conn.execute("UPDATE server_events SET warning_at=COALESCE(NULLIF(warning_at,''), starts_at, created_at, ?) WHERE warning_at IS NULL OR warning_at=''", (now_s,))
+        conn.execute("UPDATE server_events SET ends_at=COALESCE(NULLIF(ends_at,''), starts_at, created_at, ?) WHERE ends_at IS NULL OR ends_at=''", (now_s,))
+        conn.execute("UPDATE server_events SET event_type=COALESCE(NULLIF(event_type,''), 'unknown') WHERE event_type IS NULL OR event_type='' ")
+        conn.execute("UPDATE server_events SET name=COALESCE(NULLIF(name,''), 'Server Event') WHERE name IS NULL OR name='' ")
+        conn.execute("UPDATE server_events SET cadence=COALESCE(cadence, '') WHERE cadence IS NULL")
+        conn.execute("UPDATE server_events SET status=COALESCE(NULLIF(status,''), 'scheduled') WHERE status IS NULL OR status='' ")
+        conn.execute("UPDATE server_events SET metadata_json=COALESCE(NULLIF(metadata_json,''), '{}') WHERE metadata_json IS NULL OR metadata_json='' ")
+        conn.execute("UPDATE server_events SET event_key=COALESCE(NULLIF(event_key,''), event_type || ':' || id) WHERE event_key IS NULL OR event_key='' ")
+        conn.execute("""
+            DELETE FROM server_events
+            WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM server_events
+                GROUP BY event_key, starts_at
+            )
+        """)
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_server_events_event_key_starts_at ON server_events(event_key, starts_at)")
+
+    add_cols("server_event_participants", {"capture_seconds":"INTEGER NOT NULL DEFAULT 0", "damage_score":"INTEGER NOT NULL DEFAULT 0", "last_hit_count":"INTEGER NOT NULL DEFAULT 0", "reward_json":"TEXT NOT NULL DEFAULT '{}'"})
     conn.executescript("""
         CREATE INDEX IF NOT EXISTS idx_map_objects_scope ON map_objects(map_type, galaxy_id, planet_id, kind, state);
         CREATE INDEX IF NOT EXISTS idx_map_objects_key ON map_objects(object_key);
+        CREATE INDEX IF NOT EXISTS idx_server_events_status ON server_events(status, starts_at, ends_at);
+        CREATE INDEX IF NOT EXISTS idx_server_event_participants_event ON server_event_participants(event_id, player_id);
         CREATE INDEX IF NOT EXISTS idx_player_bases_player ON player_bases(player_id);
         CREATE INDEX IF NOT EXISTS idx_player_bases_galaxy ON player_bases(galaxy_id, x_pct, y_pct);
         CREATE INDEX IF NOT EXISTS idx_player_base_research_player ON player_base_research(player_id, status);
         CREATE INDEX IF NOT EXISTS idx_player_base_buildings_player ON player_base_buildings(player_id, status);
         CREATE INDEX IF NOT EXISTS idx_player_map_ops_active ON player_map_operations(player_id, status);
         CREATE INDEX IF NOT EXISTS idx_npc_map_state_scope ON npc_map_state(map_type, galaxy_id, planet_id, action_state);
+        CREATE INDEX IF NOT EXISTS idx_npc_map_state_npc_scope ON npc_map_state(npc_id, map_type, galaxy_id, planet_id);
+        CREATE INDEX IF NOT EXISTS idx_npc_agents_planet_alive ON npc_agents(planet_id, alive, career_code, role);
+        CREATE INDEX IF NOT EXISTS idx_players_location_travel ON players(location_planet_id, travel_mode, travel_until);
+        CREATE INDEX IF NOT EXISTS idx_market_prices_planet_supply ON market_prices(planet_id, commodity_id, supply, demand);
+        CREATE INDEX IF NOT EXISTS idx_planets_galaxy ON planets(galaxy_id, id);
+        CREATE INDEX IF NOT EXISTS idx_events_player_id_desc ON events(player_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_npc_action_log_id_desc ON npc_action_log(id DESC);
         CREATE INDEX IF NOT EXISTS idx_player_storage_scope ON player_storage_items(player_id, galaxy_id, planet_id, item_code);
     """)
     add_cols("galaxies", {"x_pct":"REAL NOT NULL DEFAULT 50", "y_pct":"REAL NOT NULL DEFAULT 50", "faction_id":"INTEGER", "home_depth":"INTEGER NOT NULL DEFAULT 99", "capturable":"INTEGER NOT NULL DEFAULT 1", "center_value":"INTEGER NOT NULL DEFAULT 1", "control_bonus_pct":"INTEGER NOT NULL DEFAULT 3", "war_cooldown_until":"TEXT"})
@@ -4534,6 +6626,9 @@ MAP_STATIONARY_ICON_RADIUS_PCT = 1.35
 MAP_STATIONARY_MIN_GAP_SPACES = 1.0
 MAP_TRAVEL_SECONDS_PER_PCT = 5.8
 MAP_TRAVEL_MIN_SECONDS = 2
+GATE_JUMP_INIT_SECONDS = 3
+AUTO_GATE_JUMP_INIT_SECONDS = 10
+GALAXY_SPAWN_IMMUNITY_SECONDS = 5
 
 
 def map_route_seconds_for_distance(conn: sqlite3.Connection, ship: Dict[str, Any], distance_pct: float, god: bool = False) -> int:
@@ -4648,8 +6743,8 @@ def start_docking_approach(conn: sqlite3.Connection, player: Dict[str, Any], tar
     origin = current_player_map_position(conn, player, "system")
     dest = {"x_pct": float(target.get("x_pct") or 50), "y_pct": float(target.get("y_pct") or 50)}
     distance = pct_distance(origin, dest)
-    seconds = map_route_seconds_for_distance(conn, ship or {}, distance, god)
-    fuel_cost = 0 if god else max(0, int(distance / 18))
+    seconds = fuel_adjusted_route_seconds(conn, player, ship or {}, distance, god)
+    fuel_cost = fuel_adjusted_travel_cost(conn, player, max(0, int(distance / 18)), god)
     spend(conn, pid, fuel=fuel_cost, god=god)
     now = utcnow()
     arrival = now + timedelta(seconds=seconds)
@@ -4678,6 +6773,53 @@ def start_docking_approach(conn: sqlite3.Connection, player: Dict[str, Any], tar
     )
     add_event(conn, pid, "travel", f"Docking approach started to {target.get('name') or 'target'}. ETA {seconds} seconds.", {"etaSeconds": seconds, "target": target.get("id")})
     return {"message": f"Docking approach started to {target.get('name') or 'target'}.", "seconds": seconds, "fuel_cost": fuel_cost, "dockingApproach": True}
+
+
+def start_pirate_station_approach(conn: sqlite3.Connection, player: Dict[str, Any], station: Dict[str, Any], god: bool = False) -> Dict[str, Any]:
+    pid = int(player["id"])
+    current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
+    if not current:
+        raise HTTPException(400, "Current location is unknown")
+    if int(current.get("galaxy_id") or 0) != int(station.get("galaxy_id") or 0):
+        raise HTTPException(409, "Pirate station is in a different galaxy. Jump to that galaxy first.")
+    ship = row(conn, "SELECT * FROM ships WHERE id=?", (player.get("active_ship_id"),)) if player.get("active_ship_id") else None
+    if not ship or ship.get("destroyed"):
+        raise HTTPException(400, "No usable active ship")
+    origin = current_player_map_position(conn, player, "system")
+    dest = {"x_pct": float(station.get("x_pct") or 50), "y_pct": float(station.get("y_pct") or 50)}
+    distance = pct_distance(origin, dest)
+    seconds = fuel_adjusted_route_seconds(conn, player, ship or {}, distance, god)
+    fuel_cost = fuel_adjusted_travel_cost(conn, player, max(0, int(distance / 18)), god)
+    spend(conn, pid, fuel=fuel_cost, god=god)
+    now = utcnow()
+    arrival = now + timedelta(seconds=seconds)
+    clear_player_open_space(conn, pid)
+    clear_player_waypoint(conn, pid)
+    clear_player_intercept(conn, pid)
+    clear_player_route(conn, pid)
+    clear_pirate_station_travel_intent(conn, pid)
+    set_player_route(conn, pid, {
+        "map_type": "system",
+        "origin_x_pct": float(origin.get("x_pct") or 50),
+        "origin_y_pct": float(origin.get("y_pct") or 50),
+        "destination_x_pct": float(dest.get("x_pct") or 50),
+        "destination_y_pct": float(dest.get("y_pct") or 50),
+        "label": f"Approach to {station.get('name') or 'pirate station'}",
+        "started_at": iso(now),
+        "arrival_at": iso(arrival),
+        "route_target_type": "pirate_station",
+        "route_target_id": int(station.get("id") or 0),
+    })
+    set_pirate_station_travel_intent(conn, pid, {"station_id": int(station.get("id") or 0), "god": bool(god), "started_at": iso(now), "arrival_at": iso(arrival)})
+    conn.execute(
+        """UPDATE players
+           SET travel_until=?, travel_destination_id=?, travel_mode='pirate_station',
+               travel_started_at=?, travel_origin_planet_id=?, travel_origin_galaxy_id=?, travel_destination_galaxy_id=?
+           WHERE id=?""",
+        (iso(arrival), int(current["id"]), iso(now), int(current["id"]), int(current["galaxy_id"]), int(current["galaxy_id"]), pid),
+    )
+    add_event(conn, pid, "travel", f"Pirate station approach started to {station.get('name') or 'pirate station'}. ETA {seconds} seconds.", {"etaSeconds": seconds, "stationId": int(station.get("id") or 0)})
+    return {"message": f"Pirate station approach started to {station.get('name') or 'pirate station'}.", "seconds": seconds, "fuel_cost": fuel_cost, "pirateStationApproach": True}
 
 
 def galaxy_path(conn: sqlite3.Connection, from_gid: int, to_gid: int) -> List[int]:
@@ -4744,11 +6886,8 @@ def start_galaxy_route_segment(conn: sqlite3.Connection, player: Dict[str, Any],
     if not target_planet:
         raise HTTPException(404, "Destination gate disappeared")
     route_danger = int((planet_control_effects(current_planet).get("travel_danger", 20) + planet_control_effects(target_planet).get("travel_danger", 20)) / 2)
-    map_distance = pct_distance(
-        {"x_pct": float(seg.get("from_x_pct") or 50), "y_pct": float(seg.get("from_y_pct") or 50)},
-        {"x_pct": float(seg.get("to_x_pct") or 50), "y_pct": float(seg.get("to_y_pct") or 50)},
-    )
-    seconds = map_route_seconds_for_distance(conn, ship or {}, map_distance, god)
+    auto_path = len(segments) > 1
+    seconds = AUTO_GATE_JUMP_INIT_SECONDS if auto_path else GATE_JUMP_INIT_SECONDS
     now = utcnow()
     arrival = now + timedelta(seconds=seconds)
     route_meta = {
@@ -4762,7 +6901,11 @@ def start_galaxy_route_segment(conn: sqlite3.Connection, player: Dict[str, Any],
         "route_segment_index": index,
         "route_final_galaxy_id": int(segments[-1]["to_galaxy_id"]),
         "route_final_galaxy_name": segments[-1].get("to_galaxy_name"),
-        "label": f"Gate route segment {index + 1}/{len(segments)}: {seg.get('from_galaxy_name')} -> {seg.get('to_galaxy_name')}",
+        "route_auto_path": auto_path,
+        "route_danger": route_danger,
+        "gate_jump_status": "initiated",
+        "gate_jump_seconds": seconds,
+        "label": f"Gate jump initiated {index + 1}/{len(segments)}: {seg.get('from_galaxy_name')} -> {seg.get('to_galaxy_name')}",
         "started_at": iso(now),
         "arrival_at": iso(arrival),
     }
@@ -4805,18 +6948,19 @@ def advance_player_galaxy_route(conn: sqlite3.Connection, player: Dict[str, Any]
             int(player["id"]),
         ),
     )
+    set_galaxy_spawn_immunity(conn, int(player["id"]), int(seg.get("to_galaxy_id") or 0))
     fresh = get_player(conn, player["id"])
     if idx + 1 < len(segments):
         ship = row(conn, "SELECT * FROM ships WHERE id=?", (fresh.get("active_ship_id"),)) or {}
         start_galaxy_route_segment(conn, fresh, segments, idx + 1, ship, False, paid=True)
-        add_event(conn, player["id"], "travel", f"Auto-advanced gate route to {segments[idx + 1].get('to_galaxy_name')}.", {"segment": idx + 2, "segments": len(segments)})
+        add_event(conn, player["id"], "travel", f"Auto-advanced gate route to {segments[idx + 1].get('to_galaxy_name')}.", {"segment": idx + 2, "segments": len(segments), "spawn_immunity_seconds": GALAXY_SPAWN_IMMUNITY_SECONDS})
         return get_player(conn, player["id"])
     clear_player_open_space(conn, player["id"])
     clear_player_waypoint(conn, player["id"])
     clear_player_intercept(conn, player["id"])
     clear_player_route(conn, player["id"])
     conn.execute("UPDATE players SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL, travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL, travel_destination_galaxy_id=NULL WHERE id=?", (player["id"],))
-    add_event(conn, player["id"], "travel", f"Arrived in {seg.get('to_galaxy_name')} at {dest['name']}. Multi-galaxy route complete.", {"segments": len(segments)})
+    add_event(conn, player["id"], "travel", f"Arrived in {seg.get('to_galaxy_name')} at {dest['name']}. Multi-galaxy route complete. Spawn immunity active for {GALAXY_SPAWN_IMMUNITY_SECONDS} seconds.", {"segments": len(segments), "spawn_immunity_seconds": GALAXY_SPAWN_IMMUNITY_SECONDS})
     return get_player(conn, player["id"])
 
 
@@ -4839,6 +6983,32 @@ def app_state_delete(conn: sqlite3.Connection, key: str) -> None:
     conn.execute("DELETE FROM app_state WHERE key=?", (key,))
 
 
+def galaxy_spawn_immunity_key(actor_ref: str) -> str:
+    return f"galaxy_spawn_immunity:{actor_ref}"
+
+
+def set_galaxy_spawn_immunity(conn: sqlite3.Connection, player_id: int, galaxy_id: Optional[int] = None, seconds: int = GALAXY_SPAWN_IMMUNITY_SECONDS) -> None:
+    actor_ref = f"player:{int(player_id)}"
+    app_state_put_json(conn, galaxy_spawn_immunity_key(actor_ref), {
+        "until": iso(utcnow() + timedelta(seconds=max(1, int(seconds or GALAXY_SPAWN_IMMUNITY_SECONDS)))),
+        "galaxy_id": int(galaxy_id or 0),
+        "reason": "galaxy_spawn",
+    })
+
+
+def galaxy_spawn_immunity_until(conn: sqlite3.Connection, actor_ref: str) -> Optional[datetime]:
+    ref = str(actor_ref or "")
+    if not ref.startswith("player:"):
+        return None
+    data = app_state_get_json(conn, galaxy_spawn_immunity_key(ref))
+    until = parse_dt(data.get("until")) if data else None
+    if until and until > utcnow():
+        return until
+    if until:
+        app_state_delete(conn, galaxy_spawn_immunity_key(ref))
+    return None
+
+
 def intercept_state_key(player_id: int) -> str:
     return f"player:{int(player_id)}:active_intercept"
 
@@ -4849,7 +7019,7 @@ def normalize_traveler_target_ref(raw: str) -> str:
         raise HTTPException(400, "Invalid traveler target")
     if target_ref.startswith("traveler:"):
         return target_ref
-    if target_ref.startswith("npc:") or target_ref.startswith("player:"):
+    if target_ref.startswith("npc:") or target_ref.startswith("player:") or target_ref.startswith("security:"):
         return target_ref
     if ":" not in target_ref:
         return "traveler:" + target_ref
@@ -4901,6 +7071,21 @@ def clear_player_open_space(conn: sqlite3.Connection, player_id: int) -> None:
     app_state_delete(conn, open_space_state_key(player_id))
 
 
+
+
+def pirate_station_travel_state_key(player_id: int) -> str:
+    return f"player:{int(player_id)}:pirate_station_travel"
+
+def set_pirate_station_travel_intent(conn: sqlite3.Connection, player_id: int, meta: Dict[str, Any]) -> None:
+    app_state_put_json(conn, pirate_station_travel_state_key(player_id), meta)
+
+def get_pirate_station_travel_intent(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    return app_state_get_json(conn, pirate_station_travel_state_key(player_id))
+
+def clear_pirate_station_travel_intent(conn: sqlite3.Connection, player_id: int) -> None:
+    app_state_delete(conn, pirate_station_travel_state_key(player_id))
+
+
 def route_state_key(player_id: int) -> str:
     return f"player:{int(player_id)}:active_route"
 
@@ -4915,6 +7100,64 @@ def get_player_route(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]
 
 def clear_player_route(conn: sqlite3.Connection, player_id: int) -> None:
     app_state_delete(conn, route_state_key(player_id))
+
+
+def clear_player_runtime_state(conn: sqlite3.Connection, player_id: int, *, clear_battle: bool = True) -> None:
+    """Clear transient route/combat/action state without deleting the player's account.
+
+    This is intentionally used by admin recovery/reset flows. The stuck-map symptom
+    usually comes from stale travel_until/app_state route rows surviving a failed or
+    interrupted action.
+    """
+    pid = int(player_id)
+
+    # Map travel / open-space state.
+    clear_player_intercept(conn, pid)
+    clear_player_waypoint(conn, pid)
+    clear_player_open_space(conn, pid)
+    clear_player_route(conn, pid)
+    clear_pirate_station_travel_intent(conn, pid)
+    try:
+        clear_planet_mission_travel_intent(conn, pid)
+    except NameError:
+        pass
+
+    conn.execute(
+        """UPDATE players
+           SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+               travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL,
+               travel_destination_galaxy_id=NULL, player_base_docked_id=NULL
+           WHERE id=?""",
+        (pid,),
+    )
+
+    # Unstick map objects/resources locked by interrupted operations.
+    conn.execute(
+        """UPDATE map_objects
+           SET locked_by_player_id=NULL, operation_type='', operation_until=NULL,
+               state=CASE WHEN state IN ('being_mined','being_salvaged','being_investigated','locked') THEN 'available' ELSE state END,
+               updated_at=?
+           WHERE locked_by_player_id=?""",
+        (iso(), pid),
+    )
+    conn.execute(
+        "UPDATE pending_cargo_operations SET status='cancelled', completed_at=? WHERE player_id=? AND status='active'",
+        (iso(), pid),
+    )
+
+    if clear_battle:
+        active_battles = rows(conn, "SELECT id FROM combat_battles WHERE player_id=? AND status='active'", (pid,))
+        for b in active_battles:
+            try:
+                app_state_delete(conn, combat_session_key(int(b['id'])))
+            except NameError:
+                pass
+        conn.execute(
+            "UPDATE combat_battles SET status='complete', outcome='reset', winner=NULL, summary='Reset by admin recovery.', completed_at=? WHERE player_id=? AND status='active'",
+            (iso(), pid),
+        )
+        for key in (f"combat_active_actor:player:{pid}", f"combat_immunity:player:{pid}"):
+            app_state_delete(conn, key)
 
 
 def player_is_in_open_space(conn: sqlite3.Connection, player_id: int) -> bool:
@@ -5162,6 +7405,28 @@ def resolve_completed_travel(conn: sqlite3.Connection, player: Dict[str, Any]) -
         if advanced:
             return advanced
         mode = "galaxy"
+    if mode == "pirate_station":
+        intent = get_pirate_station_travel_intent(conn, player["id"])
+        station_id = int(intent.get("station_id") or 0)
+        clear_player_open_space(conn, player["id"])
+        clear_player_waypoint(conn, player["id"])
+        clear_player_intercept(conn, player["id"])
+        clear_player_route(conn, player["id"])
+        clear_pirate_station_travel_intent(conn, player["id"])
+        conn.execute("""
+            UPDATE players
+            SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+                travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL, travel_destination_galaxy_id=NULL
+            WHERE id=?
+        """, (player["id"],))
+        if station_id:
+            fresh_player = get_player(conn, player["id"])
+            try:
+                result = begin_pirate_station_run(conn, fresh_player, station_id)
+                add_event(conn, player["id"], "travel", f"Docked inside pirate station {result.get('station', {}).get('name') or station_id}.", {"stationId": station_id, "mode": "pirate_station"})
+            except HTTPException as ex:
+                add_event(conn, player["id"], "travel", f"Pirate station docking failed: {ex.detail}", {"stationId": station_id})
+        return get_player(conn, player["id"])
     clear_player_open_space(conn, player["id"])
     clear_player_waypoint(conn, player["id"])
     clear_player_intercept(conn, player["id"])
@@ -5178,7 +7443,8 @@ def resolve_completed_travel(conn: sqlite3.Connection, player: Dict[str, Any]) -
         dg = int(dest.get("galaxy_id"))
         visited_galaxies.extend([og, dg])
         galaxy_routes.append(route_key(og, dg))
-        msg = f"Arrived in {dest['dest_galaxy_name']} at {dest['name']}."
+        set_galaxy_spawn_immunity(conn, int(player["id"]), dg)
+        msg = f"Arrived in {dest['dest_galaxy_name']} at {dest['name']}. Spawn immunity active for {GALAXY_SPAWN_IMMUNITY_SECONDS} seconds."
     else:
         if origin:
             local_routes.append(route_key(origin["id"], dest["id"]))
@@ -5227,7 +7493,7 @@ def build_travel_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict
     progress = max(0.0, min(1.0, elapsed / total_seconds)) if active else 1.0
     intercept_meta = get_player_intercept(conn, player["id"]) if (player.get("travel_mode") == "intercept") else {}
     waypoint_meta = get_player_waypoint(conn, player["id"]) if (player.get("travel_mode") == "waypoint") else {}
-    route_meta = get_player_route(conn, player["id"]) if active and player.get("travel_mode") in {"local", "galaxy", "dock", "galaxy_route"} else {}
+    route_meta = get_player_route(conn, player["id"]) if active and player.get("travel_mode") in {"local", "galaxy", "dock", "galaxy_route", "planet_mission"} else {}
     open_space_meta = get_player_open_space(conn, player["id"]) if not active else {}
     docked_base_row = docked_base(conn, player) if not active else None
     travel_meta = intercept_meta or waypoint_meta or route_meta
@@ -5280,30 +7546,61 @@ def build_travel_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict
         "route_final_galaxy_id": route_meta.get("route_final_galaxy_id") if route_meta else None,
         "route_final_galaxy_name": route_meta.get("route_final_galaxy_name") if route_meta else None,
         "route_label": route_meta.get("label") if route_meta else None,
+        "route_auto_path": bool(route_meta.get("route_auto_path")) if route_meta else False,
+        "gate_jump_status": route_meta.get("gate_jump_status") if route_meta else None,
+        "gate_jump_seconds": int(route_meta.get("gate_jump_seconds") or 0) if route_meta else 0,
+        "spawn_immunity_seconds": GALAXY_SPAWN_IMMUNITY_SECONDS,
     }
+
+
+_PLANET_VISUAL_CACHE: Dict[str, str] = {}
 
 
 def planet_visual_payload(planet: Dict[str, Any]) -> str:
     typ = str(planet.get("type") or "").lower()
     economy = str(planet.get("economy_type") or planet_economy_type(planet)).lower()
-    initials = "".join([x[:1] for x in str(planet.get("name") or "PL").split()[:2]]).upper() or "PL"
+    name = str(planet.get("name") or "PL")
+    cache_key = f"{typ}|{economy}|{name}"
+    cached = _PLANET_VISUAL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    initials = "".join([x[:1] for x in name.split()[:2]]).upper() or "PL"
     if "station" in typ or "freeport" in typ or "gate" in typ:
         color = {"trade":"35f2ff", "industrial":"ffc247", "research":"a65cff", "black_market":"ff4d9d"}.get(economy, "8cffff")
         svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><rect width='96' height='96' rx='18' fill='#02060b'/><g fill='none' stroke='#{color}' stroke-width='4'><path d='M22 48h52M48 22v52'/><circle cx='48' cy='48' r='23'/><path d='M14 48h14M68 48h14M48 14v14M48 68v14'/></g><rect x='36' y='36' width='24' height='24' rx='5' fill='#{color}' fill-opacity='.25' stroke='#{color}'/><text x='48' y='55' text-anchor='middle' font-family='Segoe UI,Arial' font-size='14' font-weight='900' fill='#{color}'>{initials[:2]}</text></svg>"""
-        return "data:image/svg+xml;utf8," + quote(svg)
-    if any(k in typ for k in ("uninhab", "barren", "toxic", "frozen", "volcanic", "irradiated", "gas giant", "desert tomb")):
+        out = "data:image/svg+xml;utf8," + quote(svg)
+    elif any(k in typ for k in ("uninhab", "barren", "toxic", "frozen", "volcanic", "irradiated", "gas giant", "desert tomb")):
         color = {"toxic":"8cff76", "frozen":"9ee8ff", "volcanic":"ff754d", "irradiated":"d6ff58", "gas":"d5a6ff", "barren":"b8a88d"}.get(next((k for k in ["toxic","frozen","volcanic","irradiated","gas","barren"] if k in typ), "barren"), "b8a88d")
         svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><radialGradient id='u' cx='32%' cy='28%' r='70%'><stop offset='0%' stop-color='#{color}' stop-opacity='.8'/><stop offset='62%' stop-color='#172028'/><stop offset='100%' stop-color='#02060b'/></radialGradient></defs><rect width='96' height='96' rx='18' fill='#02060b'/><circle cx='48' cy='48' r='31' fill='url(#u)' stroke='#{color}' stroke-width='2'/><path d='M25 40l9 5 11-12 12 15 13-7' stroke='#{color}' stroke-opacity='.48' stroke-width='4' fill='none'/><circle cx='35' cy='58' r='4' fill='#{color}' fill-opacity='.55'/><circle cx='60' cy='31' r='3' fill='#{color}' fill-opacity='.45'/><text x='48' y='75' text-anchor='middle' font-family='Segoe UI,Arial' font-size='10' font-weight='900' fill='#{color}'>WILD</text></svg>"""
-        return "data:image/svg+xml;utf8," + quote(svg)
-    color = {"industrial":"ffc247", "extraction":"4dff91", "trade":"35f2ff", "black_market":"ff4d9d", "research":"a65cff", "core":"8cffff", "balanced":"35f2ff"}.get(economy, "35f2ff")
-    svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><radialGradient id='p' cx='35%' cy='30%' r='70%'><stop offset='0%' stop-color='#{color}' stop-opacity='.85'/><stop offset='56%' stop-color='#102736'/><stop offset='100%' stop-color='#02060b'/></radialGradient></defs><rect width='96' height='96' rx='18' fill='#02060b'/><circle cx='48' cy='48' r='31' fill='url(#p)' stroke='#{color}' stroke-width='2'/><path d='M20 58 C35 50 58 74 78 42' stroke='#{color}' stroke-opacity='.45' stroke-width='4' fill='none'/><text x='48' y='55' text-anchor='middle' font-family='Segoe UI,Arial' font-size='20' font-weight='900' fill='#{color}'>{initials[:2]}</text></svg>"""
-    return "data:image/svg+xml;utf8," + quote(svg)
+        out = "data:image/svg+xml;utf8," + quote(svg)
+    else:
+        color = {"industrial":"ffc247", "extraction":"4dff91", "trade":"35f2ff", "black_market":"ff4d9d", "research":"a65cff", "core":"8cffff", "balanced":"35f2ff"}.get(economy, "35f2ff")
+        svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 96 96'><defs><radialGradient id='p' cx='35%' cy='30%' r='70%'><stop offset='0%' stop-color='#{color}' stop-opacity='.85'/><stop offset='56%' stop-color='#102736'/><stop offset='100%' stop-color='#02060b'/></radialGradient></defs><rect width='96' height='96' rx='18' fill='#02060b'/><circle cx='48' cy='48' r='31' fill='url(#p)' stroke='#{color}' stroke-width='2'/><path d='M20 58 C35 50 58 74 78 42' stroke='#{color}' stroke-opacity='.45' stroke-width='4' fill='none'/><text x='48' y='55' text-anchor='middle' font-family='Segoe UI,Arial' font-size='20' font-weight='900' fill='#{color}'>{initials[:2]}</text></svg>"""
+        out = "data:image/svg+xml;utf8," + quote(svg)
+    if len(_PLANET_VISUAL_CACHE) > 512:
+        _PLANET_VISUAL_CACHE.clear()
+    _PLANET_VISUAL_CACHE[cache_key] = out
+    return out
+
+
+_GALAXY_VISUAL_CACHE: Dict[str, str] = {}
+
 
 def galaxy_visual_payload(galaxy: Dict[str, Any]) -> str:
-    color = {"green":"4dff91","purple":"a65cff","orange":"ffae35","blue":"35f2ff"}.get(str(galaxy.get("color") or "blue"), "35f2ff")
-    initials = "".join([x[:1] for x in str(galaxy.get("name") or "GX").split()[:2]]).upper() or "GX"
+    raw_color = str(galaxy.get("color") or "blue")
+    name = str(galaxy.get("name") or "GX")
+    cache_key = f"{raw_color}|{name}"
+    cached = _GALAXY_VISUAL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    color = {"green":"4dff91","purple":"a65cff","orange":"ffae35","blue":"35f2ff"}.get(raw_color, "35f2ff")
+    initials = "".join([x[:1] for x in name.split()[:2]]).upper() or "GX"
     svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'><defs><radialGradient id='g' cx='50%' cy='50%' r='55%'><stop offset='0%' stop-color='#{color}' stop-opacity='.95'/><stop offset='45%' stop-color='#{color}' stop-opacity='.35'/><stop offset='100%' stop-color='#02060b' stop-opacity='0'/></radialGradient></defs><rect width='120' height='120' fill='#02060b'/><circle cx='60' cy='60' r='47' fill='url(#g)'/><ellipse cx='60' cy='60' rx='53' ry='18' fill='none' stroke='#{color}' stroke-opacity='.55' stroke-width='3' transform='rotate(-22 60 60)'/><text x='60' y='68' text-anchor='middle' font-family='Segoe UI,Arial' font-size='24' font-weight='900' fill='#{color}'>{initials[:2]}</text></svg>"""
-    return "data:image/svg+xml;utf8," + quote(svg)
+    out = "data:image/svg+xml;utf8," + quote(svg)
+    if len(_GALAXY_VISUAL_CACHE) > 256:
+        _GALAXY_VISUAL_CACHE.clear()
+    _GALAXY_VISUAL_CACHE[cache_key] = out
+    return out
 
 
 
@@ -5317,6 +7614,15 @@ def deterministic_between(a: Dict[str, Any], b: Dict[str, Any], progress: float)
 
 def pct_distance(a: Dict[str, Any], b: Dict[str, Any]) -> float:
     return ((float(a.get("x_pct") or 50) - float(b.get("x_pct") or 50)) ** 2 + (float(a.get("y_pct") or 50) - float(b.get("y_pct") or 50)) ** 2) ** 0.5
+
+
+RADAR_MAP_PIXEL_ASPECT_Y = 7800.0 / 12000.0
+
+
+def radar_distance_pct(a: Dict[str, Any], b: Dict[str, Any]) -> float:
+    dx = float(a.get("x_pct") or 50) - float(b.get("x_pct") or 50)
+    dy = (float(a.get("y_pct") or 50) - float(b.get("y_pct") or 50)) * RADAR_MAP_PIXEL_ASPECT_Y
+    return (dx ** 2 + dy ** 2) ** 0.5
 
 
 def is_uninhabitable_planet_type(value: str) -> bool:
@@ -5586,6 +7892,62 @@ def active_ship_for_player(conn: sqlite3.Connection, player: Dict[str, Any]) -> 
     return ship
 
 
+def ship_scan_area_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]], map_type: str = "system") -> Dict[str, Any]:
+    cfg = SCAN_AREA_BALANCE
+    radar_power = 0.0
+    explicit_radius = 0.0
+    explicit_cooldown_reduction = 0.0
+    explicit_duration_bonus = 0.0
+    if ship:
+        try:
+            for m in ship_installed_modules(conn, int(ship["id"])):
+                stats = m.get("stats") or {}
+                durability = max(0.1, float(m.get("durability") or 100) / 100.0)
+                radar_strength = float(stats.get("radar_strength") or 0)
+                radar_range = float(stats.get("radar_range") or 0)
+                scanning = float(stats.get("scanning") or 0)
+                ping_radius = float(stats.get("scan_ping_radius") or stats.get("scan_radius") or 0)
+                cooldown_reduction = float(stats.get("scan_cooldown_reduction") or stats.get("scan_ping_cooldown") or 0)
+                duration_bonus = float(stats.get("scan_blip_duration") or stats.get("scan_duration") or 0)
+                radar_power += (radar_strength + radar_range + scanning * 0.35 + ping_radius * 2.0) * durability
+                explicit_radius += ping_radius * durability
+                explicit_cooldown_reduction += cooldown_reduction * durability
+                explicit_duration_bonus += duration_bonus * durability
+        except Exception:
+            radar_power = explicit_radius = explicit_cooldown_reduction = explicit_duration_bonus = 0.0
+    ratio = max(0.0, min(1.0, radar_power / max(1.0, float(cfg["radar_power_for_max"]))))
+    radius = float(cfg["base_radius_pct"]) + (float(cfg["max_radius_pct"]) - float(cfg["base_radius_pct"])) * ratio
+    if explicit_radius > 0:
+        radius = max(radius, float(cfg["base_radius_pct"]) + explicit_radius * 0.85)
+    if map_type == "galaxy":
+        radius *= 0.72
+    radius = round(max(float(cfg["base_radius_pct"]) * (0.72 if map_type == "galaxy" else 1.0), min(float(cfg["max_radius_pct"]), radius)), 2)
+    duration_bonus = min(float(cfg["max_duration_bonus_seconds"]), max(explicit_duration_bonus, ratio * float(cfg["max_duration_bonus_seconds"])))
+    cooldown_reduction = max(explicit_cooldown_reduction, ratio * (float(cfg["base_cooldown_seconds"]) - float(cfg["min_cooldown_seconds"])))
+    cooldown = int(round(max(float(cfg["min_cooldown_seconds"]), float(cfg["base_cooldown_seconds"]) - cooldown_reduction)))
+    duration = int(round(float(cfg["base_duration_seconds"]) + duration_bonus))
+    return {
+        "radius_pct": radius,
+        "duration_seconds": duration,
+        "cooldown_seconds": cooldown,
+        "animation_seconds": float(cfg["ping_animation_seconds"]),
+        "radar_power": round(radar_power, 2),
+    }
+
+
+def scan_area_profile_for_player(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str = "system") -> Dict[str, Any]:
+    profile = ship_scan_area_profile(conn, active_ship_for_player(conn, player), map_type)
+    now = utcnow()
+    ready_at = parse_dt(player.get("scan_area_cooldown_until"))
+    remaining = max(0, int(math.ceil(((ready_at or now) - now).total_seconds()))) if ready_at else 0
+    profile.update({
+        "cooldown_until": player.get("scan_area_cooldown_until") if remaining > 0 else None,
+        "cooldown_active": remaining > 0,
+        "remaining_seconds": remaining,
+    })
+    return profile
+
+
 def player_map_center(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
     travel = build_travel_state(conn, player)
     by_id = {int(n["id"]): n for n in nodes if str(n.get("id") or "").isdigit()}
@@ -5613,19 +7975,513 @@ def player_map_center(conn: sqlite3.Connection, player: Dict[str, Any], map_type
     return by_id.get(current_key) or (nodes[0] if nodes else {"x_pct": 50, "y_pct": 50})
 
 
-def annotate_and_filter_by_player_radar(conn: sqlite3.Connection, player: Dict[str, Any], nodes: List[Dict[str, Any]], objects: List[Dict[str, Any]], map_type: str) -> List[Dict[str, Any]]:
+def player_has_god_mode(conn: sqlite3.Connection, player: Optional[Dict[str, Any]]) -> bool:
+    if not player:
+        return False
+    if bool(player.get("god_mode")):
+        return True
+    user_id = player.get("user_id")
+    if not user_id:
+        return False
+    return bool(scalar(conn, "SELECT COALESCE(god_mode,0) FROM users WHERE id=?", (int(user_id),)) or 0)
+
+
+def player_radar_centers(conn: sqlite3.Connection, player: Dict[str, Any], nodes: List[Dict[str, Any]], map_type: str) -> List[Dict[str, Any]]:
+    centers: List[Dict[str, Any]] = []
     ship = active_ship_for_player(conn, player)
-    radar_range = ship_radar_range_pct(conn, ship, map_type)
-    center = player_map_center(conn, player, map_type, nodes)
+    centers.append({"center": player_map_center(conn, player, map_type, nodes), "range": ship_radar_range_pct(conn, ship, map_type), "source": "self"})
+
+    party = active_party_for_player(conn, player["id"]) if "active_party_for_player" in globals() else None
+    current_scope = current_map_scope(conn, player, map_type)
+    if party:
+        for member_id in party_member_ids(conn, int(party["id"])):
+            if int(member_id) == int(player["id"]):
+                continue
+            member = row(conn, "SELECT * FROM players WHERE id=?", (int(member_id),))
+            if not member:
+                continue
+            if map_type == "system":
+                member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (member.get("location_planet_id"),)) or {}
+                if int(member_planet.get("galaxy_id") or 0) != int(current_scope.get("galaxy_id") or 0):
+                    continue
+            mship = active_ship_for_player(conn, member)
+            centers.append({"center": player_map_center(conn, member, map_type, nodes), "range": ship_radar_range_pct(conn, mship, map_type), "source": f"party:{member_id}"})
+    return centers
+
+
+def point_visible_to_player_radar(conn: sqlite3.Connection, player: Dict[str, Any], nodes: List[Dict[str, Any]], obj: Dict[str, Any], map_type: str, centers: Optional[List[Dict[str, Any]]] = None) -> bool:
+    centers = centers if centers is not None else player_radar_centers(conn, player, nodes, map_type)
+    for c in centers:
+        if radar_distance_pct(c["center"], obj) <= float(c.get("range") or 0):
+            return True
+    return False
+
+
+def annotate_and_filter_by_player_radar(conn: sqlite3.Connection, player: Dict[str, Any], nodes: List[Dict[str, Any]], objects: List[Dict[str, Any]], map_type: str) -> List[Dict[str, Any]]:
+    centers = player_radar_centers(conn, player, nodes, map_type)
+    admin_spawn_visibility = player_has_god_mode(conn, player)
     visible: List[Dict[str, Any]] = []
     for obj in objects:
         # The local player is rendered from travel_state only. Never re-emit player:self as traffic.
         if obj.get("id") == "player:self" or (obj.get("kind") == "self"):
             continue
-        d = pct_distance(center, obj)
-        if d <= radar_range:
-            visible.append({**obj, "radarVisible": True, "radarDistancePct": round(d, 2), "radarRangePct": radar_range})
+        if obj.get("securityDefense"):
+            visible.append({**obj, "radarVisible": True, "radarBypass": obj.get("radarBypass") or "security_defense", "radarSource": obj.get("radarSource") or "security_grid"})
+            continue
+        best = None
+        for c in centers:
+            d = radar_distance_pct(c["center"], obj)
+            if d <= float(c["range"]):
+                if best is None or d < best[0]:
+                    best = (d, c)
+        if best:
+            d, c = best
+            visible.append({**obj, "radarVisible": True, "radarDistancePct": round(d, 2), "radarRangePct": float(c["range"]), "radarSource": c.get("source")})
+        elif admin_spawn_visibility and obj.get("adminSpawned"):
+            distances = [(radar_distance_pct(c["center"], obj), c) for c in centers]
+            d, c = min(distances, key=lambda item: item[0]) if distances else (0, {"range": 0, "source": "admin"})
+            visible.append({**obj, "radarVisible": False, "radarBypass": "admin_spawn", "radarDistancePct": round(d, 2), "radarRangePct": float(c["range"]), "radarSource": c.get("source")})
     return visible
+
+
+def cleanup_scan_area_rows(conn: sqlite3.Connection) -> None:
+    now_s = iso()
+    conn.execute(
+        "UPDATE map_objects SET state='expired', updated_at=? WHERE kind IN ('scan_blip','scan_ping') AND state NOT IN ('expired','deleted') AND expires_at IS NOT NULL AND expires_at<=?",
+        (now_s, now_s),
+    )
+
+
+def scan_blip_class_for_object(obj: Dict[str, Any]) -> str:
+    kind = str(obj.get("kind") or "").lower()
+    role = str(obj.get("role") or obj.get("career_code") or obj.get("code") or obj.get("name") or "").lower()
+    if kind in {"npc", "player"} or obj.get("attackable"):
+        if obj.get("hostile") or obj.get("attackable") or any(k in role for k in ("pirate", "raider", "alien", "bounty", "hostile")):
+            return "hostile_ship"
+        return "ship"
+    if kind == "ore":
+        return "ore"
+    if kind == "salvage":
+        return "salvage"
+    if kind == "exploration":
+        return "exploration"
+    if kind == "pirate_station":
+        return "station"
+    if kind == "player_base":
+        return "base"
+    if kind in {"server_event", "war_zone"}:
+        return "event"
+    return "contact"
+
+
+def scan_blip_label(blip_class: str) -> str:
+    return {
+        "hostile_ship": "Hostile Ship",
+        "ship": "Ship",
+        "ore": "Ore",
+        "salvage": "Wreck",
+        "exploration": "Signal",
+        "station": "Station",
+        "base": "Base",
+        "event": "Event",
+    }.get(str(blip_class or "contact"), "Contact")
+
+
+def scan_area_scope_values(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str) -> Tuple[int, int]:
+    scope = current_map_scope(conn, player, map_type)
+    return int(scope.get("galaxy_id") or 0), int(scope.get("planet_id") or 0)
+
+
+def object_scan_session_digest(player: Dict[str, Any]) -> str:
+    raw = str(player.get("_session_token") or f"player:{player.get('id')}" or "")
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def object_scan_target_key(obj: Dict[str, Any]) -> str:
+    if obj.get("sourceTargetKey"):
+        return str(obj.get("sourceTargetKey"))
+    if obj.get("targetScanKey"):
+        return str(obj.get("targetScanKey"))
+    kind = str(obj.get("kind") or obj.get("targetType") or "object").lower()
+    raw = (
+        obj.get("objectKey")
+        or obj.get("id")
+        or obj.get("siteId")
+        or obj.get("salvageSiteId")
+        or obj.get("explorationSiteId")
+        or obj.get("stationId")
+        or obj.get("baseId")
+        or obj.get("combatTargetRef")
+        or obj.get("name")
+        or obj.get("label")
+        or "unknown"
+    )
+    return f"{kind}:{raw}"
+
+
+def object_scan_row_key(player: Dict[str, Any], galaxy_id: int, map_type: str, target_key: str) -> str:
+    digest = hashlib.sha1(str(target_key).encode("utf-8")).hexdigest()[:18]
+    return f"targetscan:{int(player['id'])}:{object_scan_session_digest(player)}:{int(galaxy_id)}:{map_type}:{digest}"
+
+
+def object_scan_prefix(player: Dict[str, Any], galaxy_id: int, map_type: str) -> str:
+    return f"targetscan:{int(player['id'])}:{object_scan_session_digest(player)}:{int(galaxy_id)}:{map_type}:%"
+
+
+def cleanup_object_scan_rows(conn: sqlite3.Connection, player: Dict[str, Any], current_galaxy_id: int) -> None:
+    prefix = f"targetscan:{int(player['id'])}:{object_scan_session_digest(player)}:%"
+    conn.execute(
+        "DELETE FROM map_objects WHERE kind='target_scan' AND object_key LIKE ? AND galaxy_id<>?",
+        (prefix, int(current_galaxy_id or 0)),
+    )
+
+
+def object_scan_known_targets(conn: sqlite3.Connection, player: Dict[str, Any], galaxy_id: int, map_type: str) -> Dict[str, Dict[str, Any]]:
+    if not galaxy_id:
+        return {}
+    known: Dict[str, Dict[str, Any]] = {}
+    for obj in rows(conn, """
+        SELECT * FROM map_objects
+        WHERE kind='target_scan' AND state='available' AND galaxy_id=? AND map_type=? AND object_key LIKE ?
+        ORDER BY id DESC LIMIT 250
+    """, (int(galaxy_id), map_type, object_scan_prefix(player, int(galaxy_id), map_type))):
+        meta = decode_json(obj.get("metadata_json"), {}) or {}
+        target_key = str(meta.get("targetKey") or "")
+        if target_key:
+            known[target_key] = meta
+    return known
+
+
+def annotate_object_scan_unlocks(conn: sqlite3.Connection, player: Dict[str, Any], objects: List[Dict[str, Any]], map_type: str, galaxy_id: int) -> List[Dict[str, Any]]:
+    known = object_scan_known_targets(conn, player, int(galaxy_id or 0), map_type)
+    for obj in objects:
+        key = object_scan_target_key(obj)
+        meta = known.get(key)
+        if not meta:
+            continue
+        obj["scanUnlocked"] = True
+        obj["scanResult"] = {
+            "success": True,
+            "successChance": meta.get("successChance"),
+            "roll": meta.get("roll"),
+            "counterRoll": meta.get("counterRoll"),
+            "scannedAt": meta.get("scannedAt"),
+        }
+        obj["scanLabel"] = "Scanned"
+    return objects
+
+
+def object_scan_reference_values(obj: Dict[str, Any]) -> set[str]:
+    values = {object_scan_target_key(obj)}
+    for key in ("objectKey", "id", "siteId", "salvageSiteId", "explorationSiteId", "stationId", "baseId", "combatTargetRef"):
+        value = obj.get(key)
+        if value is not None:
+            values.add(str(value))
+    return values
+
+
+def ship_object_scan_bonus(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]) -> float:
+    if not ship:
+        return 0.0
+    bonus = 0.0
+    try:
+        for m in ship_installed_modules(conn, int(ship["id"])):
+            stats = m.get("stats") or {}
+            durability = max(0.1, float(m.get("durability") or 100) / 100.0)
+            module_scan = (
+                float(stats.get("scan_success") or 0)
+                + float(stats.get("scan_power") or 0)
+                + float(stats.get("scanning") or 0) * float(SCAN_OBJECT_BALANCE["module_scan_mult"])
+                + (float(stats.get("radar_strength") or 0) + float(stats.get("radar_range") or 0)) * float(SCAN_OBJECT_BALANCE["radar_scan_mult"])
+            )
+            bonus += module_scan * durability
+    except Exception:
+        return 0.0
+    return max(0.0, bonus)
+
+
+def ship_counter_scan_strength(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]) -> float:
+    if not ship:
+        return 0.0
+    strength = 0.0
+    try:
+        for m in ship_installed_modules(conn, int(ship["id"])):
+            stats = m.get("stats") or {}
+            durability = max(0.1, float(m.get("durability") or 100) / 100.0)
+            module_counter = (
+                float(stats.get("counter_scan") or 0)
+                + float(stats.get("scan_resistance") or 0)
+                + float(stats.get("stealth") or 0) * 0.9
+                + float(stats.get("smuggling") or 0) * 0.42
+                + float(stats.get("evasion") or 0) * 0.35
+            )
+            strength += module_counter * durability
+    except Exception:
+        return 0.0
+    return max(0.0, strength)
+
+
+def target_counter_scan_strength(conn: sqlite3.Connection, target: Dict[str, Any]) -> float:
+    strength = float(target.get("counterScan") or target.get("counter_scan") or target.get("scan_resistance") or 0)
+    strength += float(target.get("stealth") or 0) * 0.9
+    strength += float(target.get("smuggling") or 0) * 0.42
+    strength += float(target.get("evasion") or 0) * 0.35
+    kind = str(target.get("kind") or "").lower()
+    if kind == "npc":
+        skills = target.get("npcSkills") or {}
+        strength += float(target.get("npcLevel") or target.get("level") or 1) * 0.75
+        strength += float(skills.get("scanning") or 0) * 0.32
+        role = str(target.get("role") or "").lower()
+        if any(x in role for x in ("pirate", "raider", "alien", "bounty", "marshal", "security")):
+            strength += 8
+    if kind == "player":
+        target_player_id = int(target.get("playerId") or target.get("player_id") or target.get("rawId") or 0)
+        if target_player_id:
+            other = row(conn, "SELECT * FROM players WHERE id=?", (target_player_id,))
+            if other:
+                strength += ship_counter_scan_strength(conn, active_ship_for_player(conn, other))
+    return max(0.0, strength)
+
+
+def object_scan_roll(conn: sqlite3.Connection, player: Dict[str, Any], target: Dict[str, Any], god: bool = False) -> Dict[str, Any]:
+    attacker_bonus = ship_object_scan_bonus(conn, active_ship_for_player(conn, player))
+    counter_strength = target_counter_scan_strength(conn, target)
+    counter_roll = random.randint(1, 100) if counter_strength > 0 else 0
+    counter_pressure = (counter_roll / 100.0) * counter_strength * float(SCAN_OBJECT_BALANCE["counter_scan_mult"])
+    chance = clamp_int(
+        float(SCAN_OBJECT_BALANCE["base_success_pct"]) + attacker_bonus - counter_pressure,
+        int(SCAN_OBJECT_BALANCE["base_success_pct"]),
+        int(SCAN_OBJECT_BALANCE["max_success_pct"]),
+    )
+    roll = random.randint(1, 100)
+    success = bool(god or roll <= chance)
+    return {
+        "success": success,
+        "successChance": chance,
+        "roll": roll,
+        "counterRoll": counter_roll,
+        "attackerBonus": round(attacker_bonus, 2),
+        "counterStrength": round(counter_strength, 2),
+    }
+
+
+def resolve_object_scan_target(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str, payload: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], Dict[str, Any], int, int]:
+    nodes, candidates = scan_area_candidate_objects(conn, player, map_type)
+    searchable = [{**n, "kind": n.get("kind") or "node"} for n in nodes] + list(candidates)
+    target_ref = str(payload.get("target_ref") or payload.get("object_key") or payload.get("objectKey") or payload.get("id") or "")
+    if target_ref.startswith("scanblip:"):
+        blip = row(conn, "SELECT * FROM map_objects WHERE object_key=? AND kind='scan_blip' AND state='available'", (target_ref,))
+        if blip:
+            meta = decode_json(blip.get("metadata_json"), {}) or {}
+            target_ref = str(meta.get("sourceTargetKey") or meta.get("sourceObjectKey") or target_ref)
+    for target in searchable:
+        if target_ref in object_scan_reference_values(target):
+            gid, pid = scan_area_scope_values(conn, player, map_type)
+            return nodes, target, gid, pid
+    raise HTTPException(404, "That scan target is no longer available.")
+
+
+def store_object_scan_success(conn: sqlite3.Connection, player: Dict[str, Any], target: Dict[str, Any], map_type: str, galaxy_id: int, scan_result: Dict[str, Any]) -> None:
+    target_key = object_scan_target_key(target)
+    now_s = iso()
+    meta = {
+        "targetKey": target_key,
+        "targetKind": target.get("kind"),
+        "targetName": target.get("realName") or target.get("name") or target.get("label") or target.get("ship_name"),
+        "successChance": scan_result.get("successChance"),
+        "roll": scan_result.get("roll"),
+        "counterRoll": scan_result.get("counterRoll"),
+        "attackerBonus": scan_result.get("attackerBonus"),
+        "counterStrength": scan_result.get("counterStrength"),
+        "scannedAt": now_s,
+    }
+    conn.execute(
+        """INSERT OR REPLACE INTO map_objects
+           (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,expires_at,metadata_json,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            object_scan_row_key(player, int(galaxy_id), map_type, target_key),
+            map_type,
+            int(galaxy_id),
+            None,
+            "target_scan",
+            "object_scan",
+            str(meta.get("targetName") or "Scanned Target"),
+            clamp_pct(float(target.get("x_pct") or target.get("x") or 50), 1, 99),
+            clamp_pct(float(target.get("y_pct") or target.get("y") or 50), 1, 99),
+            1,
+            1,
+            "available",
+            None,
+            encode_json(meta),
+            now_s,
+            now_s,
+        ),
+    )
+
+
+def build_scan_area_blips(conn: sqlite3.Connection, player: Dict[str, Any], nodes: List[Dict[str, Any]], map_type: str) -> List[Dict[str, Any]]:
+    cleanup_scan_area_rows(conn)
+    gid, pid = scan_area_scope_values(conn, player, map_type)
+    if not gid:
+        return []
+    centers = player_radar_centers(conn, player, nodes, map_type)
+    now_s = iso()
+    prefix = f"scanblip:{int(player['id'])}:%"
+    out: List[Dict[str, Any]] = []
+    for obj in rows(conn, """
+        SELECT * FROM map_objects
+        WHERE kind='scan_blip' AND state='available'
+          AND object_key LIKE ? AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?
+          AND (expires_at IS NULL OR expires_at>?)
+        ORDER BY id DESC LIMIT 80
+    """, (prefix, map_type, gid, pid, now_s)):
+        payload = map_object_to_payload(obj, player)
+        if point_visible_to_player_radar(conn, player, nodes, payload, map_type, centers):
+            conn.execute("UPDATE map_objects SET state='expired', updated_at=? WHERE id=?", (now_s, obj["id"]))
+            continue
+        meta = decode_json(obj.get("metadata_json"), {}) or {}
+        payload.update({
+            "kind": "scan_blip",
+            "blipClass": meta.get("blipClass") or obj.get("code") or "contact",
+            "category": meta.get("blipClass") or obj.get("code") or "contact",
+            "expires_at": obj.get("expires_at"),
+            "expiresAt": obj.get("expires_at"),
+            "radarVisible": False,
+        })
+        out.append(payload)
+    return out
+
+
+def build_scan_area_pings(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str) -> List[Dict[str, Any]]:
+    cleanup_scan_area_rows(conn)
+    gid, pid = scan_area_scope_values(conn, player, map_type)
+    if not gid:
+        return []
+    now_s = iso()
+    prefix = f"scanping:{int(player['id'])}:%"
+    pings = []
+    for obj in rows(conn, """
+        SELECT * FROM map_objects
+        WHERE kind='scan_ping' AND state='available'
+          AND object_key LIKE ? AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?
+          AND (expires_at IS NULL OR expires_at>?)
+        ORDER BY id DESC LIMIT 8
+    """, (prefix, map_type, gid, pid, now_s)):
+        meta = decode_json(obj.get("metadata_json"), {}) or {}
+        pings.append({
+            "id": obj.get("object_key"),
+            "x_pct": float(obj.get("x_pct") or 50),
+            "y_pct": float(obj.get("y_pct") or 50),
+            "radius_pct": float(meta.get("radiusPct") or 0),
+            "started_at": meta.get("startedAt") or obj.get("created_at"),
+            "expires_at": obj.get("expires_at"),
+            "animation_seconds": float(meta.get("animationSeconds") or SCAN_AREA_BALANCE["ping_animation_seconds"]),
+        })
+    return pings
+
+
+def scan_area_candidate_objects(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    map_type = "galaxy" if str(map_type).lower() == "galaxy" else "system"
+    if map_type == "galaxy":
+        galaxy_map = build_galaxy_map(conn, player)
+        return galaxy_map.get("nodes") or [], []
+    system_map = build_system_map(conn, player)
+    nodes = system_map.get("nodes") or []
+    current = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("location_planet_id"),))
+    if not current:
+        return nodes, []
+    ore_all = build_open_world_ore_sites(conn, player, nodes, "system")
+    salvage_all = [attach_tool_permissions(conn, player, o) for o in build_map_salvage_icons(conn, player["location_planet_id"])]
+    exploration_all = build_open_world_exploration_sites(conn, player, nodes, "system")
+    pirate_station_all = build_system_pirate_stations(conn, player, nodes, int(current["galaxy_id"]))
+    player_base_all = build_player_bases_for_map(conn, player, int(current["galaxy_id"]))
+    event_sites_all = build_server_event_map_sites(conn, player, nodes, "system", int(current["galaxy_id"]), int(current["id"]))
+    stationary = ore_all + salvage_all + exploration_all + pirate_station_all + player_base_all + event_sites_all
+    traffic_all = build_open_world_traffic(conn, player, "system", nodes, stationary)
+    candidates = [o for o in (stationary + traffic_all) if o.get("id") != "player:self" and o.get("kind") not in {"self", "scan_blip", "scan_ping"}]
+    return nodes, candidates
+
+
+def create_scan_area_ping_and_blips(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str, x_pct: float, y_pct: float, radius_pct: float, duration_seconds: int, candidates: List[Dict[str, Any]], nodes: List[Dict[str, Any]]) -> int:
+    cleanup_scan_area_rows(conn)
+    gid, pid = scan_area_scope_values(conn, player, map_type)
+    if not gid:
+        return 0
+    now = utcnow()
+    scan_id = uuid.uuid4().hex[:12]
+    ping_expires = now + timedelta(seconds=float(SCAN_AREA_BALANCE["ping_linger_seconds"]))
+    conn.execute(
+        """INSERT INTO map_objects (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,expires_at,metadata_json,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            f"scanping:{int(player['id'])}:{scan_id}",
+            map_type,
+            gid,
+            pid or None,
+            "scan_ping",
+            "area_ping",
+            "Area Scan Ping",
+            x_pct,
+            y_pct,
+            1,
+            1,
+            "available",
+            iso(ping_expires),
+            encode_json({"radiusPct": radius_pct, "startedAt": iso(now), "animationSeconds": SCAN_AREA_BALANCE["ping_animation_seconds"]}),
+            iso(now),
+            iso(now),
+        ),
+    )
+    center = {"x_pct": x_pct, "y_pct": y_pct}
+    radar_centers = player_radar_centers(conn, player, nodes, map_type)
+    in_ping = []
+    for obj in candidates:
+        if radar_distance_pct(center, obj) > float(radius_pct):
+            continue
+        if point_visible_to_player_radar(conn, player, nodes, obj, map_type, radar_centers):
+            continue
+        in_ping.append(obj)
+    in_ping = sorted(in_ping, key=lambda obj: radar_distance_pct(center, obj))[:int(SCAN_AREA_BALANCE["blip_limit"])]
+    expires = now + timedelta(seconds=max(5, int(duration_seconds or SCAN_AREA_BALANCE["base_duration_seconds"])))
+    for idx, obj in enumerate(in_ping):
+        blip_class = scan_blip_class_for_object(obj)
+        blip_name = f"{scan_blip_label(blip_class)} Blip"
+        meta = {
+            "kind": "scan_blip",
+            "blipClass": blip_class,
+            "category": blip_class,
+            "label": scan_blip_label(blip_class),
+            "selectedSummary": "Temporary class-only scan contact.",
+            "scanId": scan_id,
+            "scanRadiusPct": radius_pct,
+            "sourceTargetKey": object_scan_target_key(obj),
+            "sourceObjectKey": obj.get("objectKey") or obj.get("id") or obj.get("siteId") or obj.get("salvageSiteId") or obj.get("explorationSiteId"),
+            "expires_at": iso(expires),
+        }
+        conn.execute(
+            """INSERT INTO map_objects (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,expires_at,metadata_json,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                f"scanblip:{int(player['id'])}:{scan_id}:{idx}",
+                map_type,
+                gid,
+                pid or None,
+                "scan_blip",
+                blip_class,
+                blip_name,
+                clamp_pct(float(obj.get("x_pct") or obj.get("x") or 50), 1, 99),
+                clamp_pct(float(obj.get("y_pct") or obj.get("y") or 50), 1, 99),
+                1,
+                1,
+                "available",
+                iso(expires),
+                encode_json(meta),
+                iso(now),
+                iso(now),
+            ),
+        )
+    return len(in_ping)
 
 
 def npc_radar_range_pct(npc: Dict[str, Any], map_type: str = "system") -> float:
@@ -5768,6 +8624,81 @@ def nearest_node_to_object(nodes: List[Dict[str, Any]], obj: Dict[str, Any], exc
     return min(candidates, key=lambda n: pct_distance(n, obj)) if candidates else None
 
 
+def open_patrol_sweep_point(route_rng: random.Random, nodes: List[Dict[str, Any]], avoid: Optional[List[Dict[str, Any]]] = None) -> Dict[str, float]:
+    avoid = avoid or []
+    anchors = [{"x_pct": float(n.get("x_pct") or 50), "y_pct": float(n.get("y_pct") or 50)} for n in nodes if n.get("x_pct") is not None and n.get("y_pct") is not None]
+    candidates: List[Tuple[float, Dict[str, float]]] = []
+    for _ in range(48):
+        pt = {"x_pct": route_rng.uniform(6, 94), "y_pct": route_rng.uniform(7, 93)}
+        lane_spacing = min([pct_distance(pt, a) for a in anchors] or [42.0])
+        patrol_spacing = min([pct_distance(pt, a) for a in avoid] or [42.0])
+        edge_penalty = 0 if 10 <= pt["x_pct"] <= 90 and 10 <= pt["y_pct"] <= 90 else 5
+        score = lane_spacing * 1.35 + patrol_spacing * 0.85 + route_rng.random() * 10 - edge_penalty
+        candidates.append((score, pt))
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1] if candidates else {"x_pct": route_rng.uniform(8, 92), "y_pct": route_rng.uniform(8, 92)}
+
+
+def npc_state_point_at(state: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, float]:
+    now = now or utcnow()
+    if str(state.get("action_state") or "") == "moving":
+        started = parse_dt(state.get("started_at")) or now
+        arrival = parse_dt(state.get("arrival_at")) or now
+        total = max(1, (arrival - started).total_seconds())
+        progress = max(0.0, min(1.0, (now - started).total_seconds() / total))
+        return deterministic_between({"x_pct": state.get("origin_x_pct"), "y_pct": state.get("origin_y_pct")}, {"x_pct": state.get("destination_x_pct"), "y_pct": state.get("destination_y_pct")}, progress)
+    return {"x_pct": float(state.get("x_pct") or state.get("destination_x_pct") or 50), "y_pct": float(state.get("y_pct") or state.get("destination_y_pct") or 50)}
+
+
+def npc_player_attack_contact(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str) -> Optional[Dict[str, Any]]:
+    travel = build_travel_state(conn, player)
+    map_type = "galaxy" if str(map_type).lower() == "galaxy" else "system"
+    mode = str(travel.get("mode") or "").lower()
+
+    # Local/system open-space travel remains attackable unless a short combat
+    # immunity window is active, such as immediately after a successful escape.
+    if travel.get("docked") or mode in {"galaxy", "galaxy_route"}:
+        return None
+    if combat_actor_is_immune(conn, f"player:{player['id']}"):
+        return None
+
+    player_map_type = str(travel.get("map_type") or ("galaxy" if mode in {"galaxy", "galaxy_route"} else "system")).lower()
+    active_in_scope = bool(travel.get("active")) and player_map_type == map_type
+    open_in_scope = bool(travel.get("open_space")) and (not travel.get("open_space_map_type") or str(travel.get("open_space_map_type")).lower() == map_type)
+    if not active_in_scope and not open_in_scope:
+        return None
+    faction = player_faction(conn, player) or {}
+    pt = current_player_map_position(conn, player, map_type)
+    return {
+        "id": "player:self",
+        "objectKey": "player:self",
+        "combatTargetRef": "player:self",
+        "kind": "player",
+        "name": player.get("callsign") or player.get("username") or "Player ship",
+        "x_pct": float(pt.get("x_pct") or 50),
+        "y_pct": float(pt.get("y_pct") or 50),
+        "playerFactionId": int((faction or {}).get("id") or 0),
+        "playerFactionColor": (faction or {}).get("color"),
+        "hostile": True,
+        "attackable": True,
+        "label": "Player ship contact",
+    }
+
+
+def npc_should_attack_player_contact(npc: Dict[str, Any], contact: Optional[Dict[str, Any]]) -> bool:
+    if not contact:
+        return False
+    role_l = str(npc.get("role") or npc.get("career_code") or "").lower()
+    career_l = str(npc.get("career_code") or "").lower()
+    is_patrol = role_l == "faction_patrol" or career_l == "faction_patrol"
+    npc_faction_id = int(npc.get("npc_faction_id") or npc.get("faction_id") or 0)
+    player_faction_id = int(contact.get("playerFactionId") or 0)
+    if is_patrol:
+        return bool(npc_faction_id and player_faction_id and npc_faction_id != player_faction_id)
+    pirate_like = career_l in {"mercenary", "smuggler"} or role_l in COMBAT_LEGAL_ROLES or str(npc.get("disposition") or "").lower() == "hostile"
+    return bool(pirate_like and (int(npc.get("aggression") or 0) >= 55 or role_l in COMBAT_LEGAL_ROLES or career_l == "mercenary"))
+
+
 def npc_choose_objective_and_route(
     npc: Dict[str, Any],
     map_type: str,
@@ -5786,7 +8717,7 @@ def npc_choose_objective_and_route(
     visible_explore = npc_visible_objects(npc_point, radar_range, radar_objects, "exploration")
     visible_ships = [
         t for t in traffic_so_far
-        if t.get("id") != "player:self" and pct_distance(npc_point, t) <= radar_range
+        if pct_distance(npc_point, t) <= radar_range and (t.get("id") != "player:self" or t.get("kind") == "player")
     ]
     role_l = str(npc.get("role") or npc.get("career_code") or "").lower()
     career_l = str(npc.get("career_code") or "").lower()
@@ -5798,6 +8729,13 @@ def npc_choose_objective_and_route(
         and int(t.get("npcFactionId") or t.get("playerFactionId") or 0)
         and int(t.get("npcFactionId") or t.get("playerFactionId") or 0) != npc_faction_id
     ]
+    pirate_or_hostile_ships = [
+        t for t in visible_ships
+        if bool(t.get("hostile"))
+        or str(t.get("role") or "").lower() in COMBAT_LEGAL_ROLES
+        or str(t.get("npcObjective") or "").lower() == "pirate_intercept"
+    ]
+    patrol_attack_ships = list({str(t.get("id") or t.get("combatTargetRef") or id(t)): t for t in (other_faction_ships + pirate_or_hostile_ships)}.values())
     same_faction_patrols = [
         t for t in visible_ships
         if int(t.get("npcFactionId") or 0) == npc_faction_id and bool(t.get("isFactionPatrol"))
@@ -5809,7 +8747,7 @@ def npc_choose_objective_and_route(
         "ship": visible_ships,
     }
     if is_faction_patrol:
-        weights = {"faction_patrol_intercept": 100} if other_faction_ships else {"faction_patrol_sweep": 100}
+        weights = {"faction_patrol_intercept": 100} if patrol_attack_ships else {"faction_patrol_sweep": 100}
     else:
         weights = npc_objective_weights(npc, visible_by_kind, map_type)
     objective = weighted_choice_from_dict(route_rng, weights)
@@ -5828,7 +8766,7 @@ def npc_choose_objective_and_route(
         return route_rng.choice(ordered)
 
     if objective == "faction_patrol_intercept":
-        target_obj = pick_visible(other_faction_ships)
+        target_obj = pick_visible(patrol_attack_ships)
         objective_label = "Faction patrol intercept"
         action_state = "engaging other-faction contact on sight" if target_obj else "sweeping for other-faction contacts"
         target_kind = "ship"
@@ -5894,19 +8832,15 @@ def npc_choose_objective_and_route(
     else:
         # Objective search routes still have intent: go to a region likely to produce the desired contact.
         candidate_nodes = [n for n in nodes if str(n.get("id") or "").isdigit() and int(n.get("id") or 0) != int(default_origin_id)]
-        if objective in {"trade_haul", "smuggle"}:
+        if objective == "faction_patrol_sweep":
+            open_pt = open_patrol_sweep_point(route_rng, nodes, same_faction_patrols)
+            target_x = open_pt["x_pct"]
+            target_y = open_pt["y_pct"]
+            target_name = "deep patrol grid"
+            d_id = default_dest_id
+            candidate_nodes = []
+        elif objective in {"trade_haul", "smuggle"}:
             candidate_nodes = sorted(candidate_nodes, key=lambda n: int(n.get("market_activity_avg") or n.get("market_activity") or n.get("legal_market_strength") or 50), reverse=True)
-        elif objective == "faction_patrol_sweep":
-            avoid_range = float(WORLD_SERVER_BALANCE.get("patrol_avoid_grouping_range_pct", 18))
-            def patrol_spacing_score(n: Dict[str, Any]) -> float:
-                if not same_faction_patrols:
-                    return route_rng.random() * 12
-                spacing = min([pct_distance(n, p) for p in same_faction_patrols] or [99])
-                score = spacing + route_rng.random() * 8
-                if spacing < avoid_range:
-                    score *= 0.35
-                return score
-            candidate_nodes = sorted(candidate_nodes, key=patrol_spacing_score, reverse=True)
         elif objective in {"pirate_intercept", "bounty_hunt", "patrol_scan"}:
             candidate_nodes = sorted(candidate_nodes, key=lambda n: int(n.get("conflict_avg") or n.get("risk_level") or n.get("pirate_activity") or 30), reverse=True)
         elif objective in {"mine", "salvage", "explore"}:
@@ -5939,12 +8873,132 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
     by_id = {int(n["id"]): n for n in nodes if str(n.get("id") or "").isdigit()}
     traffic: List[Dict[str, Any]] = []
     travel = build_travel_state(conn, player)
+    current_scope = current_map_scope(conn, player, map_type)
 
     # The local player is not part of traffic. The frontend renders one canonical self ship
     # from travel_state/open-space state. Emitting player:self here caused the orange follower marker.
+    security_count = 0
+    try:
+        security_defenders = nova_security_defense_traffic(conn, player, map_type, nodes)
+        if security_defenders:
+            traffic.extend(security_defenders)
+            security_count = len(security_defenders)
+    except Exception:
+        security_count = 0
 
-    # Real other players in transit, if any exist in persistence.
-    for other in rows(conn, """SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id<>? AND p.travel_until IS NOT NULL ORDER BY p.id LIMIT 12""", (player["id"],)):
+    party_ids_added: set = set()
+    party = active_party_for_player(conn, player["id"]) if "active_party_for_player" in globals() else None
+    if party:
+        for member_id in party_member_ids(conn, int(party["id"])):
+            if int(member_id) == int(player["id"]):
+                continue
+            other = row(conn, "SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id=?", (int(member_id),))
+            if not other:
+                continue
+            if map_type == "system":
+                member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (other.get("location_planet_id"),)) or {}
+                if int(member_planet.get("galaxy_id") or 0) != int(current_scope.get("galaxy_id") or 0):
+                    continue
+            pt = current_player_map_position(conn, other, map_type)
+            other_ref = f"player:{other['id']}"
+            other_faction = player_faction(conn, other) or {}
+            ship = active_ship_for_player(conn, other)
+            traffic.append({
+                "id": other_ref,
+                "combatTargetRef": other_ref,
+                "kind": "player",
+                "role": "party_member",
+                "partyMember": True,
+                "friendly": True,
+                "attackable": False,
+                "blockedReason": "Party member",
+                "userId": other.get("user_id"),
+                "playerId": other.get("id"),
+                "profileUserId": other.get("user_id"),
+                "avatarId": other.get("avatar_id"),
+                "selectedBadgeCode": other.get("selected_badge_code"),
+                "playerFactionId": int(other_faction.get("id") or 0),
+                "playerFactionColor": other_faction.get("color"),
+                "name": other.get("display_name") or other.get("callsign") or other.get("username") or "Party Member",
+                "shipName": (ship or {}).get("name") or (ship or {}).get("template_name") or "Ship",
+                "hull": int((ship or {}).get("hull") or 0),
+                "maxHull": int((ship or {}).get("max_hull") or 1),
+                "shield": int((ship or {}).get("shield") or 0),
+                "maxShield": int((ship or {}).get("max_shield") or 1),
+                **pt,
+                "label": "Party member. Radar is shared and friendly fire is blocked.",
+            })
+            party_ids_added.add(int(member_id))
+
+    battle_ids_added: set = set()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        active_sessions = rows(conn, "SELECT key,value FROM app_state WHERE key LIKE 'combat_session:%' ORDER BY key DESC LIMIT 40")
+    except Exception:
+        active_sessions = []
+    for stored in active_sessions:
+        session = decode_json(stored.get("value"), {}) or {}
+        if str(session.get("status") or "active") != "active":
+            continue
+        battle_id = int(session.get("battle_id") or 0)
+        for combatant in combat_build_combatants(session):
+            ref = str(combatant.get("ref") or "")
+            if not ref.startswith("player:") or combatant.get("escaped") or combatant.get("defeated"):
+                continue
+            try:
+                other_id = int(ref.split(":", 1)[1])
+            except Exception:
+                continue
+            if other_id == int(player["id"]) or other_id in party_ids_added or other_id in battle_ids_added:
+                continue
+            other = row(conn, "SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id=?", (other_id,))
+            if not other:
+                continue
+            if map_type == "system":
+                member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (other.get("location_planet_id"),)) or {}
+                if int(member_planet.get("galaxy_id") or 0) != int(current_scope.get("galaxy_id") or 0):
+                    continue
+            pt = current_player_map_position(conn, other, map_type)
+            other_immune = combat_actor_is_immune(conn, ref)
+            other_faction = player_faction(conn, other) or {}
+            ship = active_ship_for_player(conn, other)
+            traffic.append({
+                "id": ref,
+                "combatTargetRef": ref,
+                "kind": "player",
+                "role": "active_battle",
+                "activeBattle": True,
+                "activeBattleId": battle_id,
+                "attackable": not other_immune,
+                "blockedReason": "Battle locked / temporary immunity" if other_immune else "",
+                "statusText": "In active battle",
+                "userId": other.get("user_id"),
+                "playerId": other.get("id"),
+                "profileUserId": other.get("user_id"),
+                "avatarId": other.get("avatar_id"),
+                "selectedBadgeCode": other.get("selected_badge_code"),
+                "playerFactionId": int(other_faction.get("id") or 0),
+                "playerFactionColor": other_faction.get("color"),
+                "name": combatant.get("name") or other.get("display_name") or other.get("callsign") or other.get("username") or "Pilot",
+                "shipName": combatant.get("shipName") or (ship or {}).get("name") or (ship or {}).get("template_name") or "Ship",
+                "hull": int(combatant.get("hull") or (ship or {}).get("hull") or 0),
+                "maxHull": int(combatant.get("maxHull") or (ship or {}).get("max_hull") or 1),
+                "shield": int(combatant.get("shield") or (ship or {}).get("shield") or 0),
+                "maxShield": int(combatant.get("maxShield") or (ship or {}).get("max_shield") or 1),
+                **pt,
+                "label": "Player is already in a battle. Attack to intercept and join that battle.",
+                "selectedSummary": "This pilot is fighting right now. Intercepting them adds your ship to the same live battle.",
+            })
+            battle_ids_added.add(other_id)
+
+    # Real other players in transit, if any exist in persistence. Galaxy map stays gate-only unless explicitly enabled.
+    if map_type != "galaxy" or PERF_GALAXY_MAP_TRAFFIC:
+        other_rows = rows(conn, """SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id<>? AND p.travel_until IS NOT NULL ORDER BY p.id LIMIT 12""", (player["id"],))
+    else:
+        other_rows = []
+    for other in other_rows:
+        if int(other.get("id") or 0) in party_ids_added or int(other.get("id") or 0) in battle_ids_added:
+            continue
         tv = build_travel_state(conn, other)
         if not tv.get("active"):
             continue
@@ -5957,14 +9011,16 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
         other_ref = f"player:{other['id']}"
         other_immune = combat_actor_is_immune(conn, other_ref)
         other_faction = player_faction(conn, other) or {}
-        traffic.append({"id":other_ref, "combatTargetRef":other_ref, "kind":"player", "userId":other.get("user_id"), "playerId":other.get("id"), "profileUserId":other.get("user_id"), "avatarId":other.get("avatar_id"), "selectedBadgeCode":other.get("selected_badge_code"), "playerFactionId": int(other_faction.get("id") or 0), "name":other.get("display_name") or other.get("username") or "Player", "role":"player", "from":o["id"], "to":d["id"], "progress":round(float(tv.get("progress") or 0)*100,1), **pt, "attackable":not other_immune, "blockedReason":"Battle locked / post-battle immunity" if other_immune else "", "label":"Player in transit. Intercept happens in open space without planetary defense."})
+        traffic.append({"id":other_ref, "combatTargetRef":other_ref, "kind":"player", "userId":other.get("user_id"), "playerId":other.get("id"), "profileUserId":other.get("user_id"), "avatarId":other.get("avatar_id"), "selectedBadgeCode":other.get("selected_badge_code"), "playerFactionId": int(other_faction.get("id") or 0), "playerFactionColor": other_faction.get("color"), "name":other.get("display_name") or other.get("username") or "Player", "role":"player", "from":o["id"], "to":d["id"], "progress":round(float(tv.get("progress") or 0)*100,1), **pt, "attackable":not other_immune, "blockedReason":"Battle locked / temporary immunity" if other_immune else "", "label":"Player in transit. Intercept happens in open space without planetary defense."})
 
     # Persistent NPC traffic is server-side and DB-backed. NPCs move to an objective,
     # perform a short action there, then pick a new objective from their current position.
     max_count = OPEN_WORLD_BALANCE["galaxy_npc_traffic"] if map_type == "galaxy" else OPEN_WORLD_BALANCE["system_npc_traffic"]
     traffic.extend(build_persistent_npc_traffic(conn, player, map_type, nodes, by_id, radar_objects, traffic, max_count))
     traffic = [t for t in traffic if t.get("id") != "player:self" and t.get("kind") != "self"]
-    return traffic[:max_count]
+    party_count = len([t for t in traffic if t.get("partyMember")])
+    battle_count = len([t for t in traffic if t.get("activeBattle")])
+    return traffic[:max_count + party_count + battle_count + security_count]
 
 
 
@@ -6484,18 +9540,122 @@ def apply_npc_map_action(conn: sqlite3.Connection, state: Dict[str, Any], npc: O
     conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (state.get("planet_id"), "npc_patrol", actor_name, f"{actor_name} completed {label_for_api(objective or 'patrol')} and chose a new route.", encode_json({"target": target_key, "progression": prog}), iso()))
 
 
+def player_current_galaxy_id(conn: sqlite3.Connection, player: Dict[str, Any]) -> int:
+    planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (player.get("location_planet_id"),))
+    return int((planet or {}).get("galaxy_id") or 0)
+
+
+def galaxy_has_active_player(conn: sqlite3.Connection, galaxy_id: int) -> bool:
+    if not galaxy_id:
+        return False
+    now_s = iso()
+    return bool(scalar(conn, """
+        SELECT COUNT(*)
+        FROM players p
+        JOIN planets pl ON pl.id=p.location_planet_id
+        WHERE pl.galaxy_id=?
+          AND (p.travel_until IS NULL OR p.travel_until='' OR p.travel_until<=? OR COALESCE(p.travel_mode,'')<>'galaxy')
+    """, (int(galaxy_id), now_s)) or 0)
+
+
+def simulate_galaxy_background_market(conn: sqlite3.Connection, player: Dict[str, Any], force: bool = False) -> int:
+    """Cheap catch-up for inactive galaxies. Only the current galaxy is simulated."""
+    gid = player_current_galaxy_id(conn, player)
+    if not gid:
+        return 0
+    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    key = f"galaxy_market_catchup:{gid}"
+    tick = row(conn, "SELECT value FROM app_state WHERE key=?", (key,))
+    now = utcnow()
+    last = parse_dt(tick.get("value")) if tick else None
+    interval_seconds = max(60, int(MARKET_LAW_BALANCE.get("restock_tick_minutes", 10)) * 60)
+    if last and not force and (now - last).total_seconds() < interval_seconds:
+        return 0
+    elapsed_steps = 1 if not last else max(1, min(6, int((now - last).total_seconds() // interval_seconds)))
+    rng = random.Random(f"galaxy-market-catchup:{gid}:{int(now.timestamp() // interval_seconds)}")
+    candidates = rows(conn, """
+        SELECT mp.planet_id, mp.commodity_id, mp.supply, mp.demand, c.base_price, c.tier, c.legal, p.market_activity, p.security_level
+        FROM market_prices mp
+        JOIN planets p ON p.id=mp.planet_id
+        JOIN commodities c ON c.id=mp.commodity_id
+        WHERE p.galaxy_id=?
+        ORDER BY abs(mp.demand-50) DESC, c.base_price DESC
+        LIMIT 220
+    """, (gid,))
+    changed = 0
+    if candidates:
+        sample_size = min(len(candidates), 18 * elapsed_steps if not force else 80)
+        sample = rng.sample(candidates, sample_size) if sample_size < len(candidates) else candidates
+        for mp in sample:
+            supply = int(mp.get("supply") or 0)
+            demand = int(mp.get("demand") or 0)
+            market_activity = int(mp.get("market_activity") or 50)
+            security = int(mp.get("security_level") or 50)
+            pressure = 1 + (1 if market_activity >= 65 else 0) + (1 if demand >= 90 or supply <= 8 else 0)
+            if supply <= 8:
+                supply_delta = rng.randint(1, 3) * pressure
+                demand_delta = -rng.randint(0, 2)
+            elif supply >= 110:
+                supply_delta = -rng.randint(1, 4) * pressure
+                demand_delta = rng.randint(0, 2)
+            else:
+                supply_delta = rng.choice([-1, 0, 1]) * pressure
+                demand_delta = rng.choice([-1, 0, 1]) + (1 if security < 35 and rng.random() < 0.18 else 0)
+            if supply_delta or demand_delta:
+                mutate_market(conn, int(mp["planet_id"]), int(mp["commodity_id"]), int(supply_delta), int(demand_delta), "galaxy_background_market")
+                changed += 1
+    conn.execute("INSERT INTO app_state (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, iso(now)))
+    return changed
+
+
+def simulate_active_galaxy_npc_activity(conn: sqlite3.Connection, player: Dict[str, Any], force: bool = False) -> int:
+    """Admin/manual NPC pulse for the player's current galaxy only."""
+    gid = player_current_galaxy_id(conn, player)
+    if not gid:
+        return 0
+    rng = random.Random(f"active-galaxy-npc:{gid}:{int(utcnow().timestamp() // 60)}:{force}")
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (gid,))
+    count = 0
+    for p in planets:
+        limit = 2 if force else 1
+        npcs = rows(conn, "SELECT * FROM npc_agents WHERE planet_id=? AND COALESCE(alive,1)=1 ORDER BY RANDOM() LIMIT ?", (p["id"], limit))
+        for npc in npcs:
+            if simulate_single_npc_action(conn, npc, p, rng):
+                count += 1
+    if not PERF_NPC_LOGS_ENABLED:
+        conn.execute("DELETE FROM npc_action_log")
+    return count
+
+
 def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any], map_type: str, nodes: List[Dict[str, Any]], by_id: Dict[int, Dict[str, Any]], radar_objects: List[Dict[str, Any]], traffic_so_far: List[Dict[str, Any]], max_count: int) -> List[Dict[str, Any]]:
+    if map_type == "galaxy" and not PERF_GALAXY_MAP_TRAFFIC:
+        return []
     if len(nodes) < 2:
         return []
     node_ids = list(by_id.keys())
     scope = current_map_scope(conn, player, map_type)
     gid = int(scope.get("galaxy_id") or 0)
     pid = int(scope.get("planet_id") or 0) if map_type == "system" else None
-    if map_type == "galaxy":
-        npc_query = """
-            SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id
+    if map_type == "system" and not galaxy_has_active_player(conn, gid):
+        return []
+    if map_type == "system":
+        admin_spawned_count = int(scalar(conn, """
+            SELECT COUNT(*)
             FROM npc_agents n
             LEFT JOIN planets p ON p.id=n.planet_id
+            WHERE p.galaxy_id=? AND COALESCE(n.alive,1)=1 AND COALESCE(n.simulated,1)=2
+        """, (gid,)) or 0)
+        max_count = min(int(max_count or 0), max(PERF_ACTIVE_SYSTEM_NPC_LIMIT, min(80, admin_spawned_count)))
+    else:
+        max_count = int(max_count or 0)
+    if max_count <= 0:
+        return []
+    if map_type == "galaxy":
+        npc_query = """
+            SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id, p.security_level AS npc_security_level, f.color AS npc_faction_color
+            FROM npc_agents n
+            LEFT JOIN planets p ON p.id=n.planet_id
+            LEFT JOIN factions f ON f.id=p.faction_id
             WHERE COALESCE(n.alive,1)=1
               AND NOT (n.career_code='faction_patrol' OR n.role='faction_patrol')
             ORDER BY n.id
@@ -6503,10 +9663,11 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
         """
         params: tuple = (max_count,)
     else:
-        npc_query = ("SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id WHERE COALESCE(n.alive,1)=1 AND n.planet_id IN (%s) ORDER BY CASE WHEN n.career_code='faction_patrol' OR n.role='faction_patrol' THEN 0 ELSE 1 END, n.id LIMIT ?" % ",".join("?" for _ in node_ids))
+        npc_query = ("SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id, p.security_level AS npc_security_level, f.color AS npc_faction_color FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id LEFT JOIN factions f ON f.id=p.faction_id WHERE COALESCE(n.alive,1)=1 AND n.planet_id IN (%s) ORDER BY CASE WHEN COALESCE(n.simulated,1)=2 THEN 0 WHEN n.career_code='faction_patrol' OR n.role='faction_patrol' THEN 1 ELSE 2 END, n.id DESC LIMIT ?" % ",".join("?" for _ in node_ids))
         params = tuple(node_ids + [max_count])
     now = utcnow()
     out: List[Dict[str, Any]] = []
+    player_contact = npc_player_attack_contact(conn, player, map_type)
     for idx, npc in enumerate(rows(conn, npc_query, params)):
         npc_id = int(npc["id"])
         role = str(npc.get("role") or npc.get("career_code") or "pilot")
@@ -6517,7 +9678,8 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             o_id, fallback_d_id = rng.sample(node_ids, 2)
             origin = by_id[o_id]
             radar_range = npc_radar_range_pct(npc, map_type)
-            objective = npc_choose_objective_and_route(npc, map_type, nodes, by_id, rng, origin, radar_range, radar_objects, traffic_so_far + out, o_id, fallback_d_id)
+            decision_traffic = traffic_so_far + out + ([player_contact] if npc_should_attack_player_contact(npc, player_contact) else [])
+            objective = npc_choose_objective_and_route(npc, map_type, nodes, by_id, rng, origin, radar_range, radar_objects, decision_traffic, o_id, fallback_d_id)
             d_id = int(objective.get("objectiveDestinationId") or fallback_d_id)
             dest_node = by_id.get(d_id) or by_id[fallback_d_id]
             target = choose_npc_target_from_objective(objective, dest_node)
@@ -6527,7 +9689,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             conn.execute(
                 """INSERT INTO npc_map_state (npc_id,map_type,galaxy_id,planet_id,role,objective,target_object_key,x_pct,y_pct,origin_x_pct,origin_y_pct,destination_x_pct,destination_y_pct,started_at,arrival_at,action_until,action_state,cargo_json,updated_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (npc_id, map_type, gid, pid, role, objective.get("objective") or "patrol", target.get("object_key") or "", float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), None, "moving", encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts"), "factionId": int(npc.get("npc_faction_id") or 0)}), iso(now)),
+                (npc_id, map_type, gid, pid, role, objective.get("objective") or "patrol", target.get("object_key") or "", float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(origin.get("x_pct") or 50), float(origin.get("y_pct") or 50), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), None, "moving", encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts"), "factionId": int(npc.get("npc_faction_id") or 0), "adminSpawned": bool(int(npc.get("simulated") or 1) == 2)}), iso(now)),
             )
             state = row(conn, "SELECT * FROM npc_map_state WHERE npc_id=? AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?", (npc_id, map_type, gid, int(pid or 0)))
             if not state:
@@ -6536,6 +9698,33 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
                 continue
 
         state = dict(state)
+        state_cargo_meta = decode_json(state.get("cargo_json"), {}) or {}
+        state_admin_spawned = bool(state_cargo_meta.get("adminSpawned") or state.get("objective") == "admin_spawn" or int(npc.get("simulated") or 1) == 2)
+        if state.get("target_object_key") == "player:self":
+            contact = player_contact if npc_should_attack_player_contact(npc, player_contact) else None
+            if contact:
+                current_pt = npc_state_point_at(state, now)
+                current_dest = {"x_pct": float(state.get("destination_x_pct") or 50), "y_pct": float(state.get("destination_y_pct") or 50)}
+                contact_range = npc_attack_contact_range_pct(npc, map_type)
+                if pct_distance(current_pt, contact) <= contact_range:
+                    battle_result = start_npc_player_battle_if_contact(conn, player, npc, state, contact, map_type, now)
+                    if battle_result:
+                        refreshed = row(conn, "SELECT * FROM npc_map_state WHERE id=?", (state["id"],))
+                        if refreshed:
+                            state = dict(refreshed)
+                    else:
+                        conn.execute("UPDATE npc_map_state SET x_pct=?, y_pct=?, destination_x_pct=?, destination_y_pct=?, arrival_at=?, action_state='working', action_until=?, updated_at=? WHERE id=?", (float(contact["x_pct"]), float(contact["y_pct"]), float(contact["x_pct"]), float(contact["y_pct"]), iso(now), iso(now + timedelta(seconds=8)), iso(now), state["id"]))
+                        state.update({"x_pct": float(contact["x_pct"]), "y_pct": float(contact["y_pct"]), "destination_x_pct": float(contact["x_pct"]), "destination_y_pct": float(contact["y_pct"]), "arrival_at": iso(now), "action_state": "working", "action_until": iso(now + timedelta(seconds=8))})
+                elif pct_distance(current_dest, contact) > 0.65:
+                    dist = pct_distance(current_pt, contact)
+                    seconds = max(8, min(85, int(7 + dist * 1.9)))
+                    conn.execute("""UPDATE npc_map_state SET origin_x_pct=?, origin_y_pct=?, destination_x_pct=?, destination_y_pct=?, started_at=?, arrival_at=?, action_until=NULL, action_state='moving', cargo_json=?, updated_at=? WHERE id=?""", (float(current_pt["x_pct"]), float(current_pt["y_pct"]), float(contact["x_pct"]), float(contact["y_pct"]), iso(now), iso(now + timedelta(seconds=seconds)), encode_json({"objectiveLabel": "Locked player intercept", "objectiveTargetName": contact.get("name") or "Player ship", "objectiveState": "adjusting course to player", "visibleCounts": {}, "factionId": int(npc.get("npc_faction_id") or 0), "adminSpawned": state_admin_spawned}), iso(now), state["id"]))
+                    refreshed = row(conn, "SELECT * FROM npc_map_state WHERE id=?", (state["id"],))
+                    if refreshed:
+                        state = dict(refreshed)
+            else:
+                conn.execute("UPDATE npc_map_state SET target_object_key='', objective='search', action_state='working', action_until=?, updated_at=? WHERE id=?", (iso(now), iso(now), state["id"]))
+                state.update({"target_object_key": "", "objective": "search", "action_state": "working", "action_until": iso(now)})
         arrival = parse_dt(state.get("arrival_at")) or now
         action_until = parse_dt(state.get("action_until")) if state.get("action_until") else None
         if state.get("action_state") == "moving" and now >= arrival:
@@ -6544,12 +9733,14 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             conn.execute("UPDATE npc_map_state SET x_pct=?, y_pct=?, action_state='working', action_until=?, updated_at=? WHERE id=?", (float(state.get("destination_x_pct") or 50), float(state.get("destination_y_pct") or 50), iso(now + timedelta(seconds=action_seconds)), iso(now), state["id"]))
             state.update({"x_pct": float(state.get("destination_x_pct") or 50), "y_pct": float(state.get("destination_y_pct") or 50), "action_state": "working", "action_until": iso(now + timedelta(seconds=action_seconds))})
         elif state.get("action_state") == "working" and action_until and now >= action_until:
-            apply_npc_map_action(conn, state, npc)
+            if str(state.get("objective") or "") != "admin_spawn":
+                apply_npc_map_action(conn, state, npc)
             # Choose a new route from current location.
             current_pt = {"x_pct": float(state.get("x_pct") or state.get("destination_x_pct") or 50), "y_pct": float(state.get("y_pct") or state.get("destination_y_pct") or 50)}
             fallback_d_id = rng.choice(node_ids)
             radar_range = npc_radar_range_pct(npc, map_type)
-            objective = npc_choose_objective_and_route(npc, map_type, nodes, by_id, rng, current_pt, radar_range, radar_objects, traffic_so_far + out, fallback_d_id, fallback_d_id)
+            decision_traffic = traffic_so_far + out + ([player_contact] if npc_should_attack_player_contact(npc, player_contact) else [])
+            objective = npc_choose_objective_and_route(npc, map_type, nodes, by_id, rng, current_pt, radar_range, radar_objects, decision_traffic, fallback_d_id, fallback_d_id)
             d_id = int(objective.get("objectiveDestinationId") or fallback_d_id)
             dest_node = by_id.get(d_id) or by_id[fallback_d_id]
             target = choose_npc_target_from_objective(objective, dest_node)
@@ -6557,7 +9748,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             seconds = max(25, min(260, int(20 + dist * 3.2)))
             conn.execute(
                 """UPDATE npc_map_state SET objective=?, target_object_key=?, origin_x_pct=?, origin_y_pct=?, destination_x_pct=?, destination_y_pct=?, started_at=?, arrival_at=?, action_until=NULL, action_state='moving', cargo_json=?, updated_at=? WHERE id=?""",
-                (objective.get("objective") or "patrol", target.get("object_key") or "", float(current_pt["x_pct"]), float(current_pt["y_pct"]), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts"), "factionId": int(npc.get("npc_faction_id") or 0)}), iso(now), state["id"]),
+                (objective.get("objective") or "patrol", target.get("object_key") or "", float(current_pt["x_pct"]), float(current_pt["y_pct"]), float(target.get("x_pct") or 50), float(target.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=seconds)), encode_json({"objectiveLabel": objective.get("objectiveLabel"), "objectiveTargetName": target.get("name"), "objectiveState": objective.get("objectiveState"), "visibleCounts": objective.get("visibleCounts"), "factionId": int(npc.get("npc_faction_id") or 0), "adminSpawned": state_admin_spawned}), iso(now), state["id"]),
             )
             refreshed_state = row(conn, "SELECT * FROM npc_map_state WHERE id=?", (state["id"],))
             if not refreshed_state:
@@ -6578,6 +9769,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
         else:
             pt = {"x_pct": float(state.get("x_pct") or state.get("destination_x_pct") or 50), "y_pct": float(state.get("y_pct") or state.get("destination_y_pct") or 50)}
         cargo_meta = decode_json(state.get("cargo_json"), {}) or {}
+        admin_spawned = bool(cargo_meta.get("adminSpawned") or state.get("objective") == "admin_spawn" or int(npc.get("simulated") or 1) == 2)
         objective_label = cargo_meta.get("objectiveLabel") or label_for_api(state.get("objective") or "patrol")
         objective_state = "working at objective" if state.get("action_state") == "working" else "moving to objective"
         radar_range = npc_radar_range_pct(npc, map_type)
@@ -6585,7 +9777,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "ore": npc_visible_objects(pt, radar_range, radar_objects, "ore"),
             "salvage": npc_visible_objects(pt, radar_range, radar_objects, "salvage"),
             "exploration": npc_visible_objects(pt, radar_range, radar_objects, "exploration"),
-            "ship": [t for t in traffic_so_far + out if t.get("id") != "player:self" and pct_distance(pt, t) <= radar_range],
+            "ship": [t for t in (traffic_so_far + out + ([player_contact] if npc_should_attack_player_contact(npc, player_contact) else [])) if t.get("id") != "player:self" and pct_distance(pt, t) <= radar_range],
         }
         hostile = role_l in COMBAT_LEGAL_ROLES or int(npc.get("aggression") or 0) > 70 or state.get("objective") in {"pirate_intercept"}
         traveler_id = f"traveler:{npc_id}:{map_type}"
@@ -6612,10 +9804,12 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "npcGeneration": int(npc.get("generation") or 1),
             "npcDeathCount": int(npc.get("death_count") or 0),
             "npcFactionId": int(npc.get("npc_faction_id") or 0),
+            "npcFactionColor": npc.get("npc_faction_color"),
             "npcGalaxyId": int(npc.get("npc_galaxy_id") or gid or 0),
+            "npcSecurityLevel": int(npc.get("npc_security_level") or 50),
             "isFactionPatrol": bool(str(npc.get("career_code") or "").lower() == "faction_patrol" or role_l == "faction_patrol"),
             "attackable": not npc_combat_locked,
-            "blockedReason": "Battle locked / post-battle immunity" if npc_combat_locked else "",
+            "blockedReason": "Battle locked / temporary immunity" if npc_combat_locked else "",
             "hostile": hostile,
             "npcRadarRangePct": radar_range,
             "npcDetectedCount": sum(len(v) for v in visible.values()),
@@ -6625,6 +9819,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "npcObjectiveState": objective_state,
             "npcObjectiveTargetName": cargo_meta.get("objectiveTargetName"),
             "npcVisibleCounts": {k: len(v) for k, v in visible.items()},
+            "adminSpawned": admin_spawned,
             "selectedSummary": f"{label_for_api(role)} is {objective_state}: {objective_label}. Target: {cargo_meta.get('objectiveTargetName') or 'open space'}. Position and action state are DB-backed.",
             "outcomeFactors": "NPC state is persisted in npc_map_state. NPCs move, work at objectives, update objects, then choose a new objective.",
             "label": f"{objective_label}: {objective_state}.",
@@ -6651,35 +9846,35 @@ def build_map_salvage_icons(conn: sqlite3.Connection, planet_id: int) -> List[Di
 
 
 FACTION_SEED_DEFS = [
-    {"code": "solar_accord", "name": "Solar Accord", "color": "gold", "home_galaxy_code": "helios", "description": "Old-core republic fleets built around law, logistics, patrols, and stable markets."},
-    {"code": "iron_meridian", "name": "Iron Meridian", "color": "cyan", "home_galaxy_code": "meridian", "description": "Industrial military compact built around shipyards, mining, and hard-border control."},
-    {"code": "umbral_veil", "name": "Umbral Veil", "color": "purple", "home_galaxy_code": "nyx", "description": "Shadow confederacy of freeports, intelligence brokers, smugglers, and deep-space scouts."},
+    {"code": "solar_accord", "name": "Solar Accord", "color": "orange", "home_galaxy_code": "helios", "description": "Human republic fleets built around law, logistics, patrols, clean trade, and stable markets."},
+    {"code": "iron_meridian", "name": "Iron Meridian", "color": "grey", "home_galaxy_code": "meridian", "description": "Robot compact built around shipyards, mining, armored logistics, and hard-border control."},
+    {"code": "umbral_veil", "name": "Umbral Veil", "color": "purple", "home_galaxy_code": "nyx", "description": "Bug-like alien freeholds of bioluminescent scouts, intelligence brokers, smugglers, and deep-space mystics."},
 ]
 
 GALAXY_EXPANSION_SEED = [
     # code, name, sector, color, desc, x, y, faction, home_depth, capturable
-    ("helios", "Helios Reach", "Solar Home", "gold", "Solar Accord capital reach. Home-faction territory cannot be captured.", 10, 10, "solar_accord", 0, 0),
-    ("dawnring", "Dawnring March", "Solar Shield", "gold", "Solar Accord buffer galaxy, one jump from the home tip and not capturable.", 24, 22, "solar_accord", 1, 0),
+    ("helios", "Helios Reach", "Solar Home", "orange", "Solar Accord capital reach. Home-faction territory cannot be captured.", 10, 10, "solar_accord", 0, 0),
+    ("dawnring", "Dawnring March", "Solar Shield", "orange", "Solar Accord buffer galaxy, one jump from the home tip and not capturable.", 24, 22, "solar_accord", 1, 0),
     ("cinderpass", "Cinderpass", "Solar March", "orange", "Border forge lanes with capturable Solar-leaning industrial assets.", 18, 39, "solar_accord", 2, 1),
     ("perseus", "Perseus Frontier", "Contested Belt", "orange", "Resource-rich frontier belt leaning Solar but exposed to central conflict.", 38, 52, "solar_accord", 3, 1),
 
-    ("meridian", "Meridian Crown", "Meridian Home", "cyan", "Iron Meridian capital shipyard lattice. Home-faction territory cannot be captured.", 90, 10, "iron_meridian", 0, 0),
-    ("forgeward", "Forgeward Line", "Meridian Shield", "cyan", "Iron Meridian buffer galaxy, one jump from the home tip and not capturable.", 76, 22, "iron_meridian", 1, 0),
-    ("lyra", "Lyra Bastion", "Meridian March", "blue", "Capturable militarized border galaxy with strong shipyard infrastructure.", 82, 39, "iron_meridian", 2, 1),
-    ("nexus", "Nexus Crucible", "Central Crucible", "red", "Central high-value conflict galaxy with the richest control bonuses.", 50, 50, "iron_meridian", 4, 1),
+    ("meridian", "Meridian Crown", "Meridian Home", "grey", "Iron Meridian capital shipyard lattice. Home-faction territory cannot be captured.", 90, 10, "iron_meridian", 0, 0),
+    ("forgeward", "Forgeward Line", "Meridian Shield", "grey", "Iron Meridian buffer galaxy, one jump from the home tip and not capturable.", 76, 22, "iron_meridian", 1, 0),
+    ("lyra", "Lyra Bastion", "Meridian March", "grey", "Capturable militarized border galaxy with strong shipyard infrastructure.", 82, 39, "iron_meridian", 2, 1),
+    ("nexus", "Nexus Crucible", "Central Crucible", "grey", "Central high-value conflict galaxy with the richest control bonuses.", 50, 50, "iron_meridian", 4, 1),
 
     ("nyx", "Nyx Expanse", "Veil Home", "purple", "Umbral Veil capital shadow-space. Home-faction territory cannot be captured.", 50, 90, "umbral_veil", 0, 0),
     ("umbrareach", "Umbrareach", "Veil Shield", "purple", "Umbral Veil buffer galaxy, one jump from the home tip and not capturable.", 38, 76, "umbral_veil", 1, 0),
-    ("obsidian", "Obsidian Coil", "Veil March", "violet", "Capturable stealth corridor with black-market and reconnaissance value.", 62, 76, "umbral_veil", 2, 1),
-    ("acheron", "Acheron Spiral", "Central Ruins", "blue", "Ancient central ruin-space with high-tier scan sites and pirate bases.", 50, 62, "umbral_veil", 4, 1),
+    ("obsidian", "Obsidian Coil", "Veil March", "purple", "Capturable stealth corridor with black-market and reconnaissance value.", 62, 76, "umbral_veil", 2, 1),
+    ("acheron", "Acheron Spiral", "Central Ruins", "purple", "Ancient central ruin-space with high-tier scan sites and pirate bases.", 50, 62, "umbral_veil", 4, 1),
 
     # Phase 35 expansion: +50% galaxies, balanced two additional galaxies per faction.
-    ("sunbreak", "Sunbreak Passage", "Solar Forward", "gold", "Solar Accord forward logistics chain pushing toward center conflict lanes.", 29, 34, "solar_accord", 2, 1),
+    ("sunbreak", "Sunbreak Passage", "Solar Forward", "orange", "Solar Accord forward logistics chain pushing toward center conflict lanes.", 29, 34, "solar_accord", 2, 1),
     ("coronavault", "Corona Vault", "Solar Inner Vault", "orange", "Solar Accord fortified inner resource vault near the center front.", 42, 44, "solar_accord", 4, 1),
-    ("anvilreach", "Anvil Reach", "Meridian Forward", "cyan", "Iron Meridian heavy mining and repair corridor toward central space.", 71, 34, "iron_meridian", 2, 1),
-    ("hammerfall", "Hammerfall Bastion", "Meridian Inner Bastion", "blue", "Iron Meridian militarized inner-system bastion near the central routes.", 58, 44, "iron_meridian", 4, 1),
+    ("anvilreach", "Anvil Reach", "Meridian Forward", "grey", "Iron Meridian heavy mining and repair corridor toward central space.", 71, 34, "iron_meridian", 2, 1),
+    ("hammerfall", "Hammerfall Bastion", "Meridian Inner Bastion", "grey", "Iron Meridian militarized inner-system bastion near the central routes.", 58, 44, "iron_meridian", 4, 1),
     ("shroudcross", "Shroudcross", "Veil Forward", "purple", "Umbral Veil covert travel corridor toward center-space contracts.", 44, 71, "umbral_veil", 2, 1),
-    ("nightglass", "Nightglass Verge", "Veil Inner Verge", "violet", "Umbral Veil inner black-market and relic frontier at the center edge.", 53, 58, "umbral_veil", 4, 1),
+    ("nightglass", "Nightglass Verge", "Veil Inner Verge", "purple", "Umbral Veil inner black-market and relic frontier at the center edge.", 53, 58, "umbral_veil", 4, 1),
 ]
 
 
@@ -6739,7 +9934,19 @@ def world_band_for_galaxy(conn: sqlite3.Connection, galaxy_or_id: Any) -> Dict[s
 
 
 def world_level_range_for_galaxy(conn: sqlite3.Connection, galaxy_id: int) -> Tuple[int, int]:
-    band = world_band_for_galaxy(conn, int(galaxy_id or 0))
+    galaxy_id = int(galaxy_id or 0)
+    galaxy = row(conn, "SELECT code,name FROM galaxies WHERE id=?", (galaxy_id,)) if galaxy_id else None
+    overrides = WORLD_PROGRESSION_BALANCE.get("per_galaxy_npc_level_ranges") or {}
+    override = None
+    for key in (str(galaxy_id), (galaxy or {}).get("code"), (galaxy or {}).get("name")):
+        if key and isinstance(overrides.get(str(key)), dict):
+            override = overrides.get(str(key))
+            break
+    if override:
+        lo = max(1, int(override.get("min") or override.get("npc_level_min") or 1))
+        hi = max(lo, int(override.get("max") or override.get("npc_level_max") or lo))
+        return (lo, hi)
+    band = world_band_for_galaxy(conn, galaxy_id)
     return (
         max(1, int(band.get("npc_level_min") or 1)),
         max(1, int(band.get("npc_level_max") or band.get("npc_level_min") or 10)),
@@ -6883,11 +10090,10 @@ def spawn_faction_patrol_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, 
     )
     npc_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
 
-    # Seed an initial spread-out route so patrols do not spawn clumped or fly together.
+    # Seed an initial open-space route so patrols sweep the whole local map instead of hugging planet lanes.
     planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy["id"]),))
     origin = planet_map_point(planet)
-    destination_planet = max(planets, key=lambda p: pct_distance(origin, planet_map_point(p))) if planets else planet
-    dest = planet_map_point(destination_planet)
+    dest = open_patrol_sweep_point(rng, [planet_map_point(p) for p in planets], [origin])
     seconds = max(55, min(260, int(45 + pct_distance(origin, dest) * 4.5)))
     conn.execute(
         """INSERT INTO npc_map_state
@@ -6897,7 +10103,7 @@ def spawn_faction_patrol_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, 
             npc_id, "system", int(galaxy["id"]), int(planet["id"]), "faction_patrol", "faction_patrol_sweep", "",
             origin["x_pct"], origin["y_pct"], origin["x_pct"], origin["y_pct"], dest["x_pct"], dest["y_pct"],
             iso(), iso(utcnow() + timedelta(seconds=seconds)), None, "moving",
-            encode_json({"objectiveLabel": "Faction patrol sweep", "objectiveTargetName": destination_planet.get("name"), "objectiveState": "patrolling own galaxy", "factionId": faction_id}),
+            encode_json({"objectiveLabel": "Faction patrol sweep", "objectiveTargetName": "deep patrol grid", "objectiveState": "patrolling open local space", "factionId": faction_id}),
             iso(),
         ),
     )
@@ -6948,6 +10154,8 @@ def spawn_server_npc_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any]
     lo, hi = world_level_range_for_galaxy(conn, int(galaxy["id"]))
     mode = min(hi, max(lo, lo + int((hi - lo) * 0.35)))
     level = clamp_int(int(rng.triangular(lo, hi, mode)), lo, hi)
+    if pirate_like_role(role, career):
+        level = pirate_level_for_security(level, int(planet.get("security_level") or 50), rng)
     rank = clamp_int(1 + level // 9, 1, 12)
     power_base = int((int(planet.get("security_level") or 50) + int(planet.get("market_activity") or 50) + int(planet.get("defense_strength") or 50)) / 3)
     power = clamp_int(int((power_base + level * 2.4) * rng.uniform(0.58, 0.92)), 15, 99999)
@@ -6966,7 +10174,7 @@ def spawn_server_npc_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any]
     npc_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
     conn.execute(
         "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
-        (planet["id"], "server_spawn_npc", "World Server", f"Server spawned NPC {name} in {galaxy.get('name')}.", encode_json({"npcId": npc_id, "galaxyId": galaxy["id"], "planetId": planet["id"], "career": career, "role": role, "level": level}), iso()),
+        (planet["id"], "server_spawn_npc", "World Server", f"Server spawned NPC {name} in {galaxy.get('name')}.", encode_json({"npcId": npc_id, "galaxyId": galaxy["id"], "planetId": planet["id"], "career": career, "role": role, "level": level, "securityLevel": int(planet.get("security_level") or 50)}), iso()),
     )
     return {"npcId": npc_id, "name": name, "planet": planet.get("name"), "level": level}
 
@@ -7112,6 +10320,7 @@ def spawn_server_pirate_base_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[s
         return None
     candidate, nearest_planet = best
     station_level = pirate_base_level_for_galaxy(conn, int(galaxy["id"]), rng)
+    station_level = pirate_level_for_security(station_level, int(nearest_planet.get("security_level") or 50), rng)
     tier = pirate_base_tier_for_level(station_level)
     difficulty = clamp_int(tier + int(station_level // 18) + rng.randint(0, 1), 1, 12)
     total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
@@ -7128,9 +10337,423 @@ def spawn_server_pirate_base_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[s
     station_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
     conn.execute(
         "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
-        (nearest_planet["id"], "server_spawn_pirate_base", "World Server", f"Server spawned pirate base {name} in {galaxy.get('name')} at T{tier}.", encode_json({"stationId": station_id, "galaxyId": galaxy["id"], "tier": tier, "stationLevel": station_level, "baseStrengthMultiplier": WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25)}), iso()),
+        (nearest_planet["id"], "server_spawn_pirate_base", "World Server", f"Server spawned pirate base {name} in {galaxy.get('name')} at T{tier}.", encode_json({"stationId": station_id, "galaxyId": galaxy["id"], "tier": tier, "stationLevel": station_level, "securityLevel": int(nearest_planet.get("security_level") or 50), "baseStrengthMultiplier": WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25)}), iso()),
     )
     return {"stationId": station_id, "name": name, "tier": tier, "level": station_level}
+
+
+ADMIN_MAP_SPAWN_LABELS = {
+    "ore": "mine node",
+    "exploration": "ancient site",
+    "salvage": "salvage wreck",
+    "npc": "NPC",
+    "pirate": "pirate ship",
+    "patrol": "security patrol",
+    "pirate_station": "pirate station",
+}
+
+
+def optional_admin_spawn_int(value: Any) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def nearest_allowed_int(value: Optional[int], allowed: List[int], default: Optional[int] = None) -> int:
+    clean = sorted({int(v) for v in allowed if int(v) > 0})
+    if not clean:
+        return int(default or 1)
+    if value is None:
+        return int(default if default in clean else clean[0])
+    raw = int(value)
+    return int(min(clean, key=lambda v: (abs(v - raw), v)))
+
+
+def level_tier_options(level_min: int, level_max: int, max_tier: Optional[int] = None) -> List[int]:
+    lo = max(1, int(level_min or 1))
+    hi = max(lo, int(level_max or lo))
+    cap = int(max_tier or TIER_BALANCE.get("max_tier", 7) or 7)
+    tiers = {max(1, min(cap, int(math.ceil(level / 10)))) for level in range(lo, hi + 1)}
+    return sorted(tiers) or [1]
+
+
+def admin_spawn_resource_tier_options(conn: sqlite3.Connection, galaxy_id: int) -> List[int]:
+    band = world_band_for_galaxy(conn, int(galaxy_id or 0))
+    weights = band.get("tier_weights") or {}
+    max_tier = int(WORLD_PROGRESSION_BALANCE.get("resource_tier_max", 5) or 5)
+    tiers = [
+        tier
+        for tier in range(1, max_tier + 1)
+        if int(weights.get(str(tier), weights.get(tier, 0)) or 0) > 0
+    ]
+    return tiers or [1]
+
+
+def default_resource_tier_for_galaxy(conn: sqlite3.Connection, galaxy_id: int, allowed: Optional[List[int]] = None) -> int:
+    band = world_band_for_galaxy(conn, int(galaxy_id or 0))
+    weights = band.get("tier_weights") or {}
+    choices = allowed or admin_spawn_resource_tier_options(conn, galaxy_id)
+    return int(max(choices, key=lambda tier: int(weights.get(str(tier), weights.get(tier, 0)) or 0))) if choices else 1
+
+
+def admin_spawn_pirate_station_level_range(conn: sqlite3.Connection, galaxy_id: int) -> Tuple[int, int]:
+    lo, hi = world_level_range_for_galaxy(conn, int(galaxy_id or 0))
+    mult = float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25) or 1.25)
+    station_lo = max(1, int(math.ceil(lo * mult)))
+    station_hi = max(station_lo, int(math.ceil(max(lo, hi) * mult)))
+    return station_lo, station_hi
+
+
+def admin_spawn_pirate_station_tier_options(conn: sqlite3.Connection, galaxy_id: int) -> List[int]:
+    lo, hi = admin_spawn_pirate_station_level_range(conn, int(galaxy_id or 0))
+    tiers = {pirate_base_tier_for_level(level) for level in range(lo, hi + 1)}
+    return sorted(tiers) or [pirate_base_tier_for_level(lo)]
+
+
+def admin_spawn_constraints(conn: sqlite3.Connection, galaxy_id: int, planet_id: Optional[int] = None) -> Dict[str, Any]:
+    band = world_band_for_galaxy(conn, int(galaxy_id or 0))
+    npc_lo, npc_hi = world_level_range_for_galaxy(conn, int(galaxy_id or 0))
+    resource_tiers = admin_spawn_resource_tier_options(conn, int(galaxy_id or 0))
+    salvage_tiers = level_tier_options(npc_lo, npc_hi, TIER_BALANCE.get("max_tier", 7))
+    station_lo, station_hi = admin_spawn_pirate_station_level_range(conn, int(galaxy_id or 0))
+    station_tiers = admin_spawn_pirate_station_tier_options(conn, int(galaxy_id or 0))
+    return {
+        "bandKey": band.get("key"),
+        "bandName": band.get("name") or "Local band",
+        "npcLevelMin": int(npc_lo),
+        "npcLevelMax": int(npc_hi),
+        "defaultNpcLevel": int((npc_lo + npc_hi) // 2),
+        "resourceTiers": resource_tiers,
+        "defaultResourceTier": default_resource_tier_for_galaxy(conn, int(galaxy_id or 0), resource_tiers),
+        "salvageTiers": salvage_tiers,
+        "defaultSalvageTier": salvage_tiers[len(salvage_tiers) // 2],
+        "pirateStationTiers": station_tiers,
+        "defaultPirateStationTier": station_tiers[len(station_tiers) // 2],
+        "pirateStationLevelMin": int(station_lo),
+        "pirateStationLevelMax": int(station_hi),
+    }
+
+
+def admin_spawn_resolve_resource_tier(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random, tier_override: Optional[int] = None) -> int:
+    allowed = admin_spawn_resource_tier_options(conn, int(galaxy_id or 0))
+    if tier_override is None:
+        return int(weighted_tier_from_band(rng, world_band_for_galaxy(conn, int(galaxy_id or 0))))
+    return nearest_allowed_int(tier_override, allowed, default_resource_tier_for_galaxy(conn, int(galaxy_id or 0), allowed))
+
+
+def admin_spawn_resolve_salvage_level_tier(conn: sqlite3.Connection, planet_id: int, rng: random.Random, level_override: Optional[int] = None, tier_override: Optional[int] = None) -> Tuple[int, int]:
+    lo, hi = world_level_range_for_planet(conn, int(planet_id or 0))
+    if level_override is not None:
+        level = clamp_int(int(level_override), lo, hi)
+        return level, max(1, clamp_tier(int(math.ceil(level / 10))))
+    allowed_tiers = level_tier_options(lo, hi, TIER_BALANCE.get("max_tier", 7))
+    if tier_override is not None:
+        tier = nearest_allowed_int(tier_override, allowed_tiers, allowed_tiers[0])
+        level_lo = max(lo, (tier - 1) * 10 + 1)
+        level_hi = min(hi, tier * 10)
+        level = clamp_int(tier * 10, lo, hi) if level_lo > level_hi else rng.randint(level_lo, level_hi)
+        return level, tier
+    level = clamp_int(rng.randint(lo, max(lo, hi)), 1, int(NPC_LIFE_BALANCE.get("max_level", 80)))
+    return level, max(1, clamp_tier(int(math.ceil(level / 10))))
+
+
+def admin_spawn_resolve_npc_level(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random, level_override: Optional[int] = None) -> int:
+    lo, hi = world_level_range_for_galaxy(conn, int(galaxy_id or 0))
+    if level_override is None:
+        return clamp_int(rng.randint(lo, max(lo, hi)), lo, hi)
+    return clamp_int(int(level_override), lo, hi)
+
+
+def admin_spawn_resolve_pirate_station_level_tier(conn: sqlite3.Connection, galaxy_id: int, rng: random.Random, level_override: Optional[int] = None, tier_override: Optional[int] = None) -> Tuple[int, int]:
+    lo, hi = admin_spawn_pirate_station_level_range(conn, int(galaxy_id or 0))
+    if level_override is not None:
+        level = clamp_int(int(level_override), lo, hi)
+        return level, pirate_base_tier_for_level(level)
+    if tier_override is not None:
+        allowed_tiers = admin_spawn_pirate_station_tier_options(conn, int(galaxy_id or 0))
+        tier = nearest_allowed_int(tier_override, allowed_tiers, allowed_tiers[0])
+        level_lo = max(lo, (tier - 1) * 10 + 1)
+        level_hi = min(hi, tier * 10)
+        level = clamp_int(tier * 10, lo, hi) if level_lo > level_hi else rng.randint(level_lo, level_hi)
+        return level, pirate_base_tier_for_level(level)
+    station_level = pirate_base_level_for_galaxy(conn, int(galaxy_id or 0), rng)
+    return station_level, pirate_base_tier_for_level(station_level)
+
+
+def admin_spawn_spread_point(x_pct: float, y_pct: float, index: int) -> Dict[str, float]:
+    base_x = clamp_pct(float(x_pct or 50), 3, 97)
+    base_y = clamp_pct(float(y_pct or 50), 3, 97)
+    if index <= 0:
+        return {"x_pct": base_x, "y_pct": base_y}
+    angle = index * 2.399963229728653
+    radius = 1.35 * math.sqrt(index)
+    return {
+        "x_pct": clamp_pct(base_x + math.cos(angle) * radius, 2, 98),
+        "y_pct": clamp_pct(base_y + math.sin(angle) * radius, 2, 98),
+    }
+
+
+def nearest_system_planet_for_point(conn: sqlite3.Connection, galaxy_id: int, x_pct: float, y_pct: float, fallback_planet_id: int) -> Dict[str, Any]:
+    planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(galaxy_id),))
+    if not planets:
+        return row(conn, "SELECT * FROM planets WHERE id=?", (int(fallback_planet_id),)) or {}
+    point = {"x_pct": float(x_pct or 50), "y_pct": float(y_pct or 50)}
+    return min(planets, key=lambda p: pct_distance(point, system_planet_map_point(conn, int(p["id"]))))
+
+
+def admin_spawn_ore_node(conn: sqlite3.Connection, galaxy_id: int, planet_id: int, x_pct: float, y_pct: float, rng: random.Random, tier_override: Optional[int] = None) -> Dict[str, Any]:
+    tier = admin_spawn_resolve_resource_tier(conn, int(galaxy_id), rng, tier_override)
+    ores = {
+        1: [("titanium", "Titanium Ore", 1.0, 28), ("nickel_iron", "Nickel-Iron Rock", 1.1, 24)],
+        2: [("helium_3", "Helium-3 Pocket", 0.7, 120)],
+        3: [("iridium", "Iridium Shards", 0.45, 260)],
+        4: [("quantum_silicate", "Quantum Silicate", 0.55, 760)],
+        5: [("void_crystal", "Void Crystal", 0.25, 1450)],
+    }
+    code, name, mass, value = rng.choice(ores.get(tier) or ores[1])
+    qty = rng.randint(12, 30) + tier * 6
+    energy = clamp_int(OPEN_WORLD_BALANCE["ore_mine_min_energy"] + tier * 4 + qty // 4, OPEN_WORLD_BALANCE["ore_mine_min_energy"], OPEN_WORLD_BALANCE["ore_mine_max_energy"])
+    key = f"admin:{galaxy_id}:{planet_id}:ore:{code}:{uuid.uuid4().hex[:10]}"
+    meta = {
+        "kind": "ore",
+        "energyCost": energy,
+        "massEach": mass,
+        "unitValue": value,
+        "adminSpawned": True,
+        "label": f"Admin-spawned mine node: {qty}x {name}.",
+        "selectedSummary": f"{name} deposit spawned by admin. Tier {tier}, remaining {qty} units.",
+        "outcomeFactors": "Admin-spawned node uses normal mining tools, cargo limits, and depletion.",
+        "image_url": "/assets/fallbacks/material.svg",
+    }
+    now = iso()
+    conn.execute(
+        "INSERT INTO map_objects (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (key, "system", int(galaxy_id), int(planet_id), "ore", code, name, x_pct, y_pct, tier, qty, "available", encode_json(meta), now, now),
+    )
+    return {"kind": "ore", "name": name, "tier": tier, "qty": qty}
+
+
+def admin_spawn_exploration_site(conn: sqlite3.Connection, galaxy_id: int, planet_id: int, x_pct: float, y_pct: float, rng: random.Random, tier_override: Optional[int] = None) -> Dict[str, Any]:
+    tier = admin_spawn_resolve_resource_tier(conn, int(galaxy_id), rng, tier_override)
+    archetypes = [
+        ("ancient_ruin", "Ancient Ruin"),
+        ("signal_echo", "Unknown Signal Echo"),
+        ("relic_vault", "Relic Vault"),
+        ("derelict_archive", "Derelict Archive"),
+        ("gravity_anomaly", "Gravity Anomaly"),
+        ("precursor_beacon", "Precursor Beacon"),
+    ]
+    code, base_name = rng.choice(archetypes)
+    quality = clamp_int(rng.randint(42, 88) + tier * 3, 5, 99)
+    signal_state = "unknown" if quality < 45 else "partial" if quality < 72 else "resolved"
+    real_name = f"Admin {base_name} T{tier}-{uuid.uuid4().hex[:3].upper()}"
+    name = "Unknown Signal" if signal_state == "unknown" else real_name
+    key = f"admin:{galaxy_id}:{planet_id}:exploration:{code}:{uuid.uuid4().hex[:10]}"
+    meta = {
+        "kind": "exploration",
+        "realName": real_name,
+        "signalState": signal_state,
+        "signalQuality": quality,
+        "rewardTier": tier,
+        "rewardHint": "Admin-spawned",
+        "adminSpawned": True,
+        "riskLevel": clamp_int(35 + tier * 9 + rng.randint(-8, 12), 5, 98),
+        "riskBand": "High" if tier >= 4 else "Moderate",
+        "scanEnergy": int(OPEN_WORLD_BALANCE.get("scan_site_energy", 8)) + tier * 2,
+        "investigateEnergy": int(OPEN_WORLD_BALANCE.get("investigate_site_energy", 14)) + tier * 3,
+        "label": f"{real_name}. Admin-spawned exploration contact.",
+        "selectedSummary": f"{real_name}. Tier {tier}; signal quality {quality}.",
+        "outcomeFactors": "Admin-spawned site uses normal scanning and investigation rules.",
+        "image_url": "/assets/fallbacks/material.svg",
+    }
+    now = iso()
+    conn.execute(
+        "INSERT INTO map_objects (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (key, "system", int(galaxy_id), int(planet_id), "exploration", code, name, x_pct, y_pct, tier, 1, "available", encode_json(meta), now, now),
+    )
+    return {"kind": "exploration", "name": real_name, "tier": tier, "quality": quality}
+
+
+def admin_spawn_salvage_wreck(conn: sqlite3.Connection, planet_id: int, x_pct: float, y_pct: float, rng: random.Random, tier_override: Optional[int] = None, level_override: Optional[int] = None) -> Dict[str, Any]:
+    level, tier = admin_spawn_resolve_salvage_level_tier(conn, int(planet_id), rng, level_override, tier_override)
+    role = rng.choice(["pirate", "mercenary", "hauler", "patrol", "miner", "smuggler"])
+    ship_name = f"{rng.choice(['Broken','Silent','Burned','Drifting','Cold'])} {rng.choice(['Gunship','Hauler','Skiff','Frigate','Miner'])}"
+    difficulty = clamp_int(tier + rng.randint(1, 4), 1, 12)
+    materials = {
+        "scrap": rng.randint(6, 16) + tier * 4,
+        rng.choice(["alloy_fragments", "circuit", "sensor_shards", "weapon_parts"]): rng.randint(1, 3) + tier,
+    }
+    energy_cost = int(COMBAT_BALANCE["salvage_energy_base"] + tier * COMBAT_BALANCE["salvage_energy_per_tier"] + difficulty * COMBAT_BALANCE["salvage_energy_per_difficulty"])
+    value = int(sum(materials.values()) * (18 + tier * 9))
+    expires = utcnow() + timedelta(minutes=max(5, int(OPEN_WORLD_BALANCE.get("salvage_site_lifetime_minutes", 10) or 10)))
+    conn.execute(
+        """INSERT INTO salvage_sites
+           (planet_id,battle_id,source_type,source_name,ship_name,ship_role,ship_tier,difficulty,energy_cost,salvage_value,qty_remaining,materials_json,created_at,expires_at,x_pct,y_pct)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(planet_id), None, "admin_spawn", "Admin Spawn", ship_name, role, tier, difficulty, energy_cost, value, 1, encode_json(materials), iso(), iso(expires), x_pct, y_pct),
+    )
+    return {"kind": "salvage", "name": ship_name, "tier": tier, "level": level, "value": value}
+
+
+def admin_spawn_npc_ship(conn: sqlite3.Connection, galaxy_id: int, planet: Dict[str, Any], scope_planet_id: int, x_pct: float, y_pct: float, rng: random.Random, spawn_kind: str, level_override: Optional[int] = None) -> Dict[str, Any]:
+    if spawn_kind == "pirate":
+        career = "mercenary"
+        role = "pirate"
+        disposition = "hostile"
+        name_prefix = rng.choice(["Corsair", "Raider", "Blackwake", "Cutlass"])
+        aggression_override = 92
+        friendliness_override = 8
+    elif spawn_kind == "patrol":
+        career = "security_pilot"
+        role = "patrol"
+        disposition = "lawful"
+        name_prefix = rng.choice(["Sentinel", "Aegis", "Warden", "Marshal"])
+        aggression_override = 64
+        friendliness_override = 44
+    else:
+        career = rng.choice(["trader", "miner", "salvager", "explorer", "engineer", "smuggler"])
+        profile_for_role = NPC_CAREER_PROFILES.get(career, NPC_CAREER_PROFILES["trader"])
+        role = rng.choice(profile_for_role.get("roles") or [career])
+        disposition = "neutral"
+        name_prefix = rng.choice(["Free", "Local", "Deep", "Frontier"])
+        aggression_override = None
+        friendliness_override = None
+
+    profile = NPC_CAREER_PROFILES.get(career, NPC_CAREER_PROFILES["trader"])
+    level = admin_spawn_resolve_npc_level(conn, int(galaxy_id), rng, level_override)
+    if spawn_kind == "pirate" and level_override is None:
+        level = pirate_level_for_security(level, int(planet.get("security_level") or 50), rng)
+    rank = clamp_int(1 + level // 9, 1, 12)
+    aggression = clamp_int(aggression_override if aggression_override is not None else int(profile.get("aggression") or 50) + rng.randint(-8, 8), 1, 98)
+    friendliness = clamp_int(friendliness_override if friendliness_override is not None else int(profile.get("friendly") or 50) + rng.randint(-8, 8), 1, 98)
+    if disposition == "neutral":
+        disposition = "friendly" if friendliness - aggression > 22 else "hostile" if aggression - friendliness > 22 else "neutral"
+    power = clamp_int(int((60 + level * 3.2 + aggression) * rng.uniform(0.75, 1.25)), 15, 99999)
+    name = f"{name_prefix} {rng.choice(FIRST_NAMES)} {rng.choice(LAST_NAMES)}"
+    xp = int(level_xp_required(level) * rng.uniform(0.10, 0.55)) if level > 1 else rng.randint(0, 500)
+    credits = int((level ** 2) * rng.randint(80, 220))
+    now = utcnow()
+    conn.execute(
+        """INSERT INTO npc_agents
+           (planet_id,role,name,power,disposition,career_code,level,xp,credits,ship_class,activity_rate,aggression,friendliness,job_rank,market_bias,last_action_at,simulated,skills_json,skill_points)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            int(planet["id"]), role, name, power, disposition, career, level, xp, credits,
+            profile.get("ship") or "Civilian Shuttle", 92, aggression, friendliness, rank,
+            profile.get("market_bias") or "balanced", iso(now), 2, encode_json({}), max(0, level // 2),
+        ),
+    )
+    npc_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+    first_objective_due = now - timedelta(seconds=1)
+    conn.execute(
+        """INSERT INTO npc_map_state
+           (npc_id,map_type,galaxy_id,planet_id,role,objective,target_object_key,x_pct,y_pct,origin_x_pct,origin_y_pct,destination_x_pct,destination_y_pct,started_at,arrival_at,action_until,action_state,cargo_json,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            npc_id, "system", int(galaxy_id), int(scope_planet_id), role, "admin_spawn", "",
+            x_pct, y_pct, x_pct, y_pct, x_pct, y_pct, iso(now), iso(now),
+            iso(first_objective_due), "working",
+            encode_json({"objectiveLabel": "Admin-spawned contact", "objectiveTargetName": "spawn point", "objectiveState": "choosing first objective", "visibleCounts": {}, "adminSpawned": True}),
+            iso(now),
+        ),
+    )
+    return {"kind": spawn_kind, "name": name, "npcId": npc_id, "level": level, "role": role}
+
+
+def admin_spawn_pirate_station_at(conn: sqlite3.Connection, galaxy: Dict[str, Any], nearest_planet: Dict[str, Any], x_pct: float, y_pct: float, rng: random.Random, tier_override: Optional[int] = None, level_override: Optional[int] = None) -> Dict[str, Any]:
+    station_level, tier = admin_spawn_resolve_pirate_station_level_tier(conn, int(galaxy["id"]), rng, level_override, tier_override)
+    if level_override is None and tier_override is None:
+        station_level = pirate_level_for_security(station_level, int(nearest_planet.get("security_level") or 50), rng)
+        tier = pirate_base_tier_for_level(station_level)
+    difficulty = clamp_int(tier + int(station_level // 18) + rng.randint(0, 1), 1, 12)
+    total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
+    name = f"{rng.choice(['Blackwake','Red Dagger','Void Maw','Corsair','Grim Halo','Iron Fang'])} Admin Base {uuid.uuid4().hex[:4].upper()}"
+    code = f"admin_pirate_base_{galaxy['id']}_{uuid.uuid4().hex[:8]}"
+    conn.execute(
+        """
+        INSERT INTO pirate_stations
+          (code,galaxy_id,nearest_planet_id,name,x_pct,y_pct,tier,difficulty,total_pirates,remaining_pirates,resource_pct,status,occupied_by_player_id,seed,created_at,updated_at,respawn_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+        """,
+        (code, int(galaxy["id"]), int(nearest_planet["id"]), name, x_pct, y_pct, tier, difficulty, total, total, 100, "active", None, f"admin:{galaxy['id']}:{x_pct:.2f}:{y_pct:.2f}:{uuid.uuid4().hex[:6]}", iso(), iso()),
+    )
+    station_id = int(scalar(conn, "SELECT last_insert_rowid()") or 0)
+    return {"kind": "pirate_station", "name": name, "stationId": station_id, "tier": tier, "level": station_level}
+
+
+def admin_spawn_map_objects(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not user.get("god_mode"):
+        raise HTTPException(403, "Admin only")
+    map_type = str(payload.get("map_type") or payload.get("mapType") or "system").lower()
+    if map_type != "system":
+        raise HTTPException(400, "Admin map spawning is available from the system map.")
+    x_pct = clamp_pct(float(payload.get("x_pct") or payload.get("x") or 50), 1, 99)
+    y_pct = clamp_pct(float(payload.get("y_pct") or payload.get("y") or 50), 1, 99)
+    raw_spawns = payload.get("spawns") or []
+    if not isinstance(raw_spawns, list):
+        raw_spawns = []
+    normalized: List[Dict[str, Any]] = []
+    for item in raw_spawns:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+        kind = {"mine": "ore", "mine_node": "ore", "pirates": "pirate", "pirate_npc": "pirate", "npcs": "npc", "security": "patrol"}.get(kind, kind)
+        if kind not in ADMIN_MAP_SPAWN_LABELS:
+            continue
+        qty = clamp_int(int(item.get("qty") or item.get("count") or 1), 1, 25)
+        normalized.append({
+            "kind": kind,
+            "qty": qty,
+            "tier": optional_admin_spawn_int(item.get("tier")),
+            "level": optional_admin_spawn_int(item.get("level")),
+        })
+    total = sum(int(item["qty"]) for item in normalized)
+    if total <= 0:
+        raise HTTPException(400, "Select at least one object to spawn")
+    if total > 80:
+        raise HTTPException(400, "Spawn at most 80 objects at once")
+
+    scope = current_map_scope(conn, player, "system")
+    galaxy_id = int(scope.get("galaxy_id") or 0)
+    scope_planet_id = int(scope.get("planet_id") or player.get("location_planet_id") or 0)
+    if not galaxy_id or not scope_planet_id:
+        raise HTTPException(400, "Current map scope is unknown")
+    galaxy = row(conn, "SELECT * FROM galaxies WHERE id=?", (galaxy_id,))
+    if not galaxy:
+        raise HTTPException(400, "Current galaxy is unknown")
+    nearest_planet = nearest_system_planet_for_point(conn, galaxy_id, x_pct, y_pct, scope_planet_id)
+    rng = random.Random(f"admin-spawn:{user.get('id')}:{player.get('id')}:{time.time()}:{uuid.uuid4().hex}")
+    created: List[Dict[str, Any]] = []
+    spawn_index = 0
+    for item in normalized:
+        for _ in range(int(item["qty"])):
+            point = admin_spawn_spread_point(x_pct, y_pct, spawn_index)
+            kind = item["kind"]
+            if kind == "ore":
+                created.append(admin_spawn_ore_node(conn, galaxy_id, scope_planet_id, point["x_pct"], point["y_pct"], rng, item.get("tier")))
+            elif kind == "exploration":
+                created.append(admin_spawn_exploration_site(conn, galaxy_id, scope_planet_id, point["x_pct"], point["y_pct"], rng, item.get("tier")))
+            elif kind == "salvage":
+                created.append(admin_spawn_salvage_wreck(conn, scope_planet_id, point["x_pct"], point["y_pct"], rng, item.get("tier"), item.get("level")))
+            elif kind in {"npc", "pirate", "patrol"}:
+                created.append(admin_spawn_npc_ship(conn, galaxy_id, nearest_planet, scope_planet_id, point["x_pct"], point["y_pct"], rng, kind, item.get("level")))
+            elif kind == "pirate_station":
+                created.append(admin_spawn_pirate_station_at(conn, galaxy, nearest_planet, point["x_pct"], point["y_pct"], rng, item.get("tier"), item.get("level")))
+            spawn_index += 1
+
+    counts: Dict[str, int] = {}
+    for item in created:
+        counts[item["kind"]] = int(counts.get(item["kind"], 0)) + 1
+    summary = ", ".join(f"{qty} {ADMIN_MAP_SPAWN_LABELS.get(kind, kind)}" for kind, qty in sorted(counts.items()))
+    conn.execute(
+        "INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)",
+        (scope_planet_id, "admin_spawn_map_objects", user.get("username") or "Admin", f"Admin spawned {summary} at {x_pct:.1f} / {y_pct:.1f}.", encode_json({"x_pct": x_pct, "y_pct": y_pct, "counts": counts, "created": created[:40]}), iso()),
+    )
+    add_event(conn, None, "admin", f"{user.get('username') or 'Admin'} spawned {summary} at {x_pct:.1f} / {y_pct:.1f}.", {"x_pct": x_pct, "y_pct": y_pct, "counts": counts})
+    return {"message": f"Spawned {summary}.", "counts": counts, "created": created, "forceStateRefresh": True}
 
 
 def ensure_server_world_control(conn: sqlite3.Connection, force: bool = False) -> Dict[str, Any]:
@@ -7886,7 +11509,21 @@ def rebalance_existing_npcs_for_world_progression(conn: sqlite3.Connection) -> i
     return adjusted
 
 
-def ensure_galaxy_faction_content(conn: sqlite3.Connection) -> None:
+_GALAXY_FACTION_CONTENT_LAST_RUN: float = 0.0
+_GALAXY_FACTION_CONTENT_INTERVAL_SECONDS: float = 300.0  # 5 min
+
+
+def _invalidate_galaxy_faction_content_guard() -> None:
+    global _GALAXY_FACTION_CONTENT_LAST_RUN
+    _GALAXY_FACTION_CONTENT_LAST_RUN = 0.0
+
+
+def ensure_galaxy_faction_content(conn: sqlite3.Connection, force: bool = False) -> None:
+    global _GALAXY_FACTION_CONTENT_LAST_RUN
+    now_mono = time.monotonic()
+    if not force and (now_mono - _GALAXY_FACTION_CONTENT_LAST_RUN) < _GALAXY_FACTION_CONTENT_INTERVAL_SECONDS:
+        return
+    _GALAXY_FACTION_CONTENT_LAST_RUN = now_mono
     now = iso()
     if not scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factions'"):
         return
@@ -7952,7 +11589,8 @@ def ensure_galaxy_faction_content(conn: sqlite3.Connection) -> None:
     normalize_all_planet_classes(conn)
 
     # Deterministic adjacency graph. Gates are the actual galaxy-to-galaxy travel edges.
-    conn.execute("DELETE FROM galaxy_gates")
+    # Do not delete/reinsert here: /api/state can run concurrently and old code could
+    # race itself into UNIQUE(route_key) crashes. Upsert each route instead.
     galaxies = rows(conn, "SELECT * FROM galaxies ORDER BY id")
     edges = set()
     # nearest 3 links per galaxy, de-duped
@@ -7974,7 +11612,14 @@ def ensure_galaxy_faction_content(conn: sqlite3.Connection) -> None:
         d = math.sqrt((float(a.get("x_pct") or 50) - float(b.get("x_pct") or 50)) ** 2 + (float(a.get("y_pct") or 50) - float(b.get("y_pct") or 50)) ** 2)
         for left, right, left_gate, right_gate in [(a_id, b_id, a_gate, b_gate), (b_id, a_id, b_gate, a_gate)]:
             conn.execute(
-                "INSERT INTO galaxy_gates (from_galaxy_id,to_galaxy_id,from_planet_id,to_planet_id,distance,route_key) VALUES (?,?,?,?,?,?)",
+                """INSERT INTO galaxy_gates (from_galaxy_id,to_galaxy_id,from_planet_id,to_planet_id,distance,route_key)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(route_key) DO UPDATE SET
+                     from_galaxy_id=excluded.from_galaxy_id,
+                     to_galaxy_id=excluded.to_galaxy_id,
+                     from_planet_id=excluded.from_planet_id,
+                     to_planet_id=excluded.to_planet_id,
+                     distance=excluded.distance""",
                 (left, right, left_gate["id"] if left_gate else None, right_gate["id"] if right_gate else None, d, f"{left}:{right}"),
             )
 
@@ -8004,6 +11649,11 @@ def player_faction(conn: sqlite3.Connection, player: Dict[str, Any]) -> Optional
     fid = factions[(int(player["id"]) - 1) % len(factions)]["id"]
     conn.execute("UPDATE players SET faction_id=? WHERE id=?", (fid, player["id"]))
     return row(conn, "SELECT * FROM factions WHERE id=?", (fid,))
+
+
+def player_faction_code(conn: sqlite3.Connection, player: Dict[str, Any]) -> str:
+    faction = player_faction(conn, player) if player else None
+    return str((faction or {}).get("code") or DEFAULT_FACTION_CODE)
 
 
 def galaxy_gate_planet(conn: sqlite3.Connection, galaxy_id: int) -> Optional[Dict[str, Any]]:
@@ -8273,7 +11923,9 @@ def build_galaxy_map_shallow(conn: sqlite3.Connection, player: Dict[str, Any]) -
 
 
 def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
-    process_planet_faction_wars(conn, player)
+    # process_planet_faction_wars is already invoked by build_state immediately
+    # before calling this function. Calling it again here duplicates an entire
+    # war-processing pass on every state poll.
     current_planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
     current_gid = int(current_planet.get("galaxy_id") if current_planet else 0)
     planets = rows(conn, "SELECT * FROM planets")
@@ -8325,42 +11977,38 @@ def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
         if not a or not b:
             continue
         key = route_key(a["id"], b["id"])
-        active = travel.get("active") and travel.get("mode") == "galaxy" and key == route_key(travel.get("origin_galaxy_id"), travel.get("destination_galaxy_id"))
+        active = travel.get("active") and travel.get("mode") in {"galaxy", "galaxy_route"} and key == route_key(travel.get("origin_galaxy_id"), travel.get("destination_galaxy_id"))
         lanes.append({"from": a["id"], "to": b["id"], "key": key, "visited": key in visited_routes, "active": bool(active), "gate": True})
 
-    ore_all = build_open_world_ore_sites(conn, player, nodes, "galaxy")
-    exploration_all = build_open_world_exploration_sites(conn, player, nodes, "galaxy")
-    separate_stationary_map_objects([nodes, ore_all, exploration_all])
-    traffic_all = build_open_world_traffic(conn, player, "galaxy", nodes, ore_all + exploration_all)
-    ore_sites = annotate_and_filter_by_player_radar(conn, player, nodes, ore_all, "galaxy")
-    exploration_sites = annotate_and_filter_by_player_radar(conn, player, nodes, exploration_all, "galaxy")
-    traffic = [attach_tool_permissions(conn, player, o) for o in annotate_and_filter_by_player_radar(conn, player, nodes, traffic_all, "galaxy") if o.get("id") != "player:self"]
-
-    active_wars = active_or_upcoming_planet_wars(conn)
-    war_zones = []
-
-    ship = active_ship_for_player(conn, player)
-    radar_range = ship_radar_range_pct(conn, ship, "galaxy")
-    radar_center = player_map_center(conn, player, "galaxy", nodes)
-    hidden_total = (len(ore_all) - len(ore_sites)) + (len(exploration_all) - len(exploration_sites)) + (len([t for t in traffic_all if t.get("id") != "player:self"]) - len([t for t in traffic if t.get("id") != "player:self"]))
+    # Performance rule: galaxy view is gate navigation only.
+    # No NPC AI, signatures, scans, or combat objects are built here.
+    scan_area = scan_area_profile_for_player(conn, player, "galaxy")
+    scan_blips = build_scan_area_blips(conn, player, nodes, "galaxy")
+    scan_pings = build_scan_area_pings(conn, player, "galaxy")
+    annotate_object_scan_unlocks(conn, player, nodes, "galaxy", int(current_gid or 0))
+    annotate_object_scan_unlocks(conn, player, scan_blips, "galaxy", int(current_gid or 0))
     summary = {
-        "ships_in_transit": len(traffic),
-        "ore_signatures": len(ore_sites),
-        "ancient_sites": len(exploration_sites),
+        "ships_in_transit": 0,
+        "ore_signatures": 0,
+        "ancient_sites": 0,
+        "server_events": 0,
         "wrecks": 0,
-        "hostile_contacts": len([t for t in traffic if t.get("hostile")]),
+        "hostile_contacts": 0,
         "risk_band": "Regional",
         "security_level": int(sum([n.get("security_avg", 50) for n in nodes]) / max(1, len(nodes))),
-        "radar_range_pct": radar_range,
-        "radar_center_x_pct": round(float(radar_center.get("x_pct") or 50), 2),
-        "radar_center_y_pct": round(float(radar_center.get("y_pct") or 50), 2),
-        "hidden_by_radar": max(0, hidden_total),
+        "radar_range_pct": 0,
+        "radar_center_x_pct": 0,
+        "radar_center_y_pct": 0,
+        "hidden_by_radar": 0,
+        "scan_area": scan_area,
         "player_faction": pf,
-        "war_count": len(active_wars),
-        "readable_hint": f"Galaxy map uses gate lanes. Galaxy ownership updates only when one faction controls every planet in that galaxy.",
-        "nearby_opportunities": ["Gate lanes", "Faction wars", "Center bonuses", "Radar-limited contacts"],
+        "war_count": len(active_or_upcoming_planet_wars(conn)),
+        "readable_hint": "Galaxy map is gate-only. Select a destination galaxy; autopilot follows connected gate lanes. Local objects exist only in system view.",
+        "nearby_opportunities": ["Gate lanes", "Faction borders", "Gate destinations"],
     }
-    return {"nodes": nodes, "lanes": lanes, "current_galaxy_id": current_gid, "traffic": traffic, "ore_sites": ore_sites, "exploration_sites": exploration_sites, "war_zones": war_zones, "summary": summary}
+    return {"nodes": nodes, "lanes": lanes, "current_galaxy_id": current_gid, "traffic": [], "ore_sites": [], "exploration_sites": [], "event_sites": [], "war_zones": [], "scan_blips": scan_blips, "scan_pings": scan_pings, "summary": summary}
+
+    return {"nodes": nodes, "lanes": lanes, "current_galaxy_id": current_gid, "traffic": traffic, "ore_sites": ore_sites, "exploration_sites": exploration_sites, "event_sites": event_sites, "war_zones": war_zones, "summary": summary}
 
 
 
@@ -8463,14 +12111,20 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     exploration_all = build_open_world_exploration_sites(conn, player, nodes, "system")
     pirate_station_all = build_system_pirate_stations(conn, player, nodes, int(current["galaxy_id"]))
     player_base_all = build_player_bases_for_map(conn, player, int(current["galaxy_id"]))
-    separate_stationary_map_objects([nodes, ore_all, salvage_all, exploration_all, pirate_station_all, player_base_all])
-    traffic_all = build_open_world_traffic(conn, player, "system", nodes, ore_all + salvage_all + exploration_all + pirate_station_all + player_base_all)
+    event_sites_all = build_server_event_map_sites(conn, player, nodes, "system", int(current["galaxy_id"]), int(current["id"]))
+    separate_stationary_map_objects([nodes, ore_all, salvage_all, exploration_all, pirate_station_all, player_base_all, event_sites_all])
+    traffic_all = build_open_world_traffic(conn, player, "system", nodes, ore_all + salvage_all + exploration_all + pirate_station_all + player_base_all + event_sites_all)
     ore_sites = annotate_and_filter_by_player_radar(conn, player, nodes, ore_all, "system")
     salvage_icons = annotate_and_filter_by_player_radar(conn, player, nodes, [attach_tool_permissions(conn, player, o) for o in salvage_all], "system")
     exploration_sites = annotate_and_filter_by_player_radar(conn, player, nodes, exploration_all, "system")
     pirate_stations = annotate_and_filter_by_player_radar(conn, player, nodes, pirate_station_all, "system")
     player_bases = annotate_and_filter_by_player_radar(conn, player, nodes, player_base_all, "system")
+    event_sites = annotate_and_filter_by_player_radar(conn, player, nodes, event_sites_all, "system")
     traffic = [attach_tool_permissions(conn, player, o) for o in annotate_and_filter_by_player_radar(conn, player, nodes, traffic_all, "system") if o.get("id") != "player:self"]
+    scan_blips = build_scan_area_blips(conn, player, nodes, "system")
+    scan_pings = build_scan_area_pings(conn, player, "system")
+    for group in (nodes, ore_sites, salvage_icons, exploration_sites, pirate_stations, player_bases, event_sites, traffic, scan_blips):
+        annotate_object_scan_unlocks(conn, player, group, "system", int(current["galaxy_id"]))
     active_wars = active_or_upcoming_planet_wars(conn)
     node_by_id_for_war = {int(n["id"]): n for n in nodes if str(n.get("id") or "").isdigit()}
     war_zones = []
@@ -8499,7 +12153,8 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     ship = active_ship_for_player(conn, player)
     radar_range = ship_radar_range_pct(conn, ship, "system")
     radar_center = player_map_center(conn, player, "system", nodes)
-    hidden_total = (len(ore_all) - len(ore_sites)) + (len(salvage_all) - len(salvage_icons)) + (len(exploration_all) - len(exploration_sites)) + (len(pirate_station_all) - len(pirate_stations)) + (len(player_base_all) - len(player_bases)) + (len([t for t in traffic_all if t.get("id") != "player:self"]) - len([t for t in traffic if t.get("id") != "player:self"]))
+    scan_area = scan_area_profile_for_player(conn, player, "system")
+    hidden_total = (len(ore_all) - len(ore_sites)) + (len(salvage_all) - len(salvage_icons)) + (len(exploration_all) - len(exploration_sites)) + (len(pirate_station_all) - len(pirate_stations)) + (len(player_base_all) - len(player_bases)) + (len(event_sites_all) - len(event_sites)) + (len([t for t in traffic_all if t.get("id") != "player:self"]) - len([t for t in traffic if t.get("id") != "player:self"]))
     summary = {
         "ships_in_transit": len(traffic),
         "ore_signatures": len(ore_sites),
@@ -8507,6 +12162,7 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
         "ancient_sites": len(exploration_sites),
         "hostile_contacts": len([t for t in traffic if t.get("hostile")]),
         "pirate_stations": len(pirate_stations),
+        "server_events": len(event_sites),
         "gate_links": len(gate_links),
         "security_level": int(sum([n.get("security_level", 50) for n in nodes]) / max(1, len(nodes))),
         "risk_band": "High" if any(int(n.get("risk_level") or 0) >= 65 for n in nodes) else "Moderate",
@@ -8514,10 +12170,13 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
         "radar_center_x_pct": round(float(radar_center.get("x_pct") or 50), 2),
         "radar_center_y_pct": round(float(radar_center.get("y_pct") or 50), 2),
         "hidden_by_radar": max(0, hidden_total),
+        "scan_area": scan_area,
+        "player_faction": pf,
+        "admin_spawn_constraints": admin_spawn_constraints(conn, int(current["galaxy_id"]), int(current["id"])) if player_has_god_mode(conn, player) else None,
         "readable_hint": f"Unified system view: planet/station nodes plus gate links to adjacent galaxies. Ships and hidden contacts remain radar-limited ({radar_range}%).",
         "nearby_opportunities": ["Galaxy gates", "Radar-limited contacts", "Player bases", "Pirate stations", "Mine ore", "Scan ancient sites", "Salvage wrecks"],
     }
-    return {"nodes": nodes, "lanes": lanes, "current_planet_id": current["id"], "current_galaxy_id": current["galaxy_id"], "traffic": traffic, "ore_sites": ore_sites, "salvage_icons": salvage_icons, "exploration_sites": exploration_sites, "pirate_stations": pirate_stations, "player_bases": player_bases, "war_zones": war_zones, "summary": summary}
+    return {"nodes": nodes, "lanes": lanes, "current_planet_id": current["id"], "current_galaxy_id": current["galaxy_id"], "traffic": traffic, "ore_sites": ore_sites, "salvage_icons": salvage_icons, "exploration_sites": exploration_sites, "pirate_stations": pirate_stations, "player_bases": player_bases, "event_sites": event_sites, "war_zones": war_zones, "scan_blips": scan_blips, "scan_pings": scan_pings, "summary": summary}
 
 
 
@@ -8597,7 +12256,9 @@ def ensure_pirate_station_content(conn: sqlite3.Connection) -> None:
                 continue
             candidate, nearest_planet, radius = best
             galaxy_center_value = int(g.get("center_value") or galaxy_center_value_from_xy(g.get("x_pct") or 50, g.get("y_pct") or 50))
-            tier = clamp_int(1 + int(radius // 10) + max(0, galaxy_center_value - 2) + int(int(nearest_planet.get("pirate_activity") or 40) >= 65), 2, 9)
+            raw_level = (1 + int(radius // 10) + max(0, galaxy_center_value - 2) + int(int(nearest_planet.get("pirate_activity") or 40) >= 65)) * 8
+            station_level = pirate_level_for_security(raw_level, int(nearest_planet.get("security_level") or 50), rng)
+            tier = pirate_base_tier_for_level(station_level)
             difficulty = clamp_int(tier + rng.randint(0, 2), 2, 9)
             total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
             name = f"{rng.choice(['Blackwake','Red Dagger','Void Maw','Corsair','Grim Halo','Iron Fang'])} Station {g['code'].upper()}-{existing + slot + 1}"
@@ -8634,6 +12295,7 @@ def build_system_pirate_stations(conn: sqlite3.Connection, player: Dict[str, Any
             "maxPlayers": cap,
             "resourcePct": resource,
             "resource_pct": resource,
+            "adminSpawned": str(st.get("code") or "").startswith("admin_pirate_base_") or str(st.get("seed") or "").startswith("admin:"),
             "label": f"Pirate Station • T{st.get('tier')} • {resource}% defenders • {active_count}/{cap} pilots",
             "selectedSummary": f"Open-world pirate station near {st.get('nearest_planet_name') or 'deep space'}. Capacity {active_count}/{cap}. Shared defenders persist until cleared.",
             "outcomeFactors": "Entering opens an open-world station map. Pirates move slowly toward the closest pilot. Multiple pilots can enter up to capacity.",
@@ -8715,6 +12377,9 @@ def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station
     galaxy_id = int(station.get("galaxy_id") or 0)
     level_min, level_max = world_level_range_for_galaxy(conn, galaxy_id) if galaxy_id else (tier * 6, tier * 10)
     strength_mult = float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25))
+    station_planet = row(conn, "SELECT security_level FROM planets WHERE id=?", (int(station.get("nearest_planet_id") or station.get("planet_id") or 0),))
+    station_security = int((station_planet or {}).get("security_level") or 50)
+    station_band = pirate_security_band(station_security)
     rng = random.Random(f"pirate-run:{station.get('seed')}:{run_id}:{count}")
     points: List[Dict[str, float]] = []
     for i in range(count):
@@ -8739,12 +12404,19 @@ def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station
         points.append(best or {"x_pct": rng.uniform(10, 90), "y_pct": rng.uniform(10, 90)})
     for i, pt in enumerate(points):
         base_level = rng.randint(max(1, level_min), max(level_min, level_max))
-        enemy_level = max(1, int(math.ceil(base_level * strength_mult)))
+        enemy_level = pirate_level_for_security(max(1, int(math.ceil(base_level * strength_mult))), station_security, rng)
         enemy_tier = clamp_int(max(tier, pirate_base_tier_for_level(enemy_level)) + (1 if i % 5 == 0 and tier >= 4 else 0), 1, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9)))
         power = int(85 + enemy_level * rng.uniform(14.5, 20.5) + enemy_tier * 32 + rng.randint(0, 55))
         hull = int(150 + enemy_level * rng.uniform(32, 44) + enemy_tier * 45 + rng.randint(0, 80))
         shield = int(90 + enemy_level * rng.uniform(18, 28) + enemy_tier * 28 + rng.randint(0, 55))
-        name = f"{rng.choice(['Raider','Cutlass','Reaver','Marauder','Blackwake','Corsair'])} {i+1}"
+        name_roots = {
+            "high_sec": ["Knife", "Rutter", "Backdock", "Scrapjaw"],
+            "border_sec": ["Raider", "Cutlass", "Corsair", "Blackwake"],
+            "low_sec": ["Reaver", "Marauder", "Fang", "Voidhook"],
+            "deep_low_sec": ["Dread Corsair", "Grav Maw", "Siegebreaker", "Iron Fang"],
+            "null_sec": ["Null-Crown", "Abyssal Maw", "Relic Reaver", "Event Horizon"],
+        }
+        name = f"{rng.choice(name_roots.get(str(station_band['key']), name_roots['border_sec']))} {i+1}"
         conn.execute(
             """
             INSERT INTO pirate_station_enemies
@@ -8753,6 +12425,24 @@ def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station
             """,
             (run_id, f"enemy-{i+1}", name, "pirate", pt["x_pct"], pt["y_pct"], hull, hull, shield, shield, power, enemy_tier, "active", iso(), iso()),
         )
+
+
+def pirate_station_player_spawn_point(station_id: int, player_id: int) -> Dict[str, float]:
+    edge = float(PIRATE_STATION_BALANCE.get("escape_edge_pct", 10.0))
+    rng = random.Random(f"pirate-station-player-spawn:{int(station_id)}:{int(player_id)}:{uuid.uuid4().hex[:8]}")
+    safe_min = edge + 8.0
+    safe_max = 100.0 - edge - 8.0
+    lane = max(edge + 8.0, min(edge + 12.0, edge + 10.0 + rng.uniform(-1.8, 1.8)))
+    side = rng.choice(["left", "right", "top", "bottom"])
+    if side == "left":
+        x, y = lane, rng.uniform(safe_min, safe_max)
+    elif side == "right":
+        x, y = 100.0 - lane, rng.uniform(safe_min, safe_max)
+    elif side == "top":
+        x, y = rng.uniform(safe_min, safe_max), lane
+    else:
+        x, y = rng.uniform(safe_min, safe_max), 100.0 - lane
+    return {"x_pct": clamp_pct(x, edge + 2.0, 100.0 - edge - 2.0), "y_pct": clamp_pct(y, edge + 2.0, 100.0 - edge - 2.0)}
 
 
 def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], station_id: int) -> Dict[str, Any]:
@@ -8766,6 +12456,11 @@ def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], s
     if current and int(current["station_id"]) != int(station_id):
         raise HTTPException(409, "You are already inside a different pirate station")
     if current:
+        clear_player_open_space(conn, player["id"])
+        clear_player_waypoint(conn, player["id"])
+        clear_player_intercept(conn, player["id"])
+        clear_player_route(conn, player["id"])
+        conn.execute("UPDATE players SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL, travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL, travel_destination_galaxy_id=NULL WHERE id=?", (player["id"],))
         update_pirate_station_resource(conn, current)
         return {"message": f"Returned to {station['name']}.", "openPage": "Pirate Station"}
 
@@ -8774,10 +12469,18 @@ def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], s
     if active_count >= cap:
         raise HTTPException(409, f"Pirate station is at capacity ({active_count}/{cap}).")
 
+    clear_player_open_space(conn, player["id"])
+    clear_player_waypoint(conn, player["id"])
+    clear_player_intercept(conn, player["id"])
+    clear_player_route(conn, player["id"])
+    clear_pirate_station_travel_intent(conn, player["id"])
+    conn.execute("UPDATE players SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL, travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL, travel_destination_galaxy_id=NULL WHERE id=?", (player["id"],))
+
+    spawn = pirate_station_player_spawn_point(station_id, player["id"])
     # Player position is per-player; enemies are shared using the oldest active/retreated station run.
     prior = row(conn, "SELECT * FROM pirate_station_runs WHERE player_id=? AND station_id=? AND status='retreated' ORDER BY id DESC LIMIT 1", (player["id"], station_id))
     if prior:
-        conn.execute("UPDATE pirate_station_runs SET status='active', updated_at=?, player_x_pct=50, player_y_pct=50, battle_open=0, battle_target_enemy_id=NULL, battle_report_json='{}' WHERE id=?", (iso(), prior["id"]))
+        conn.execute("UPDATE pirate_station_runs SET status='active', updated_at=?, player_x_pct=?, player_y_pct=?, battle_open=0, battle_target_enemy_id=NULL, battle_report_json='{}' WHERE id=?", (iso(), spawn["x_pct"], spawn["y_pct"], prior["id"]))
         run_id = int(prior["id"])
     else:
         conn.execute(
@@ -8785,7 +12488,7 @@ def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], s
             INSERT INTO pirate_station_runs (station_id,player_id,status,player_x_pct,player_y_pct,battle_open,battle_report_json,started_at,updated_at)
             VALUES (?,?,?,?,?,?,?,?,?)
             """,
-            (station_id, player["id"], "active", 50, 50, 0, "{}", iso(), iso()),
+            (station_id, player["id"], "active", spawn["x_pct"], spawn["y_pct"], 0, "{}", iso(), iso()),
         )
         run_id = int(scalar(conn, "SELECT last_insert_rowid()"))
 
@@ -9705,6 +13408,7 @@ def build_hangar_state(conn: sqlite3.Connection, player: Dict[str, Any], user: O
         sh["installed_modules"] = ship_installed_modules(conn, int(sh["id"]))
         sh["derived_stats"] = ship_derived_stats(conn, sh)
         sh["speed_profile"] = ship_speed_profile(conn, sh)
+        sh["insurance"] = ship_insurance_payload(conn, sh)
         active_capacity = int(sh["derived_stats"].get("cargo_capacity") or sh.get("cargo_capacity") or 0)
         sh["activation_blocked_reason"] = "" if int(usage.get("total") or 0) <= active_capacity or god else f"Cargo exceeds capacity by {int(usage.get('total') or 0) - active_capacity:,}"
     active_payload = next((x for x in owned if int(x["id"]) == int(player.get("active_ship_id") or 0)), None) or (owned[0] if owned else None)
@@ -9773,6 +13477,7 @@ def build_hangar_state(conn: sqlite3.Connection, player: Dict[str, Any], user: O
         "derivedStats": active_payload.get("derived_stats", {}) if active_payload else {},
         "warnings": warnings,
         "compatibilityInfo": {"slotTypes": LOADOUT_SLOT_ORDER, "powerRule": "Installed equipment consumes power and must match explicit ship slots, size limits, tier rules, unique-equip rules, and ownership. Validation is enforced server-side."},
+        "insuranceBalance": {"tiers": INSURANCE_BALANCE.get("tiers", {}), "pvpPayoutMult": INSURANCE_BALANCE.get("pvp_payout_mult", 0.70), "note": "Insurance pays credits only. Insured value includes ship price plus material gold-equivalent, but excludes cargo, modules, and salvage."},
         "actionPermissions": {"canRepair": bool(active_payload), "canRefuel": bool(active_payload), "canRecharge": True, "canBuyShips": True, "canInstallModules": bool(active_payload)},
         "statHelp": {
             "hull":"Structural durability. If it reaches zero, the ship can be disabled or destroyed.",
@@ -10428,6 +14133,112 @@ def balanced_ship_purchase_price(template: Dict[str, Any]) -> int:
     size_mult = {"S": 0.92, "M": 1.0, "L": 1.12, "C": 1.34}.get(size, 1.0)
     return max(1, int(int(template.get("price") or 1) * eco_mult("progression_cost_mult.ships", 1.18) * (1.0 + max(0, tier-1) * 0.04) * size_mult))
 
+def insurance_tier_cfg(tier: Optional[str]) -> Dict[str, Any]:
+    tiers = INSURANCE_BALANCE.get("tiers") or {}
+    key = str(tier or INSURANCE_BALANCE.get("default_tier") or "none").lower()
+    if key not in tiers:
+        key = str(INSURANCE_BALANCE.get("default_tier") or "none")
+    cfg = dict(tiers.get(key) or tiers.get("none") or {})
+    cfg["key"] = key
+    cfg["coverage_pct"] = max(0.0, min(1.0, float(cfg.get("coverage_pct") or 0)))
+    cfg["premium_pct"] = max(0.0, float(cfg.get("premium_pct") or 0))
+    cfg["buyable"] = bool(cfg.get("buyable"))
+    return cfg
+
+def insurance_material_unit_value(conn: sqlite3.Connection, code: str) -> int:
+    code = str(code or "")
+    if not code:
+        return 0
+    profile = SALVAGE_DROP_ITEM_PROFILES.get(code) or {}
+    if profile.get("base_value") is not None:
+        return max(1, int(profile.get("base_value") or 1))
+    commodity = row(conn, "SELECT base_price FROM commodities WHERE code=?", (code,)) if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='commodities'") else None
+    if commodity:
+        return commodity_base_price_balanced(commodity)
+    inv = row(conn, "SELECT base_value FROM inventory WHERE item_code=? ORDER BY base_value DESC LIMIT 1", (code,)) if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='inventory'") else None
+    return max(1, int((inv or {}).get("base_value") or 100))
+
+def ship_insurance_value_breakdown(conn: sqlite3.Connection, ship: Dict[str, Any]) -> Dict[str, Any]:
+    if not ship:
+        return {"shipValue": 0, "marketValue": 0, "materialValue": 0, "materials": {}}
+    template = row(conn, "SELECT * FROM ship_templates WHERE id=?", (ship.get("template_id"),)) if ship.get("template_id") else None
+    merged = dict(template or {})
+    merged.update(dict(ship or {}))
+    market_value = balanced_ship_purchase_price(merged)
+    base_tier = clamp_tier(merged.get("ship_tier", 1))
+    current_tier = clamp_tier(merged.get("current_tier", base_tier))
+    if current_tier > base_tier:
+        market_value = int(market_value * (1.0 + (current_tier - base_tier) * 0.18))
+    materials: Dict[str, int] = {}
+    material_value = 0
+    if bool(INSURANCE_BALANCE.get("include_material_equivalent_in_value", True)):
+        target = {
+            "role": merged.get("role") or merged.get("class_name") or "ship",
+            "tier": current_tier,
+            "level": current_tier,
+            "shipName": merged.get("name") or merged.get("template_name") or "Ship",
+            "power": get_ship_power(conn, int(ship.get("id") or 0)) if ship.get("id") else 100,
+        }
+        enemy = {
+            "name": merged.get("name") or merged.get("template_name") or "Ship",
+            "tier": current_tier,
+            "hull": int(merged.get("max_hull") or merged.get("hull") or 1000),
+            "shield": int(merged.get("max_shield") or merged.get("shield") or 200),
+            "combatRating": get_ship_power(conn, int(ship.get("id") or 0)) if ship.get("id") else 100,
+            "role": merged.get("role") or merged.get("class_name") or "ship",
+        }
+        materials = salvage_materials_required_to_build_ship(target, enemy)
+        material_value = int(sum(insurance_material_unit_value(conn, code) * int(qty) for code, qty in materials.items()) * float(INSURANCE_BALANCE.get("material_value_mult", 1.0)))
+    value = max(0, int(market_value + material_value))
+    return {"shipValue": value, "marketValue": int(market_value), "materialValue": int(material_value), "materials": materials}
+
+def ship_insurance_payload(conn: sqlite3.Connection, ship: Dict[str, Any], *, loss_reason: str = "") -> Dict[str, Any]:
+    is_starter = bool(int((ship or {}).get("starter") or (ship or {}).get("template_starter") or 0))
+    current_key = "starter" if is_starter else str((ship or {}).get("insurance_tier") or INSURANCE_BALANCE.get("default_tier") or "none").lower()
+    current = insurance_tier_cfg(current_key)
+    breakdown = ship_insurance_value_breakdown(conn, ship or {})
+    value = int(breakdown.get("shipValue") or 0)
+    payout_mult = 1.0
+    reason_l = str(loss_reason or "").lower()
+    if reason_l and any(str(m).lower() in reason_l for m in (INSURANCE_BALANCE.get("pvp_reason_markers") or [])):
+        payout_mult = max(0.0, min(1.0, float(INSURANCE_BALANCE.get("pvp_payout_mult", 0.70))))
+    current_payout = int(value * float(current.get("coverage_pct") or 0) * payout_mult) if not is_starter else 0
+    current_premium_value = int(value * float(current.get("premium_pct") or 0))
+    options = []
+    tier_order = ["basic", "standard", "premium"]
+    for key in tier_order:
+        cfg = insurance_tier_cfg(key)
+        target_premium = int(value * float(cfg.get("premium_pct") or 0))
+        upgrade_credit = current_premium_value if key != current.get("key") else target_premium
+        if key != current.get("key"):
+            upgrade_credit = int(upgrade_credit * float(INSURANCE_BALANCE.get("tier_upgrade_credit_pct", 1.0)))
+        cost = max(0, target_premium - upgrade_credit)
+        options.append({
+            "key": key,
+            "label": cfg.get("label") or key.title(),
+            "coveragePct": int(round(float(cfg.get("coverage_pct") or 0) * 100)),
+            "premiumPct": round(float(cfg.get("premium_pct") or 0) * 100, 2),
+            "cost": cost,
+            "payout": 0 if is_starter else int(value * float(cfg.get("coverage_pct") or 0)),
+            "buyable": bool(cfg.get("buyable")) and not is_starter,
+            "active": key == current.get("key"),
+            "description": cfg.get("description") or "",
+        })
+    return {
+        "tier": current.get("key"),
+        "label": current.get("label") or str(current.get("key") or "none").title(),
+        "coveragePct": int(round(float(current.get("coverage_pct") or 0) * 100)),
+        "premiumPct": round(float(current.get("premium_pct") or 0) * 100, 2),
+        "shipValue": value,
+        "marketValue": int(breakdown.get("marketValue") or 0),
+        "materialValue": int(breakdown.get("materialValue") or 0),
+        "materials": breakdown.get("materials") or {},
+        "estimatedPayout": current_payout,
+        "payoutMultiplier": payout_mult,
+        "starterBlocked": is_starter,
+        "options": options,
+    }
+
 def balanced_module_purchase_price(module: Dict[str, Any]) -> int:
     tier = max(1, int(module.get("tier") or 1))
     rarity = str(module.get("rarity") or "common").lower()
@@ -10488,21 +14299,23 @@ def ecosystem_balance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
         },
         "targetShape": ECOSYSTEM_BALANCE.get("philosophy", {}),
         "simulation": {
-            "runs": 1000,
-            "active_hours_per_day": 12,
-            "target_days": 730,
-            "mean_days": 737.64,
-            "median_days": 732.0,
-            "p10_days": 721.0,
-            "p90_days": 762.0,
+            "runs": int(PROGRESSION_BALANCE.get("sim_runs", 1000) or 1000),
+            "active_hours_per_day": int(PROGRESSION_BALANCE.get("baseline_active_hours_per_day", 12) or 12),
+            "target_days": int(PROGRESSION_BALANCE.get("target_completion_days", 490) or 490),
+            "mean_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("mean_days", 490.34)),
+            "median_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("median_days", 490)),
+            "p10_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("p10_days", 487)),
+            "p90_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("p90_days", 494)),
+            "first_quarter_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("first_quarter_mean_days", 27.52)),
+            "third_quarter_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("third_quarter_mean_days", 176.99)),
             "component_mean_days": {
-                "skills": 722.07,
-                "credits": 728.10,
-                "base_research_build": 625.74,
-                "crafting_recipes": 612.04,
-                "achievements_loops": 687.32,
+                "skills": 490.34,
+                "credits": 339.6,
+                "career_ranks": 490.34,
+                "player_level": 214.3,
+                "completion_wall": 490.34,
             },
-            "note": "Last local Monte Carlo verification from backend/tools/balance_simulation.py. Procedural/per-planet infinite content is modeled as finite mastery tracks.",
+            "note": "1000-run no-lifer Monte Carlo target: first quarter around one month, third quarter around a few months, final completion wall around another year.",
         },
     }
 
@@ -11179,14 +14992,22 @@ def attach_item_visual(item: Dict[str, Any], *, name_key: str = "name", item_typ
     return item
 
 
+_SHIP_VISUAL_CACHE: Dict[str, str] = {}
+
+
 def ship_visual_payload(name: str = "Ship", role: str = "ship") -> str:
-    role = str(role or "ship").lower()
+    role_l = str(role or "ship").lower()
+    name_s = str(name or "Ship")
+    cache_key = f"{role_l}|{name_s}"
+    cached = _SHIP_VISUAL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     color = {
         "combat": "ff4d57", "siege": "ff4d57", "fleet": "a65cff",
         "trade": "35f2ff", "cargo": "ffc247", "mining": "4dff91",
         "salvage": "ffae35", "exploration": "8cffff", "starter": "35f2ff",
-    }.get(role, "35f2ff")
-    initials = "".join([p[:1] for p in str(name or "Ship").replace("-", " ").split()[:2]]).upper() or "SH"
+    }.get(role_l, "35f2ff")
+    initials = "".join([p[:1] for p in name_s.replace("-", " ").split()[:2]]).upper() or "SH"
     svg = f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 110'>
 <defs><linearGradient id='h' x1='0' x2='1'><stop offset='0%' stop-color='#07141d'/><stop offset='100%' stop-color='#{color}' stop-opacity='.55'/></linearGradient></defs>
 <rect width='180' height='110' rx='18' fill='#02060b'/>
@@ -11195,7 +15016,11 @@ def ship_visual_payload(name: str = "Ship", role: str = "ship") -> str:
 <circle cx='92' cy='56' r='18' fill='#02060b' stroke='#{color}' stroke-width='2'/>
 <text x='92' y='63' text-anchor='middle' font-family='Segoe UI,Arial,sans-serif' font-size='20' font-weight='800' fill='#{color}'>{initials[:3]}</text>
 </svg>"""
-    return "data:image/svg+xml;utf8," + quote(svg)
+    out = "data:image/svg+xml;utf8," + quote(svg)
+    if len(_SHIP_VISUAL_CACHE) > 512:
+        _SHIP_VISUAL_CACHE.clear()
+    _SHIP_VISUAL_CACHE[cache_key] = out
+    return out
 
 
 
@@ -11944,8 +15769,11 @@ def build_player_storage_state(conn: sqlite3.Connection, player: Dict[str, Any])
         "depositCandidates": deposit_candidates,
         "galaxies": list(galaxy_counts.values()),
         "rules": {
-            "view": "All galaxy storage is visible.",
-            "modify": "Deposits and withdrawals require being on the item planet.",
+            "view": "Remote planet storage is visible for planning only.",
+            "modify": "Deposits and withdrawals require being physically docked on the item planet.",
+            "globalOnly": "Credits/gold only. Materials, items, ships, modules, cargo, equipment, and storage are planet-scoped.",
+            "planetScoped": True,
+            "goldGlobalOnly": True,
             "currentPlanetId": int(scope["planet_id"]),
             "currentGalaxyId": int(scope["galaxy_id"]),
         },
@@ -11994,6 +15822,8 @@ def listing_payload_from_inventory(conn: sqlite3.Connection, player_id: int, pay
         holding = row(conn, "SELECT ch.*, c.code, c.name, c.legal, c.category, c.base_price, c.mass, c.description FROM cargo_hold ch JOIN commodities c ON c.id=ch.commodity_id WHERE ch.player_id=? AND ch.commodity_id=?", (player_id, commodity_id))
         if not holding or int(holding["qty"] or 0) < qty:
             raise HTTPException(400, "Not enough cargo to list")
+        if is_trade_good_category(holding.get("category")):
+            raise HTTPException(400, "Trade goods are market cargo only. They cannot be listed on the player market.")
         return {
             "origin": "cargo_hold", "source_ref": str(commodity_id), "item_code": holding["code"], "item_name": holding["name"],
             "item_type": holding["category"], "category": "illicit_goods" if not int(holding.get("legal", 1)) else "goods",
@@ -13185,12 +17015,17 @@ def simulate_npc_activity(conn: sqlite3.Connection, force: bool = False) -> int:
     return action_count
 
 def level_xp_required(level: int) -> int:
-    # Fast early levels, medium MMO middle, Korean-MMO slow late game.
-    if level <= 10:
-        return int(700 + level * level * 650)
-    if level <= ECONOMY_CONFIG["late_level_soft_wall"]:
-        return int(1800 + level ** 2.45 * 720)
-    return int(1800 + level ** 3.25 * 900)
+    # Incremental player-level curve for the 12h/day progression target.
+    # 1-25 moves quickly, 26-75 is the main middle, 76+ turns into the hard wall.
+    level = max(1, int(level or 1))
+    cfg = PROGRESSION_BALANCE.get("player_level_curve", {})
+    early_cutoff = int(cfg.get("early_cutoff", 25) or 25)
+    mid_cutoff = int(cfg.get("mid_cutoff", 75) or 75)
+    if level <= early_cutoff:
+        return int(float(cfg.get("early_base", 350)) + float(cfg.get("early_level_mult", 105)) * (level ** float(cfg.get("early_power", 1.12))))
+    if level <= mid_cutoff:
+        return int(float(cfg.get("mid_base", 3100)) + float(cfg.get("mid_level_mult", 62)) * ((level - early_cutoff) ** float(cfg.get("mid_power", 1.62))))
+    return int(float(cfg.get("late_base", 20000)) + float(cfg.get("late_level_mult", 1150)) * ((level - mid_cutoff) ** float(cfg.get("late_power", 1.72))))
 
 
 
@@ -13207,7 +17042,16 @@ def ship_part_specs(ship: Dict[str, Any]) -> List[Tuple[str, str, int, int]]:
     ]
 
 
-def ensure_ship_parts(conn: sqlite3.Connection) -> None:
+_SHIP_PARTS_LAST_RUN: float = 0.0
+_SHIP_PARTS_INTERVAL_SECONDS: float = 600.0  # 10 min
+
+
+def ensure_ship_parts(conn: sqlite3.Connection, force: bool = False) -> None:
+    global _SHIP_PARTS_LAST_RUN
+    now_mono = time.monotonic()
+    if not force and (now_mono - _SHIP_PARTS_LAST_RUN) < _SHIP_PARTS_INTERVAL_SECONDS:
+        return
+    _SHIP_PARTS_LAST_RUN = now_mono
     for ship in rows(conn, "SELECT * FROM ships"):
         for part_key, name, max_hp, rate in ship_part_specs(ship):
             conn.execute(
@@ -13216,12 +17060,21 @@ def ensure_ship_parts(conn: sqlite3.Connection) -> None:
             )
 
 
-def ensure_radar_content(conn: sqlite3.Connection) -> None:
+_RADAR_CONTENT_LAST_RUN: float = 0.0
+_RADAR_CONTENT_INTERVAL_SECONDS: float = 600.0  # 10 min
+
+
+def ensure_radar_content(conn: sqlite3.Connection, force: bool = False) -> None:
+    global _RADAR_CONTENT_LAST_RUN
+    now_mono = time.monotonic()
+    if not force and (now_mono - _RADAR_CONTENT_LAST_RUN) < _RADAR_CONTENT_INTERVAL_SECONDS:
+        return
+    _RADAR_CONTENT_LAST_RUN = now_mono
     radar_modules = [
-        ("basic_radar_array", "Basic Radar Array", "scanner", "common", 9000, 1, 4, 0, 4, {"radar_strength": 16, "radar_range": 10, "scanning": 3}),
-        ("civilian_radar_array", "Civilian Radar Array", "scanner", "uncommon", 28000, 2, 5, 1, 6, {"radar_strength": 28, "radar_range": 16, "scanning": 6}),
-        ("military_radar_array", "Military Radar Array", "scanner", "rare", 85000, 3, 6, 2, 10, {"radar_strength": 44, "radar_range": 24, "scanning": 10, "evasion": 3}),
-        ("deep_space_radar", "Deep-Space Radar Suite", "scanner", "epic", 190000, 4, 7, 3, 14, {"radar_strength": 62, "radar_range": 34, "scanning": 16, "salvage": 4}),
+        ("basic_radar_array", "Basic Radar Array", "scanner", "common", 9000, 1, 4, 0, 4, {"radar_strength": 16, "radar_range": 10, "scanning": 3, "scan_success": 8, "scan_ping_radius": 5, "scan_cooldown_reduction": 18, "scan_blip_duration": 3}),
+        ("civilian_radar_array", "Civilian Radar Array", "scanner", "uncommon", 28000, 2, 5, 1, 6, {"radar_strength": 28, "radar_range": 16, "scanning": 6, "scan_success": 14, "scan_ping_radius": 9, "scan_cooldown_reduction": 35, "scan_blip_duration": 6}),
+        ("military_radar_array", "Military Radar Array", "scanner", "rare", 85000, 3, 6, 2, 10, {"radar_strength": 44, "radar_range": 24, "scanning": 10, "scan_success": 24, "evasion": 3, "counter_scan": 4, "scan_ping_radius": 14, "scan_cooldown_reduction": 55, "scan_blip_duration": 10}),
+        ("deep_space_radar", "Deep-Space Radar Suite", "scanner", "epic", 190000, 4, 7, 3, 14, {"radar_strength": 62, "radar_range": 34, "scanning": 16, "scan_success": 34, "salvage": 4, "counter_scan": 6, "scan_ping_radius": 21, "scan_cooldown_reduction": 75, "scan_blip_duration": 15}),
     ]
     for code, name, slot, rarity, price, tier, max_tier, min_ship_tier, power_usage, stats in radar_modules:
         conn.execute(
@@ -13230,14 +17083,53 @@ def ensure_radar_content(conn: sqlite3.Connection) -> None:
                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (code, name, slot, rarity, price, 1, encode_json(stats), tier, max_tier, min_ship_tier, power_usage),
         )
+        existing = row(conn, "SELECT * FROM module_templates WHERE code=?", (code,))
+        if existing:
+            merged = decode_json(existing.get("stats_json"), {}) or {}
+            changed = False
+            for stat_key, stat_value in stats.items():
+                if merged.get(stat_key) != stat_value:
+                    merged[stat_key] = stat_value
+                    changed = True
+            if changed:
+                conn.execute("UPDATE module_templates SET stats_json=?, max_tier=max(COALESCE(max_tier,?), ?), power_usage=? WHERE code=?", (encode_json(merged), max_tier, max_tier, power_usage, code))
     # Existing DeepScan modules now help radar detection without replacing dedicated radar.
     existing = row(conn, "SELECT * FROM module_templates WHERE code='scanner_array'")
     if existing:
         stats = decode_json(existing.get("stats_json"), {}) or {}
-        if not stats.get("radar_strength"):
-            stats["radar_strength"] = 20
-            stats["radar_range"] = 10
+        changed = False
+        for stat_key, stat_value in {"radar_strength": 20, "radar_range": 10, "scan_success": 18, "scan_ping_radius": 4, "scan_cooldown_reduction": 12, "scan_blip_duration": 2}.items():
+            if not stats.get(stat_key):
+                stats[stat_key] = stat_value
+                changed = True
+        if changed:
             conn.execute("UPDATE module_templates SET stats_json=? WHERE code='scanner_array'", (encode_json(stats),))
+    module_scan_updates = {
+        "ore_probe_array": {"scan_success": 8},
+        "wreck_locator": {"scan_success": 10},
+        "anomaly_lens": {"scan_success": 22},
+        "relic_decoder": {"scan_success": 28},
+        "targeting_matrix": {"scan_success": 12},
+        "warrant_scanner": {"scan_success": 24},
+        "precision_calibrator": {"scan_success": 14},
+        "customs_transponder": {"scan_success": 8},
+        "silent_running_mesh": {"counter_scan": 18},
+        "false_manifest_ai": {"counter_scan": 14},
+        "signature_scrubber": {"counter_scan": 32},
+        "smuggle_compartment": {"counter_scan": 10},
+    }
+    for code, additions in module_scan_updates.items():
+        existing = row(conn, "SELECT * FROM module_templates WHERE code=?", (code,))
+        if not existing:
+            continue
+        stats = decode_json(existing.get("stats_json"), {}) or {}
+        changed = False
+        for stat_key, stat_value in additions.items():
+            if not stats.get(stat_key):
+                stats[stat_key] = stat_value
+                changed = True
+        if changed:
+            conn.execute("UPDATE module_templates SET stats_json=? WHERE code=?", (encode_json(stats), code))
 
 
 SHIP_SIZE_OVERRIDES = {
@@ -13595,13 +17487,16 @@ def normalize_bio(value: str) -> str:
     return bio[:PROFILE_LIMITS["bio_max"]]
 
 
-def clean_avatar_id(value: Optional[str]) -> str:
+def clean_avatar_id(value: Optional[str], faction_code: Optional[str] = None, seed: str = "") -> str:
     avatar_id = (value or DEFAULT_AVATAR_ID).strip()
-    return avatar_id if avatar_id in PROFILE_AVATAR_BY_ID else DEFAULT_AVATAR_ID
+    avatar = PROFILE_AVATAR_BY_ID.get(avatar_id)
+    if avatar and (not faction_code or avatar.get("faction_code") == faction_code):
+        return avatar_id
+    return default_avatar_id_for_faction_code(faction_code, seed)
 
 
-def avatar_payload(avatar_id: Optional[str]) -> Dict[str, str]:
-    return PROFILE_AVATAR_BY_ID.get(clean_avatar_id(avatar_id), PROFILE_AVATAR_BY_ID[DEFAULT_AVATAR_ID])
+def avatar_payload(avatar_id: Optional[str], faction_code: Optional[str] = None, seed: str = "") -> Dict[str, str]:
+    return PROFILE_AVATAR_BY_ID.get(clean_avatar_id(avatar_id, faction_code, seed), PROFILE_AVATAR_BY_ID[DEFAULT_AVATAR_ID])
 
 
 def achievement_tier_for_progress(progress: int) -> int:
@@ -13613,13 +17508,20 @@ def achievement_tier_for_progress(progress: int) -> int:
     return tier
 
 
+_ENSURED_ACHIEVEMENT_PLAYERS: set = set()
+
+
 def ensure_achievement_rows(conn: sqlite3.Connection, player_id: int) -> None:
+    pid = int(player_id)
+    if pid in _ENSURED_ACHIEVEMENT_PLAYERS:
+        return
     now = iso()
     for loop_key in ACHIEVEMENT_LOOPS.keys():
         conn.execute(
             "INSERT OR IGNORE INTO player_achievement_progress (player_id,loop_key,progress,tier_unlocked,updated_at) VALUES (?,?,?,?,?)",
             (player_id, loop_key, 0, 0, now),
         )
+    _ENSURED_ACHIEVEMENT_PLAYERS.add(pid)
 
 
 def grant_achievement_progress(conn: sqlite3.Connection, player_id: int, loop_key: str, amount: float = 1.0) -> Dict[str, Any]:
@@ -13729,13 +17631,35 @@ def build_player_profile_stats(conn: sqlite3.Connection, player: Dict[str, Any],
     return public_stats
 
 
+_PUBLIC_PROFILE_CACHE: Dict[int, Tuple[float, Dict[str, Any]]] = {}
+_PUBLIC_PROFILE_TTL: float = 30.0
+
+
+def _invalidate_public_profile_cache(target_user_id: Optional[int] = None) -> None:
+    if target_user_id is None:
+        _PUBLIC_PROFILE_CACHE.clear()
+    else:
+        _PUBLIC_PROFILE_CACHE.pop(int(target_user_id), None)
+
+
 def public_profile_payload(conn: sqlite3.Connection, target_user_id: int, viewer_player_id: Optional[int] = None) -> Dict[str, Any]:
+    # Cache only when there's no viewer (used by build_state to populate the
+    # community profiles list — that path runs ~80 times per /api/state which
+    # was previously ~700 SQL queries). When a viewer is present we still log
+    # the view, so we bypass the cache for that case.
+    cache_eligible = viewer_player_id is None
+    now_mono = time.monotonic()
+    if cache_eligible:
+        cached = _PUBLIC_PROFILE_CACHE.get(int(target_user_id))
+        if cached and (now_mono - cached[0]) < _PUBLIC_PROFILE_TTL:
+            return cached[1]
     target = row(conn, "SELECT u.*, p.id as player_id, p.callsign, p.level, p.xp, p.guild_id, p.location_planet_id, p.active_ship_id FROM users u JOIN players p ON p.user_id=u.id WHERE u.id=?", (target_user_id,))
     if not target:
         return {}
     player = row(conn, "SELECT * FROM players WHERE id=?", (target["player_id"],))
     profile = ensure_user_profile(conn, target, player)
-    avatar = avatar_payload(profile.get("avatar_id"))
+    faction_code = player_faction_code(conn, player)
+    avatar = avatar_payload(profile.get("avatar_id"), faction_code, target.get("username") or target.get("callsign") or "")
     selected_badge = profile.get("selected_badge_code") or ""
     ach = build_achievements_state(conn, int(player["id"]))
     top_achievements = sorted(ach["loops"], key=lambda x: (x["tierUnlocked"], x["progress"]), reverse=True)[:6]
@@ -13746,7 +17670,7 @@ def public_profile_payload(conn: sqlite3.Connection, target_user_id: int, viewer
         "playerId": player["id"],
         "username": target.get("username"),
         "displayName": profile.get("display_name") or player.get("callsign") or target.get("username"),
-        "avatarId": clean_avatar_id(profile.get("avatar_id")),
+        "avatarId": clean_avatar_id(profile.get("avatar_id"), faction_code, target.get("username") or target.get("callsign") or ""),
         "avatarUrl": avatar["url"],
         "bio": profile.get("bio") or "",
         "selectedBadgeCode": selected_badge,
@@ -13761,13 +17685,17 @@ def public_profile_payload(conn: sqlite3.Connection, target_user_id: int, viewer
     }
     if viewer_player_id:
         conn.execute("INSERT INTO player_profile_views (viewer_player_id,target_player_id,viewed_at) VALUES (?,?,?)", (viewer_player_id, player["id"], iso()))
+    if cache_eligible:
+        _PUBLIC_PROFILE_CACHE[int(target_user_id)] = (now_mono, payload)
     return payload
 
 
 def ensure_user_profile(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
     existing = row(conn, "SELECT * FROM user_profiles WHERE user_id=?", (user["id"],))
+    faction_code = player_faction_code(conn, player)
+    seed = str(player.get("callsign") or user.get("username") or "")
     if existing:
-        avatar_id = clean_avatar_id(existing.get("avatar_id"))
+        avatar_id = clean_avatar_id(existing.get("avatar_id"), faction_code, seed)
         if avatar_id != existing.get("avatar_id"):
             conn.execute("UPDATE user_profiles SET avatar_id=?, updated_at=? WHERE user_id=?", (avatar_id, iso(), user["id"]))
             existing["avatar_id"] = avatar_id
@@ -13777,17 +17705,19 @@ def ensure_user_profile(conn: sqlite3.Connection, user: Dict[str, Any], player: 
         display = normalize_display_name(raw_display)
     except HTTPException:
         display = "Nova Pilot"
-    seed_avatar = "male_01" if user.get("username") == "godmode" else "female_01" if user.get("username") == "pilot" else DEFAULT_AVATAR_ID
+    seed_avatar = default_avatar_id_for_faction_code(faction_code, seed)
     conn.execute(
         "INSERT INTO user_profiles (user_id,display_name,avatar_id,bio,updated_at) VALUES (?,?,?,?,?)",
-        (user["id"], display, clean_avatar_id(seed_avatar), "", iso()),
+        (user["id"], display, clean_avatar_id(seed_avatar, faction_code, seed), "", iso()),
     )
     return row(conn, "SELECT * FROM user_profiles WHERE user_id=?", (user["id"],)) or {}
 
 
 def profile_payload(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
     profile = ensure_user_profile(conn, user, player)
-    avatar = avatar_payload(profile.get("avatar_id"))
+    faction_code = player_faction_code(conn, player)
+    seed = str(player.get("callsign") or user.get("username") or "")
+    avatar = avatar_payload(profile.get("avatar_id"), faction_code, seed)
     current_job = row(conn, "SELECT j.name, j.code, pj.rank, pj.xp FROM player_jobs pj JOIN jobs j ON j.code=pj.job_code WHERE pj.player_id=? AND pj.active=1 LIMIT 1", (player["id"],))
     current_ship = row(conn, "SELECT s.name, t.name as template_name, t.class_name, t.role FROM ships s JOIN ship_templates t ON t.id=s.template_id WHERE s.id=?", (player.get("active_ship_id"),)) if player.get("active_ship_id") else None
     loc = row(conn, "SELECT p.name as location_name, g.name as galaxy_name FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player.get("location_planet_id"),))
@@ -13796,7 +17726,7 @@ def profile_payload(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict
     return {
         "username": user.get("username"),
         "displayName": profile.get("display_name") or player.get("callsign") or user.get("username"),
-        "avatarId": clean_avatar_id(profile.get("avatar_id")),
+        "avatarId": clean_avatar_id(profile.get("avatar_id"), faction_code, seed),
         "avatarUrl": avatar["url"],
         "avatarLabel": avatar["label"],
         "bio": profile.get("bio") or "",
@@ -13836,9 +17766,35 @@ def ensure_profile_content(conn: sqlite3.Connection) -> None:
 
 
 
+def skill_point_cost_for_next_level(current_level: int) -> int:
+    # Level 1 costs 1 point, level 2 costs 2, level 3 costs 4, level 4 costs 8, etc.
+    current_level = max(0, int(current_level or 0))
+    return 2 ** current_level
+
+
+def skill_point_total_spent_for_level(level: int) -> int:
+    level = max(0, int(level or 0))
+    return (2 ** level) - 1 if level > 0 else 0
+
+
 def skill_xp_required(level: int) -> int:
-    level = max(1, int(level))
-    return int(SKILL_XP_BALANCE["base_curve"] * (level ** SKILL_XP_BALANCE["curve_power"]))
+    # Cumulative skill XP threshold. Piecewise on purpose: starter quarter is reachable,
+    # the middle takes real rotation, and 75-100 is the long completion wall.
+    level = max(1, int(level or 1))
+    max_level = max(1, int(SKILL_XP_BALANCE.get("max_level", 100) or 100))
+    early_cutoff = clamp_int(int(SKILL_XP_BALANCE.get("early_level_cutoff", 25) or 25), 1, max_level)
+    mid_cutoff = clamp_int(int(SKILL_XP_BALANCE.get("mid_level_cutoff", 75) or 75), early_cutoff, max_level)
+    early_xp = max(1, int(SKILL_XP_BALANCE.get("early_xp_at_cutoff", 11000) or 11000))
+    mid_xp = max(early_xp + 1, int(SKILL_XP_BALANCE.get("mid_xp_at_cutoff", 23000) or 23000))
+    cap_xp = max(mid_xp + 1, int(SKILL_XP_BALANCE.get("max_xp_at_cap", 35000) or 35000))
+    if level <= early_cutoff:
+        t = level / float(max(1, early_cutoff))
+        return int(max(1, early_xp * (t ** float(SKILL_XP_BALANCE.get("early_curve_power", 1.55) or 1.55))))
+    if level <= mid_cutoff:
+        t = (level - early_cutoff) / float(max(1, mid_cutoff - early_cutoff))
+        return int(early_xp + (mid_xp - early_xp) * (t ** float(SKILL_XP_BALANCE.get("mid_curve_power", 1.45) or 1.45)))
+    t = (level - mid_cutoff) / float(max(1, max_level - mid_cutoff))
+    return int(mid_xp + (cap_xp - mid_xp) * (t ** float(SKILL_XP_BALANCE.get("late_curve_power", 2.20) or 2.20)))
 
 
 def skill_level_from_xp(xp: int, max_level: int = None) -> int:
@@ -13968,8 +17924,9 @@ def grant_action_progression(conn: sqlite3.Connection, player_id: int, action_ke
     if not success:
         mult *= 0.35
     skill_results = []
+    training_mult = float(SKILL_XP_BALANCE.get("action_training_xp_mult", 1.0) or 1.0)
     for skill_key, xp in (cfg.get("skills") or {}).items():
-        skill_results.append(grant_skill_xp(conn, player_id, skill_key, int(xp * mult)))
+        skill_results.append(grant_skill_xp(conn, player_id, skill_key, int(xp * mult * training_mult)))
     career_result = grant_career_xp_if_active(conn, player_id, action_key, mult if success else mult * 0.75)
     achievement_result = {}
     loop_key = ACHIEVEMENT_ACTION_MAP.get(action_key)
@@ -14068,12 +18025,12 @@ def build_chat_messages(conn: sqlite3.Connection, current_user_id: int) -> List[
         if msg.get("user_id"):
             uid = int(msg["user_id"])
             if uid not in user_cache:
-                u = row(conn, "SELECT u.id,u.username,p.id as player_id,p.callsign,up.display_name,up.avatar_id,up.selected_badge_code FROM users u LEFT JOIN players p ON p.user_id=u.id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE u.id=?", (uid,)) or {}
+                u = row(conn, "SELECT u.id,u.username,p.id as player_id,p.callsign,f.code as faction_code,up.display_name,up.avatar_id,up.selected_badge_code FROM users u LEFT JOIN players p ON p.user_id=u.id LEFT JOIN factions f ON f.id=p.faction_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE u.id=?", (uid,)) or {}
                 user_cache[uid] = u
             u = user_cache[uid]
             sender_name = u.get("display_name") or u.get("callsign") or u.get("username") or sender_name
-            avatar_id = clean_avatar_id(u.get("avatar_id") or avatar_id)
-        avatar = avatar_payload(avatar_id)
+            avatar_id = clean_avatar_id(u.get("avatar_id") or avatar_id, u.get("faction_code"), u.get("username") or u.get("callsign") or "")
+        avatar = avatar_payload(avatar_id, (user_cache.get(int(msg["user_id"])) or {}).get("faction_code") if msg.get("user_id") else None)
         selected_badge_code = ""
         player_id = msg.get("player_id")
         if msg.get("user_id"):
@@ -14145,24 +18102,13 @@ def on_shutdown() -> None:
 
 
 def current_context(authorization: Optional[str] = Header(default=None)) -> Tuple[Dict[str,Any], Dict[str,Any]]:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(401, "Missing bearer token")
-    token = authorization.split(" ", 1)[1].strip()
-    conn = connect()
-    sess = row(conn, "SELECT * FROM sessions WHERE token=?", (token,))
-    if not sess or parse_dt(sess["expires_at"]) < utcnow():
-        conn.close()
-        raise HTTPException(401, "Invalid or expired session")
-    user = row(conn, "SELECT * FROM users WHERE id=?", (sess["user_id"],))
-    player = row(conn, "SELECT * FROM players WHERE user_id=?", (user["id"],))
-    conn.close()
-    if not user or not player:
-        raise HTTPException(401, "Missing player")
-    return user, player
+    return auth_context_from_header(authorization)
 
 
 def ensure_action_allowed(conn: sqlite3.Connection, user: Dict[str,Any], player: Dict[str,Any], action: ActionRequest) -> None:
-    nonce = action.nonce or str(uuid.uuid4())
+    nonce = str(action.nonce or "").strip()
+    if not nonce or len(nonce) > 128 or not re.match(r"^[A-Za-z0-9_.:-]+$", nonce):
+        raise HTTPException(400, "Action nonce required")
     try:
         conn.execute("INSERT INTO action_nonces (player_id, nonce, created_at) VALUES (?,?,?)", (player["id"], nonce, iso()))
     except sqlite3.IntegrityError:
@@ -14194,7 +18140,10 @@ def ensure_action_allowed(conn: sqlite3.Connection, user: Dict[str,Any], player:
 def prune_admin_action_logs(conn: sqlite3.Connection) -> None:
     # Keep the game-wide action feed bounded. Admin table displays the merged last 500.
     conn.execute("DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 500)")
-    conn.execute("DELETE FROM npc_action_log WHERE id NOT IN (SELECT id FROM npc_action_log ORDER BY id DESC LIMIT 500)")
+    if PERF_NPC_LOGS_ENABLED:
+        conn.execute("DELETE FROM npc_action_log WHERE id NOT IN (SELECT id FROM npc_action_log ORDER BY id DESC LIMIT 200)")
+    else:
+        conn.execute("DELETE FROM npc_action_log")
     conn.execute("DELETE FROM market_transactions WHERE id NOT IN (SELECT id FROM market_transactions ORDER BY id DESC LIMIT 500)")
     conn.execute("DELETE FROM combat_battles WHERE id NOT IN (SELECT id FROM combat_battles ORDER BY id DESC LIMIT 500)")
 
@@ -14302,6 +18251,7 @@ def admin_actor_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             n.*,
             p.name AS location_name,
             g.name AS galaxy_name,
+            p.security_level AS npc_security_level,
             ns.objective,
             ns.action_state,
             ns.target_object_key,
@@ -14512,14 +18462,368 @@ def get_player(conn: sqlite3.Connection, player_id: int) -> Dict[str,Any]:
     return p
 
 
+
+FUEL_WORLD_SETTINGS_KEY = "fuel_world_settings_v1"
+FUEL_WORLD_PATCH_KEY = "fuel_market_world_patch_v5"
+FUEL_WORLD_DEFAULTS = {
+    "planet_gap_multiplier": 4.0,
+    "planet_min_gap": 32.0,
+    "galaxy_gap_multiplier": 4.0,
+    "galaxy_min_gap": 26.0,
+    "fuel_price_per_unit": 8,
+}
+FUEL_TANK_TEMPLATE_DEFS = [
+    {"code": "fuel_tank_mk1", "name": "Compact Fuel Tank", "slot_type": "core", "rarity": "common", "price": 2800, "stats": {"fuel_tank": 1, "fuel": 45, "fuel_burn_reduction": 0.06, "fuel_cost_discount": 0.03}},
+    {"code": "fuel_tank_mk2", "name": "Extended Fuel Tank", "slot_type": "core", "rarity": "uncommon", "price": 7600, "stats": {"fuel_tank": 1, "fuel": 95, "fuel_burn_reduction": 0.11, "fuel_cost_discount": 0.07}},
+    {"code": "fuel_tank_mk3", "name": "Long-Range Fuel Tank", "slot_type": "core", "rarity": "rare", "price": 18500, "stats": {"fuel_tank": 1, "fuel": 170, "fuel_burn_reduction": 0.17, "fuel_cost_discount": 0.11}},
+    {"code": "fuel_tank_mk4", "name": "Military Reserve Tank", "slot_type": "core", "rarity": "epic", "price": 42000, "stats": {"fuel_tank": 1, "fuel": 280, "fuel_burn_reduction": 0.24, "fuel_cost_discount": 0.16}},
+    {"code": "fuel_tank_mk5", "name": "Deep-Space Cryo Tank", "slot_type": "core", "rarity": "legendary", "price": 90000, "stats": {"fuel_tank": 1, "fuel": 440, "fuel_burn_reduction": 0.32, "fuel_cost_discount": 0.22}},
+    {"code": "fuel_tank_courier", "name": "Courier Light Tank", "slot_type": "core", "rarity": "uncommon", "price": 5200, "stats": {"fuel_tank": 1, "fuel": 70, "fuel_burn_reduction": 0.18, "fuel_cost_discount": 0.04}},
+    {"code": "fuel_tank_refinery", "name": "Refinery-Tuned Tank", "slot_type": "core", "rarity": "uncommon", "price": 8600, "stats": {"fuel_tank": 1, "fuel": 105, "fuel_burn_reduction": 0.08, "fuel_cost_discount": 0.18}},
+    {"code": "fuel_tank_frontier", "name": "Frontier Expedition Tank", "slot_type": "core", "rarity": "rare", "price": 24000, "stats": {"fuel_tank": 1, "fuel": 240, "fuel_burn_reduction": 0.15, "fuel_cost_discount": 0.08}},
+    {"code": "fuel_tank_deep_cycle", "name": "Deep-Cycle Compression Tank", "slot_type": "core", "rarity": "rare", "price": 31000, "stats": {"fuel_tank": 1, "fuel": 210, "fuel_burn_reduction": 0.29, "fuel_cost_discount": 0.06}},
+    {"code": "fuel_tank_merchant", "name": "Merchant Guild Tank", "slot_type": "core", "rarity": "epic", "price": 56000, "stats": {"fuel_tank": 1, "fuel": 300, "fuel_burn_reduction": 0.20, "fuel_cost_discount": 0.25}},
+    {"code": "fuel_tank_void_range", "name": "Void Range Tank", "slot_type": "core", "rarity": "epic", "price": 68000, "stats": {"fuel_tank": 1, "fuel": 520, "fuel_burn_reduction": 0.13, "fuel_cost_discount": 0.07}},
+    {"code": "fuel_tank_singularity", "name": "Singularity-Buffered Tank", "slot_type": "core", "rarity": "legendary", "price": 125000, "stats": {"fuel_tank": 1, "fuel": 680, "fuel_burn_reduction": 0.38, "fuel_cost_discount": 0.18}},
+    {"code": "fuel_tank_artifact_core", "name": "Artifact Fuel Core", "slot_type": "core", "rarity": "mythic", "price": 185000, "stats": {"fuel_tank": 1, "fuel": 820, "fuel_burn_reduction": 0.46, "fuel_cost_discount": 0.26}},
+]
+TRADE_GOOD_CATEGORY_ICONS = {
+    "trade_fuel": "⛽", "trade_metals": "⬡", "trade_food": "🌾", "trade_medicine": "✚",
+    "trade_textiles": "▧", "trade_machinery": "⚙", "trade_electronics": "▣", "trade_luxury": "◆",
+    "trade_construction": "▤", "trade_science": "⌁", "trade_agriculture": "☘", "trade_consumers": "◈",
+}
+TRADE_GOOD_CATEGORY_LABELS = {
+    "trade_fuel": "Fuel & Reactants", "trade_metals": "Metals & Minerals", "trade_food": "Food & Rations", "trade_medicine": "Medical", 
+    "trade_textiles": "Textiles", "trade_machinery": "Machinery", "trade_electronics": "Electronics", "trade_luxury": "Luxury",
+    "trade_construction": "Construction", "trade_science": "Science & Survey", "trade_agriculture": "Agriculture", "trade_consumers": "Consumer Goods",
+}
+TRADE_GOOD_CATEGORIES = {
+    "trade_fuel": ["Refined Deuterium", "Helium-3 Canisters", "Coolant Cells", "Reactor Kerosene", "Ion Gel", "Dock Fuel Additive", "Plasma Stabilizer", "Fusion Pellets", "Cryo Fuel Bricks", "Drive Primer"],
+    "trade_metals": ["Titanium Ingots", "Nickel Foam", "Cobalt Lattice", "Tungsten Rods", "Vanadium Sheets", "Osmium Wire", "Aluminum Honeycomb", "Copper Spools", "Rare-Earth Dust", "Plasteel Billets"],
+    "trade_food": ["Hydroponic Grain", "Protein Paste", "Cultured Meat", "Algae Cakes", "Spice Pods", "Fruit Slurry", "Station Rations", "Luxury Coffee", "Synthetic Dairy", "Mushroom Packs"],
+    "trade_medicine": ["Antirad Kits", "Trauma Foam", "Vaccine Packs", "Surgical Mesh", "Bio-Gel", "Stasis Salts", "Cleanroom Filters", "Med Scanner Parts", "Sterile Water", "Neural Analgesics"],
+    "trade_textiles": ["Thermal Cloth", "Pressure Weave", "Uniform Fabric", "Insulation Rolls", "Carbon Thread", "Smart Fibers", "Hab Carpet", "Sealant Canvas", "Work Gloves", "Vacuum Linens"],
+    "trade_machinery": ["Hydraulic Pumps", "Servo Blocks", "Bearing Kits", "Mining Drills", "Valve Clusters", "Docking Clamps", "Cargo Pistons", "Pump Housings", "Actuator Rails", "Gear Cores"],
+    "trade_electronics": ["Sensor Boards", "Quantum Relays", "Circuit Packs", "Memory Glass", "Antenna Nodes", "Shield Inverters", "Nav Chips", "Battery Matrices", "Comms Filters", "Logic Cores"],
+    "trade_luxury": ["Art Crates", "Designer Spirits", "Pearl Ceramics", "Holo-Theater Sets", "Rare Perfumes", "Collector Watches", "Antique Books", "Premium Bedding", "Gold Leaf Decor", "Private Chef Kits"],
+    "trade_construction": ["Hab Panels", "Nano-Cement", "Pressure Doors", "Pipe Bundles", "Foamcrete Blocks", "Airlock Glass", "Structural Ribs", "Heat Tiles", "Rebar Mesh", "Atmosphere Ducts"],
+    "trade_science": ["Lab Cultures", "Survey Probes", "Spectrometer Tubes", "Research Reagents", "Data Crystals", "Field Drones", "Sample Cores", "Microscope Arrays", "Particle Targets", "Clean Lab Suits"],
+    "trade_agriculture": ["Seed Vaults", "Soil Bacteria", "Irrigation Valves", "Greenhouse Film", "Pollinator Drones", "Fertilizer Salts", "Livestock Embryos", "Root Nutrient", "Grow Lamps", "Compost Filters"],
+    "trade_consumers": ["Personal Tools", "Entertainment Pads", "Cheap Clothing", "Kitchen Units", "School Kits", "Toy Crates", "Home Printers", "Cleaning Bots", "Sleep Pods", "Basic Furniture"],
+}
+
+
+def fuel_world_settings_from_raw(values: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(FUEL_WORLD_DEFAULTS)
+    if isinstance(values, dict):
+        out.update(values)
+    out["planet_gap_multiplier"] = max(1.0, min(10.0, float(out.get("planet_gap_multiplier") or 4.0)))
+    out["galaxy_gap_multiplier"] = max(1.0, min(10.0, float(out.get("galaxy_gap_multiplier") or 4.0)))
+    out["planet_min_gap"] = max(4.0, min(120.0, float(out.get("planet_min_gap") or 32.0)))
+    out["galaxy_min_gap"] = max(6.0, min(70.0, float(out.get("galaxy_min_gap") or 26.0)))
+    out["fuel_price_per_unit"] = max(2, min(50, int(out.get("fuel_price_per_unit") or 8)))
+    return out
+
+
+def fuel_world_settings(conn: sqlite3.Connection) -> Dict[str, Any]:
+    return fuel_world_settings_from_raw(app_state_get_json(conn, FUEL_WORLD_SETTINGS_KEY))
+
+
+def save_fuel_world_settings(conn: sqlite3.Connection, values: Dict[str, Any]) -> Dict[str, Any]:
+    merged = fuel_world_settings(conn)
+    for key in FUEL_WORLD_DEFAULTS:
+        if key in values:
+            merged[key] = values[key]
+    merged = fuel_world_settings_from_raw(merged)
+    app_state_put_json(conn, FUEL_WORLD_SETTINGS_KEY, merged)
+    return merged
+
+
+def is_trade_good_category(category: Any) -> bool:
+    return str(category or "").lower().startswith("trade_")
+
+
+def trade_good_category_payload(category: Any) -> Dict[str, Any]:
+    key = str(category or "trade_goods").lower()
+    return {
+        "category_icon": TRADE_GOOD_CATEGORY_ICONS.get(key, "□"),
+        "category_name": TRADE_GOOD_CATEGORY_LABELS.get(key, label_for_api(key)),
+        "trade_only": is_trade_good_category(key),
+    }
+
+
+def attach_trade_good_category_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    payload = trade_good_category_payload(item.get("category"))
+    item.update(payload)
+    if payload["trade_only"]:
+        item["icon"] = payload["category_icon"]
+    return item
+
+
+def planet_has_refuel_shop(planet: Optional[Dict[str, Any]]) -> bool:
+    if not planet:
+        return False
+    ptype = str(planet.get("type") or planet.get("category") or "").lower()
+    name = str(planet.get("name") or "").lower()
+    blocked = ("jump gate", "gate", "belt", "asteroid", "ruin", "wormhole", "salvage")
+    if any(x in ptype or x in name for x in blocked):
+        return False
+    allowed = ("world", "station", "port", "hub", "colony", "freeport", "shipyard", "prime", "haven", "forge", "market", "academy", "refinery", "outpost", "settlement")
+    return any(x in ptype or x in name for x in allowed)
+
+
+def fuel_status_payload(player: Dict[str, Any]) -> Dict[str, Any]:
+    fuel = max(0, int(player.get("fuel") or 0))
+    max_fuel = max(1, int(player.get("max_fuel") or 1))
+    pct = round((fuel / max_fuel) * 100, 1)
+    emergency = fuel <= 0
+    low = (not emergency) and pct <= 20.0
+    if emergency:
+        message = "On emergency power. Speed reduced by 50%. Jump gates locked until refueled."
+    elif low:
+        message = "Low fuel warning. Refuel before using long routes or jump gates."
+    else:
+        message = "Fuel normal."
+    return {"fuel": fuel, "max_fuel": max_fuel, "percent": pct, "low": low, "emergency": emergency, "speedMultiplier": 0.5 if emergency else 1.0, "jumpGateLocked": emergency, "message": message}
+
+
+def fuel_warning_key(player_id: int) -> str:
+    return f"player:{int(player_id)}:last_fuel_warning_state"
+
+
+def maybe_emit_fuel_warning(conn: sqlite3.Connection, player_id: int, before_fuel: int, after_fuel: int, max_fuel: int) -> None:
+    max_fuel = max(1, int(max_fuel or 1))
+    before_pct = (max(0, before_fuel) / max_fuel) * 100
+    after_pct = (max(0, after_fuel) / max_fuel) * 100
+    prior = app_state_get_json(conn, fuel_warning_key(player_id)).get("state")
+    state = "emergency" if after_fuel <= 0 else "low" if after_pct <= 20 else "normal"
+    app_state_put_json(conn, fuel_warning_key(player_id), {"state": state, "updated_at": iso()})
+    if state == "emergency" and prior != "emergency":
+        add_event(conn, player_id, "fuel", "Emergency power active. Speed reduced by 50%; jump gates are locked until you refuel.", {"fuel": after_fuel, "maxFuel": max_fuel})
+    elif state == "low" and before_pct > 20 and prior != "low":
+        add_event(conn, player_id, "fuel", "Low fuel warning: fuel has dropped below 20%.", {"fuel": after_fuel, "maxFuel": max_fuel})
+
+
+def ensure_fuel_tank_templates(conn: sqlite3.Connection) -> None:
+    cols = {c["name"] for c in rows(conn, "PRAGMA table_info(module_templates)")}
+    for index, spec in enumerate(FUEL_TANK_TEMPLATE_DEFS):
+        found = row(conn, "SELECT id FROM module_templates WHERE code=?", (spec["code"],))
+        if found:
+            conn.execute("UPDATE module_templates SET name=?, slot_type=?, rarity=?, price=?, craftable=1, stats_json=? WHERE code=?", (spec["name"], spec["slot_type"], spec["rarity"], spec["price"], encode_json(spec["stats"]), spec["code"]))
+        else:
+            conn.execute("INSERT INTO module_templates (code,name,slot_type,rarity,price,craftable,stats_json) VALUES (?,?,?,?,?,?,?)", (spec["code"], spec["name"], spec["slot_type"], spec["rarity"], spec["price"], 1, encode_json(spec["stats"])))
+        if "tier" in cols:
+            conn.execute("UPDATE module_templates SET tier=?, max_tier=? WHERE code=?", (1 + index, min(6, 2 + index), spec["code"]))
+
+
+def active_fuel_tank_payload(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    default = {"code": "default_integrated_tank", "name": "Default Integrated Tank", "tier": 0, "capacityBonus": 0, "burnReduction": 0.0, "costDiscount": 0.0, "default": True}
+    ship_id = int(player.get("active_ship_id") or 0)
+    if not ship_id:
+        return default
+    best = None
+    for mod in rows(conn, "SELECT sm.current_tier, mt.code, mt.name, mt.stats_json FROM ship_modules sm JOIN module_templates mt ON mt.id=sm.module_template_id WHERE sm.ship_id=? AND sm.equipped=1", (ship_id,)):
+        stats = decode_json(mod.get("stats_json"), {}) or {}
+        if not stats.get("fuel_tank") and not any(k in stats for k in ("fuel", "fuel_burn_reduction", "fuel_cost_discount")):
+            continue
+        payload = {"code": mod.get("code"), "name": mod.get("name"), "tier": clamp_tier(mod.get("current_tier") or 1), "capacityBonus": int(stats.get("fuel") or 0), "burnReduction": float(stats.get("fuel_burn_reduction") or 0), "costDiscount": float(stats.get("fuel_cost_discount") or 0), "default": False}
+        score = payload["capacityBonus"] + payload["burnReduction"] * 1000 + payload["costDiscount"] * 500
+        if not best or score > best.get("_score", 0):
+            payload["_score"] = score
+            best = payload
+    if best:
+        best.pop("_score", None)
+    return best or default
+
+
+def sync_player_fuel_capacity(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    p = get_player(conn, player_id)
+    ship = row(conn, "SELECT * FROM ships WHERE id=?", (p.get("active_ship_id"),)) if p.get("active_ship_id") else None
+    base = int((ship or {}).get("fuel_capacity") or p.get("max_fuel") or 100)
+    tank = active_fuel_tank_payload(conn, p)
+    max_fuel = max(25, base + int(tank.get("capacityBonus") or 0))
+    if int(p.get("max_fuel") or 0) != max_fuel or int(p.get("fuel") or 0) > max_fuel:
+        conn.execute("UPDATE players SET max_fuel=?, fuel=min(fuel, ?) WHERE id=?", (max_fuel, max_fuel, player_id))
+        p = get_player(conn, player_id)
+    return {"tank": tank, "fuelStatus": fuel_status_payload(p), "maxFuel": max_fuel}
+
+
+def fuel_adjusted_travel_cost(conn: sqlite3.Connection, player: Dict[str, Any], base_cost: int, god: bool = False) -> int:
+    if god:
+        return 0
+    tank = active_fuel_tank_payload(conn, player)
+    reduction = max(0.0, min(0.65, float(tank.get("burnReduction") or 0)))
+    return max(0, int(math.ceil(max(0, int(base_cost or 0)) * (1.0 - reduction))))
+
+
+def fuel_adjusted_route_seconds(conn: sqlite3.Connection, player: Dict[str, Any], ship: Dict[str, Any], distance_pct: float, god: bool = False) -> int:
+    seconds = map_route_seconds_for_distance(conn, ship or {}, distance_pct, god)
+    if not god and int(player.get("fuel") or 0) <= 0:
+        seconds = int(math.ceil(seconds * 2.0))
+    return seconds
+
+
+def fuel_shop_unit_price(conn: sqlite3.Connection, player: Dict[str, Any]) -> int:
+    settings = fuel_world_settings(conn)
+    tank = active_fuel_tank_payload(conn, player)
+    discount = max(0.0, min(0.50, float(tank.get("costDiscount") or 0)))
+    return max(1, int(math.ceil(int(settings.get("fuel_price_per_unit") or 8) * (1.0 - discount))))
+
+
+def purge_illicit_goods(conn: sqlite3.Connection) -> None:
+    ids = [int(r["id"]) for r in rows(conn, "SELECT id FROM commodities WHERE COALESCE(legal,1)=0 OR lower(COALESCE(category,'')) IN ('contraband','black_market','illicit','illicit_goods','documents') OR lower(code) LIKE '%contraband%' OR lower(code) LIKE '%illicit%'")]
+    if ids:
+        marks = ",".join("?" for _ in ids)
+        conn.execute(f"DELETE FROM market_prices WHERE commodity_id IN ({marks})", ids)
+        conn.execute(f"DELETE FROM cargo_hold WHERE commodity_id IN ({marks})", ids)
+        if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='market_history'"):
+            conn.execute(f"DELETE FROM market_history WHERE commodity_id IN ({marks})", ids)
+        if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='market_transactions'"):
+            conn.execute(f"UPDATE market_transactions SET commodity_id=NULL WHERE commodity_id IN ({marks})", ids)
+        conn.execute(f"DELETE FROM commodities WHERE id IN ({marks})", ids)
+    conn.execute("DELETE FROM inventory WHERE COALESCE(legal,1)=0 OR lower(COALESCE(category,'')) IN ('contraband','black_market','illicit','illicit_goods','documents') OR lower(COALESCE(item_type,'')) IN ('contraband','black_market','illicit','illicit_goods')")
+    if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='player_market_listings'"):
+        conn.execute("DELETE FROM player_market_listings WHERE COALESCE(legal,1)=0 OR lower(COALESCE(category,'')) IN ('contraband','black_market','illicit','illicit_goods','documents') OR lower(COALESCE(item_type,'')) IN ('contraband','black_market','illicit','illicit_goods')")
+
+
+def trade_good_code(category: str, name: str) -> str:
+    base = ''.join(ch.lower() if ch.isalnum() else '_' for ch in f"{category}_{name}")
+    while "__" in base:
+        base = base.replace("__", "_")
+    return base.strip("_")[:60]
+
+
+def ensure_trade_goods_catalog(conn: sqlite3.Connection) -> None:
+    cols = {c["name"] for c in rows(conn, "PRAGMA table_info(commodities)")}
+    idx = 0
+    for category, names in TRADE_GOOD_CATEGORIES.items():
+        for name in names:
+            idx += 1
+            code = trade_good_code(category, name)
+            base = 20 + (idx % 17) * 9 + len(name) * 3
+            mass = round(0.4 + (idx % 9) * 0.35, 2)
+            meta = trade_good_category_payload(category)
+            desc = f"Trade-only market cargo. Category: {meta['category_name']} {meta['category_icon']}."
+            found = row(conn, "SELECT id FROM commodities WHERE code=?", (code,))
+            if found:
+                conn.execute("UPDATE commodities SET name=?, legal=1, category=?, base_price=?, mass=?, description=? WHERE code=?", (name, category, base, mass, desc, code))
+            else:
+                conn.execute("INSERT INTO commodities (code,name,legal,category,base_price,mass,description) VALUES (?,?,?,?,?,?,?)", (code, name, 1, category, base, mass, desc))
+            if "tier" in cols:
+                conn.execute("UPDATE commodities SET tier=1, max_tier=3, tier_locked=0 WHERE code=?", (code,))
+
+
+def rebalance_trade_goods_market(conn: sqlite3.Connection) -> None:
+    planets = rows(conn, "SELECT p.*, g.code as galaxy_code FROM planets p JOIN galaxies g ON g.id=p.galaxy_id ORDER BY p.galaxy_id, p.id")
+    goods = rows(conn, "SELECT * FROM commodities WHERE legal=1 AND category LIKE 'trade_%' ORDER BY id")
+    if not planets or not goods:
+        return
+    galaxy_ids = sorted({int(p["galaxy_id"]) for p in planets})
+    for planet in planets:
+        gid_index = galaxy_ids.index(int(planet["galaxy_id"])) if int(planet["galaxy_id"]) in galaxy_ids else 0
+        for good in goods:
+            code = str(good.get("code") or "")
+            category = str(good.get("category") or "trade_goods")
+            seed = sum(ord(c) for c in code) + int(planet["id"]) * 37 + int(planet["galaxy_id"]) * 101
+            origin_gid_index = sum(ord(c) for c in category + code) % max(1, len(galaxy_ids))
+            galaxy_delta = abs(gid_index - origin_gid_index)
+            galaxy_distance_factor = 1 + min(galaxy_delta, 4) * 0.18
+            same_galaxy_flatten = 0.02 * ((seed % 3) - 1)
+            planet_jitter = ((seed % 11) - 5) / 100.0
+            export_bias = -0.18 if gid_index == origin_gid_index else 0.05 * galaxy_delta
+            buy_mult = max(0.62, min(1.95, 1.0 + export_bias + planet_jitter + (galaxy_distance_factor - 1)))
+            sell_mult = max(0.58, buy_mult - 0.14 - same_galaxy_flatten)
+            base = int(good.get("base_price") or 25)
+            buy_price = max(2, int(base * buy_mult))
+            sell_price = max(1, int(base * sell_mult))
+            supply = max(8, int(70 + ((seed * 7) % 160) - galaxy_delta * 9)) if gid_index == origin_gid_index else max(3, int(22 + ((seed * 3) % 65)))
+            demand = max(5, int(28 + galaxy_delta * 22 + ((seed * 5) % 45)))
+            conn.execute("""
+                INSERT INTO market_prices (planet_id,commodity_id,supply,demand,buy_price,sell_price,updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(planet_id,commodity_id) DO UPDATE SET
+                  supply=excluded.supply,demand=excluded.demand,buy_price=excluded.buy_price,sell_price=excluded.sell_price,updated_at=excluded.updated_at
+            """, (int(planet["id"]), int(good["id"]), supply, demand, buy_price, sell_price, iso()))
+
+
+def enforce_min_gap(points: List[Dict[str, Any]], min_gap: float, center_x: float = 50.0, center_y: float = 50.0, low: float = 4.0, high: float = 96.0) -> List[Dict[str, Any]]:
+    adjusted: List[Dict[str, Any]] = []
+    for point in points:
+        x = float(point.get("x") or point.get("x_pct") or 50)
+        y = float(point.get("y") or point.get("y_pct") or 50)
+        for _ in range(32):
+            moved = False
+            for other in adjusted:
+                dx = x - other["x"]; dy = y - other["y"]; dist = math.sqrt(dx * dx + dy * dy)
+                if dist < min_gap:
+                    angle = math.atan2(dy if abs(dy) > 0.01 else y - center_y, dx if abs(dx) > 0.01 else x - center_x)
+                    if abs(angle) < 0.001:
+                        angle = (len(adjusted) + 1) * 0.79
+                    push = (min_gap - dist) + 1.5
+                    x = max(low, min(high, x + math.cos(angle) * push))
+                    y = max(low, min(high, y + math.sin(angle) * push))
+                    moved = True
+            if not moved:
+                break
+        new_point = dict(point); new_point["x"] = round(x, 2); new_point["y"] = round(y, 2); adjusted.append(new_point)
+    return adjusted
+
+
+def rewrite_world_geometry(conn: sqlite3.Connection, settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    settings = fuel_world_settings_from_raw(settings or fuel_world_settings(conn))
+    galaxies = rows(conn, "SELECT * FROM galaxies ORDER BY id")
+    if galaxies:
+        home_positions = [(8.0, 8.0), (92.0, 8.0), (50.0, 92.0)]
+        homes = [g for g in galaxies if any(x in str(g.get("code") or "").lower() for x in ("helios", "meridian", "nyx", "perseus"))]
+        galaxy_points = []
+        for i, g in enumerate(galaxies):
+            if g in homes[:3]:
+                hx, hy = home_positions[homes.index(g)]; galaxy_points.append({"id": int(g["id"]), "x": hx, "y": hy})
+            else:
+                edge = i % 3; step = ((i // 3) + 1) / (max(2, (len(galaxies) // 3) + 2))
+                ax, ay = home_positions[edge]; bx, by = home_positions[(edge + 1) % 3]
+                wobble = ((int(g["id"]) * 17) % 9 - 4) * 1.8
+                galaxy_points.append({"id": int(g["id"]), "x": max(4.0, min(96.0, ax + (bx - ax) * step + wobble)), "y": max(4.0, min(96.0, ay + (by - ay) * step - wobble))})
+        galaxy_points = enforce_min_gap(galaxy_points, float(settings["galaxy_min_gap"]), 50, 50, 3, 97)
+        for gp in galaxy_points:
+            conn.execute("UPDATE galaxies SET x_pct=?, y_pct=? WHERE id=?", (gp["x"], gp["y"], gp["id"]))
+    planets_updated = 0
+    for g in rows(conn, "SELECT id FROM galaxies ORDER BY id"):
+        planets = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(g["id"]),))
+        if not planets:
+            continue
+        count = len(planets); radius = max(float(settings["planet_min_gap"]), 14.0 * float(settings["planet_gap_multiplier"]))
+        planet_points = []
+        for idx, pl in enumerate(planets):
+            angle = (2 * math.pi * idx / max(1, count)) + (int(pl["id"]) % 7) * 0.13
+            ring = 1.0 + (idx % 3) * 0.38
+            if "gate" in str(pl.get("type") or "").lower() or "gate" in str(pl.get("name") or "").lower():
+                ring = 1.75
+            planet_points.append({"id": int(pl["id"]), "x": 50.0 + math.cos(angle) * radius * ring, "y": 50.0 + math.sin(angle) * radius * ring})
+        planet_points = enforce_min_gap(planet_points, float(settings["planet_min_gap"]), 50, 50, -220, 320)
+        for pp in planet_points:
+            conn.execute("UPDATE planets SET x=?, y=? WHERE id=?", (pp["x"], pp["y"], pp["id"])); planets_updated += 1
+    return {"settings": settings, "galaxiesUpdated": len(galaxies), "planetsUpdated": planets_updated}
+
+
+def ensure_fuel_market_world_patch(conn: sqlite3.Connection, player_id: Optional[int] = None, force: bool = False) -> None:
+    ensure_fuel_tank_templates(conn)
+    marker = app_state_get_json(conn, FUEL_WORLD_PATCH_KEY)
+    if force or not marker.get("applied"):
+        purge_illicit_goods(conn)
+        ensure_trade_goods_catalog(conn)
+        rebalance_trade_goods_market(conn)
+        rewrite_world_geometry(conn)
+        app_state_put_json(conn, FUEL_WORLD_PATCH_KEY, {"applied": True, "version": 4, "updated_at": iso()})
+    if player_id:
+        sync_player_fuel_capacity(conn, int(player_id))
+
 def spend(conn, player_id: int, credits: int=0, fuel: int=0, scrap: int=0, cargo_space: int=0, energy: int=0, god: bool=False) -> None:
     p = get_player(conn, player_id)
     if god:
         return
     if p["credits"] < credits:
         raise HTTPException(400, "Not enough credits")
-    if p["fuel"] < fuel:
-        raise HTTPException(400, "Not enough fuel")
     if p["scrap"] < scrap:
         raise HTTPException(400, "Not enough scrap")
     if p.get("energy", 0) < energy:
@@ -14528,10 +18832,15 @@ def spend(conn, player_id: int, credits: int=0, fuel: int=0, scrap: int=0, cargo
         usage = build_cargo_usage(conn, player_id)
         if usage["total"] + cargo_space > usage["max"]:
             raise HTTPException(400, "Not enough cargo capacity")
-    conn.execute("UPDATE players SET credits=credits-?, fuel=fuel-?, scrap=scrap-?, energy=energy-?, energy_updated_at=COALESCE(energy_updated_at, ?) WHERE id=?", (credits,fuel,scrap,energy,iso(),player_id))
+    requested_fuel = max(0, int(fuel or 0))
+    before_fuel = max(0, int(p.get("fuel") or 0))
+    fuel_to_spend = min(before_fuel, requested_fuel)
+    conn.execute("UPDATE players SET credits=credits-?, fuel=max(0,fuel-?), scrap=scrap-?, energy=energy-?, energy_updated_at=COALESCE(energy_updated_at, ?) WHERE id=?", (credits,fuel_to_spend,scrap,energy,iso(),player_id))
+    if requested_fuel:
+        after_fuel = max(0, before_fuel - fuel_to_spend)
+        maybe_emit_fuel_warning(conn, player_id, before_fuel, after_fuel, int(p.get("max_fuel") or 1))
 
-
-def add_xp(conn, player_id: int, amount: int) -> None:
+def add_xp(conn, player_id: int, amount: int, share_party: bool = True) -> None:
     p = get_player(conn, player_id)
     new_xp = p["xp"] + amount
     level = p["level"]
@@ -14542,6 +18851,8 @@ def add_xp(conn, player_id: int, amount: int) -> None:
         level += 1
         skill_points += 3 + level//5
     conn.execute("UPDATE players SET xp=?, level=?, skill_points=? WHERE id=?", (new_xp, level, skill_points, player_id))
+    if share_party:
+        grant_party_shared_xp(conn, player_id, int(amount or 0))
 
 
 def damage_ship_parts(conn: sqlite3.Connection, ship_id: int, damage: int, focus: Optional[str] = None) -> int:
@@ -14599,15 +18910,14 @@ def damage_or_destroy_ship(conn, player_id: int, damage: int, reason: str, god: 
     if starter:
         conn.execute("UPDATE ships SET destroyed=0, hull=max_hull, shield=max_shield WHERE id=?", (starter["id"],))
         conn.execute("UPDATE players SET active_ship_id=?, cargo=0, hospital_until=? WHERE id=?", (starter["id"], iso(utcnow()+timedelta(minutes=recovery_minutes)), player_id))
-    if ship["insured"]:
-        payout = 0
-        if ship["insurance_tier"] == "basic": payout = int(ship["max_hull"] * 12)
-        elif ship["insurance_tier"] == "standard": payout = int(ship["max_hull"] * 18)
-        elif ship["insurance_tier"] == "premium": payout = int(ship["max_hull"] * 25)
-        elif ship["insurance_tier"] == "starter": payout = 0
+    insurance = ship_insurance_payload(conn, ship, loss_reason=reason)
+    payout = max(0, int(insurance.get("estimatedPayout") or 0))
+    if payout:
         conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (payout, player_id))
-        return f"Ship destroyed by {reason}. Cargo hold was lost ({lost_hold} market units plus some inventory cargo). Insurance paid {payout:,} credits. Starter ship deployed. Recovery time: {recovery_minutes} minutes."
-    return f"Ship destroyed by {reason}. Cargo hold was lost ({lost_hold} market units plus some inventory cargo). No insurance payout. Starter ship deployed. Recovery time: {recovery_minutes} minutes."
+    payout_label = f"Insurance paid {payout:,} credits ({insurance.get('coveragePct', 0)}% of {int(insurance.get('shipValue') or 0):,} insured value)." if payout else "Insurance paid 0 credits."
+    if float(insurance.get("payoutMultiplier") or 1.0) < 1.0:
+        payout_label += " PvP anti-fraud multiplier applied."
+    return f"Ship destroyed by {reason}. Cargo hold was lost ({lost_hold} market units plus some inventory cargo). {payout_label} Starter ship deployed. Recovery time: {recovery_minutes} minutes."
 
 def resolve_npc_roll(conn: sqlite3.Connection, role: str, planet_id: int, tier: str="standard") -> int:
     p = row(conn, "SELECT * FROM planets WHERE id=?", (planet_id,))
@@ -15053,18 +19363,289 @@ def apply_operation_consequence(conn: sqlite3.Connection, player_id: int, diffic
     return "No consequence."
 
 
+def public_faction_balance_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
+    ensure_galaxy_faction_content(conn, force=True)
+    now_s = iso(utcnow())
+    total_players = int(scalar(conn, "SELECT COUNT(*) FROM players") or 0)
+    online_by_faction = {
+        int(r["faction_id"] or 0): int(r["count"] or 0)
+        for r in rows(conn, """
+            SELECT p.faction_id, COUNT(DISTINCT p.id) as count
+            FROM sessions s
+            JOIN players p ON p.user_id=s.user_id
+            WHERE s.expires_at > ?
+            GROUP BY p.faction_id
+        """, (now_s,))
+    }
+    player_by_faction = {
+        int(r["faction_id"] or 0): int(r["count"] or 0)
+        for r in rows(conn, "SELECT faction_id, COUNT(*) as count FROM players GROUP BY faction_id")
+    }
+    home_counts = {
+        int(r["faction_id"] or 0): int(r["count"] or 0)
+        for r in rows(conn, "SELECT faction_id, COUNT(*) as count FROM galaxies WHERE faction_id IS NOT NULL GROUP BY faction_id")
+    }
+    playstyle = {
+        "solar_accord": {
+            "short": "Human diplomats, patrol fleets, safer routes, clean trade, and steady faction warfare.",
+            "youAreChoosing": "Pick them if you want a human lawful-navy lane: brighter uniforms, organized wars, safer starts, and fewer early surprises.",
+            "watchOut": "You will make money safely, but shadow markets and pirate-style shortcuts are not their strength."
+        },
+        "iron_meridian": {
+            "short": "Robotic chassis, shipyards, mining, armor, heavy logistics, and hard-border fights.",
+            "youAreChoosing": "Pick them if a robotic race with chrome bodies, disciplined industry, and ships that are hard to kill sounds right.",
+            "watchOut": "You are not picking the fastest or sneakiest faction. You win by preparation, mass, and uptime."
+        },
+        "umbral_veil": {
+            "short": "Bug-like aliens, stealth scouts, black-market pressure, and opportunistic strikes.",
+            "youAreChoosing": "Pick them if you want something stranger: chitinous alien pilots, risky routes, and more freedom to play clever.",
+            "watchOut": "This is not the calm starter lane. Risk and attention from security are part of the deal."
+        }
+    }
+    faction_rows = []
+    for f in rows(conn, "SELECT * FROM factions ORDER BY id"):
+        fid = int(f["id"])
+        players = int(player_by_faction.get(fid, 0))
+        online = int(online_by_faction.get(fid, 0))
+        pct = round((players / total_players) * 100, 1) if total_players else 0
+        faction_rows.append({
+            **dict(f),
+            "players": players,
+            "online_players": online,
+            "player_percent": pct,
+            "galaxies": int(home_counts.get(fid, 0)),
+            "balance_label": "Underdog" if total_players and pct < 28 else "Crowded" if total_players and pct > 39 else "Balanced",
+            "guidance": playstyle.get(str(f.get("code") or ""), {}),
+            "species": FACTION_AVATAR_SPECIES.get(str(f.get("code") or ""), "Pilot"),
+            "avatar_options": avatar_options_for_faction_code(str(f.get("code") or "")),
+            "avatarOptions": avatar_options_for_faction_code(str(f.get("code") or "")),
+        })
+    return {"factions": faction_rows, "total_players": total_players, "updated_at": now_s}
+
+
+def issue_auth_session(conn: sqlite3.Connection, user: Dict[str, Any]) -> Dict[str, Any]:
+    token = new_session_token()
+    now = iso()
+    conn.execute("INSERT INTO sessions (token,user_id,created_at,expires_at) VALUES (?,?,?,?)", (token, user["id"], now, iso(utcnow()+timedelta(days=7))))
+    try:
+        conn.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, user["id"]))
+    except sqlite3.OperationalError:
+        pass
+    return {"token": token, "user": {"id": user["id"], "username": user["username"], "role": user["role"], "god_mode": bool(user["god_mode"]), "auth_provider": user.get("auth_provider") or "local"}}
+
+
+def normalize_optional_email(value: Optional[str]) -> str:
+    email = (value or "").strip().lower()
+    if not email:
+        return ""
+    if len(email) > 190 or "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(400, "Use a real email address or leave it blank.")
+    return email
+
+
+def faction_or_400(conn: sqlite3.Connection, faction_id: Optional[int]) -> Dict[str, Any]:
+    ensure_galaxy_faction_content(conn, force=True)
+    if not faction_id:
+        raise HTTPException(400, "Pick a faction before launching. Your starter location, allies, war targets, and early flavor come from this choice.")
+    faction = row(conn, "SELECT * FROM factions WHERE id=?", (int(faction_id),))
+    if not faction:
+        raise HTTPException(400, "That faction is not available anymore. Refresh faction balance and pick again.")
+    return faction
+
+
+def starter_location_for_faction(conn: sqlite3.Connection, faction: Dict[str, Any]) -> int:
+    home = str(faction.get("home_galaxy_code") or "").strip()
+    found = row(conn, """
+        SELECT p.id
+        FROM planets p
+        JOIN galaxies g ON g.id=p.galaxy_id
+        WHERE g.code=? AND p.type NOT LIKE '%Gate%'
+        ORDER BY p.security_level DESC, p.market_activity DESC, p.id
+        LIMIT 1
+    """, (home,))
+    if not found:
+        found = row(conn, "SELECT id FROM planets WHERE code='solaria'")
+    if not found:
+        found = row(conn, "SELECT id FROM planets ORDER BY id LIMIT 1")
+    if not found:
+        raise HTTPException(500, "World seed is missing starter planets.")
+    return int(found["id"])
+
+
+def create_new_player_account(conn: sqlite3.Connection, *, username: str, password_hash: str, callsign: str, faction_id: int, email: str = "", google_sub: str = "", auth_provider: str = "local", avatar_id: Optional[str] = None) -> Dict[str, Any]:
+    now = iso()
+    username = normalize_username(username)
+    callsign = normalize_display_name(callsign or username)
+    email = normalize_optional_email(email)
+    if row(conn, "SELECT id FROM users WHERE username=?", (username,)):
+        raise HTTPException(409, "That username is already taken.")
+    if email and row(conn, "SELECT id FROM users WHERE email=?", (email,)):
+        raise HTTPException(409, "That email already has an account. Log in instead.")
+    if google_sub and row(conn, "SELECT id FROM users WHERE google_sub=?", (google_sub,)):
+        raise HTTPException(409, "That Google account is already linked. Log in instead.")
+    faction = faction_or_400(conn, faction_id)
+    loc = starter_location_for_faction(conn, faction)
+    conn.execute(
+        """INSERT INTO users (username,password_hash,role,god_mode,created_at,email,google_sub,auth_provider,approved,last_login_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (username, password_hash, "player", 0, now, email or None, google_sub or None, auth_provider, 1, now),
+    )
+    uid = int(scalar(conn, "SELECT id FROM users WHERE username=?", (username,)) or 0)
+    if not uid:
+        raise HTTPException(500, "Account was not created.")
+    conn.execute(
+        """INSERT INTO players (user_id,callsign,level,xp,skill_points,credits,fuel,max_fuel,cargo,max_cargo,scrap,loyalty,health,max_health,reputation,faction_standing,security_status,location_planet_id,guild_id,faction_id,created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (uid, callsign, 1, 0, 3, 5000, 160, 220, 0, 40, 100, 0, 100, 100, 0, 0, "Clean", loc, None, int(faction_id), now),
+    )
+    pid = int(scalar(conn, "SELECT id FROM players WHERE user_id=?", (uid,)) or 0)
+    starter_template = row(conn, "SELECT * FROM ship_templates WHERE starter=1")
+    if starter_template:
+        conn.execute(
+            """INSERT INTO ships (player_id,template_id,name,hull,max_hull,shield,max_shield,armor,cargo_capacity,fuel_capacity,drive_speed,size_class,mass,insured,insurance_tier,destroyed,starter)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (pid, starter_template["id"], starter_template["name"], starter_template["hull"], starter_template["hull"], starter_template["shield"], starter_template["shield"], starter_template["armor"], starter_template["cargo_capacity"], starter_template["fuel_capacity"], starter_template["drive_speed"], starter_template.get("size_class", "S"), starter_template.get("mass", 145), 1, "starter", 0, 1),
+        )
+        active_ship = scalar(conn, "SELECT id FROM ships WHERE player_id=? ORDER BY id LIMIT 1", (pid,))
+        conn.execute("UPDATE players SET active_ship_id=?, max_cargo=?, max_fuel=? WHERE id=?", (active_ship, starter_template["cargo_capacity"], starter_template["fuel_capacity"], pid))
+    for key in ["piloting_1", "trading_1", "combat_1"]:
+        conn.execute("INSERT OR IGNORE INTO player_skills (player_id,skill_key,level) VALUES (?,?,?)", (pid, key, 1))
+    conn.execute("INSERT OR IGNORE INTO player_jobs (player_id,job_code,xp,rank,active) VALUES (?,?,?,?,?)", (pid, "trader", 0, 1, 1))
+    selected_avatar_id = clean_avatar_id(avatar_id, str(faction.get("code") or DEFAULT_FACTION_CODE), callsign or username)
+    conn.execute("INSERT INTO user_profiles (user_id,display_name,avatar_id,bio,updated_at) VALUES (?,?,?,?,?)", (uid, callsign, selected_avatar_id, "", now))
+    try:
+        add_event(conn, pid, "account", f"{callsign} joined {faction['name']}.", {"faction_id": faction_id, "auth_provider": auth_provider})
+    except Exception:
+        pass
+    return row(conn, "SELECT * FROM users WHERE id=?", (uid,))
+
+
+def google_token_profile(credential: str) -> Dict[str, Any]:
+    client_id = os.getenv("GOOGLE_CLIENT_ID") or os.getenv("VITE_GOOGLE_CLIENT_ID")
+    if not client_id:
+        raise HTTPException(400, "Google login is not configured yet. Add a free Google OAuth web client id as GOOGLE_CLIENT_ID on the API and VITE_GOOGLE_CLIENT_ID on the frontend.")
+    token = (credential or "").strip()
+    if not token:
+        raise HTTPException(400, "Missing Google credential.")
+    try:
+        url = "https://oauth2.googleapis.com/tokeninfo?" + urlencode({"id_token": token})
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        raise HTTPException(401, "Google could not verify this login token.")
+    if str(payload.get("aud") or "") != str(client_id):
+        raise HTTPException(401, "Google login token was issued for a different client id.")
+    if str(payload.get("email_verified") or "").lower() not in {"true", "1"}:
+        raise HTTPException(401, "Google account email is not verified.")
+    return payload
+
+
+@app.get("/api/auth/factions")
+def auth_factions() -> Dict[str, Any]:
+    migrate()
+    conn = connect()
+    try:
+        payload = public_faction_balance_payload(conn)
+        conn.commit()
+        return payload
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/register")
+def register(req: RegisterRequest) -> Dict[str, Any]:
+    migrate()
+    if len(req.password or "") < 6:
+        raise HTTPException(400, "Password must be at least 6 characters.")
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        user = create_new_player_account(
+            conn,
+            username=req.username,
+            password_hash=pw_hash(req.password),
+            callsign=req.callsign or req.username,
+            faction_id=req.faction_id,
+            email=req.email or "",
+            auth_provider="local",
+            avatar_id=req.avatar_id,
+        )
+        auth = issue_auth_session(conn, user)
+        conn.commit()
+        return {**auth, "new_player": True, "tutorial_should_open": True}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except sqlite3.IntegrityError as ex:
+        conn.rollback()
+        raise HTTPException(409, "Username, email, or Google account is already registered.")
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/google")
+def google_login(req: GoogleLoginRequest) -> Dict[str, Any]:
+    migrate()
+    profile = google_token_profile(req.credential)
+    google_sub = str(profile.get("sub") or "").strip()
+    email = normalize_optional_email(profile.get("email") or "")
+    display_name = str(profile.get("name") or email.split("@")[0] or "Nova Pilot").strip()
+    if not google_sub:
+        raise HTTPException(401, "Google did not return a stable account id.")
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        user = row(conn, "SELECT * FROM users WHERE google_sub=?", (google_sub,))
+        new_player = False
+        if not user:
+            base_username = normalize_username((email.split("@")[0] if email else display_name).replace(".", "_"))
+            username = base_username
+            suffix = 2
+            while row(conn, "SELECT id FROM users WHERE username=?", (username,)):
+                username = f"{base_username[:18]}{suffix}"
+                suffix += 1
+            if not req.faction_id:
+                raise HTTPException(409, "Pick a faction before using Google the first time. After that, Google will log you straight in.")
+            user = create_new_player_account(
+                conn,
+                username=username,
+                password_hash=pw_hash("google:" + google_sub),
+                callsign=req.callsign or display_name or username,
+                faction_id=req.faction_id,
+                email=email,
+                google_sub=google_sub,
+                auth_provider="google",
+                avatar_id=req.avatar_id,
+            )
+            new_player = True
+        auth = issue_auth_session(conn, user)
+        conn.commit()
+        return {**auth, "new_player": new_player, "tutorial_should_open": new_player}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise HTTPException(409, "This Google account or email is already linked to another account.")
+    finally:
+        conn.close()
+
+
 @app.post("/api/auth/login")
 def login(req: LoginRequest) -> Dict[str, Any]:
     migrate()
     conn = connect()
-    user = row(conn, "SELECT * FROM users WHERE username=?", (req.username.strip().lower(),))
-    if not user or user["password_hash"] != pw_hash(req.password):
+    try:
+        user = row(conn, "SELECT * FROM users WHERE username=?", (req.username.strip().lower(),))
+        if not user or not pw_verify(req.password, user["password_hash"]):
+            raise HTTPException(401, "Invalid login")
+        if pw_needs_rehash(user["password_hash"]):
+            conn.execute("UPDATE users SET password_hash=? WHERE id=?", (pw_hash(req.password), user["id"]))
+        auth = issue_auth_session(conn, user)
+        conn.commit()
+        return {**auth, "new_player": False, "tutorial_should_open": False}
+    finally:
         conn.close()
-        raise HTTPException(401, "Invalid login")
-    token = str(uuid.uuid4())
-    conn.execute("INSERT INTO sessions (token,user_id,created_at,expires_at) VALUES (?,?,?,?)", (token,user["id"],iso(),iso(utcnow()+timedelta(days=7))))
-    conn.commit(); conn.close()
-    return {"token": token, "user": {"username": user["username"], "role": user["role"], "god_mode": bool(user["god_mode"])}}
 
 
 @app.get("/api/health")
@@ -15081,16 +19662,15 @@ def state(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -
     p = resolve_intercept_if_close(conn, get_player(conn, player["id"]))
     resolve_completed_cargo_operations(conn, player["id"])
     p = get_player(conn, player["id"])
-    # NPCs and market restock are server-side, timestamp-backed world movement.
-    simulate_npc_activity(conn, force=False)
-    simulate_npc_vs_npc_salvage(conn, force=False)
+    # Optimized MMO tick: no global NPC loop on every state request.
+    simulate_galaxy_background_market(conn, p, force=False)
     ensure_server_world_control(conn, force=False)
-    resolve_market_restock(conn, force=False)
-    simulate_npc_market_arbitrage(conn, force=False)
+    process_server_events(conn)
     resolve_player_legal_state(conn, player["id"])
     advance_pirate_station_run(conn, player["id"])
     conn.commit()
     data = build_state(conn, user, p)
+    conn.commit()
     conn.close()
     return data
 
@@ -15105,13 +19685,25 @@ def battle_alert(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_cont
     p = resolve_intercept_if_close(conn, p)
     resolve_player_legal_state(conn, player["id"])
     battle_row = row(conn, "SELECT * FROM combat_battles WHERE player_id=? AND status='active' ORDER BY id DESC LIMIT 1", (player["id"],))
+    if not battle_row:
+        actor_battle = combat_actor_active_battle(conn, f"player:{player['id']}")
+        if actor_battle:
+            battle_row = row(conn, "SELECT * FROM combat_battles WHERE id=? AND status='active'", (int(actor_battle["id"]),))
+    battle = None
+    if battle_row:
+        try:
+            session = load_combat_session(conn, int(battle_row["id"]), None)
+            player_ref = f"player:{player['id']}"
+            if (int(session.get("player_id") or 0) == int(player["id"]) or player_ref in (session.get("actor_refs") or [])) and not combat_ref_is_escaped(session, player_ref):
+                battle = build_combat_session_payload(session, int(player["id"]))
+        except Exception:
+            battle = build_combat_battle_payload(battle_row)
     conn.commit()
     conn.close()
-    battle = build_combat_battle_payload(battle_row) if battle_row else None
     return {
         "hasActiveBattle": bool(battle),
         "battle": battle,
-        "recommendedPollMs": 3000,
+        "recommendedPollMs": 350,
     }
 
 
@@ -15119,15 +19711,19 @@ def battle_alert(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_cont
 
 
 COMBAT_LEGAL_ROLES = {"pirate", "mercenary", "bounty", "hunter", "hostile", "outlaw", "raider"}
-COMBAT_SECURITY_ROLES = {"security", "patrol", "marshal", "customs"}
+COMBAT_SECURITY_ROLES = {"security", "patrol", "marshal", "customs", "turret", "gate_turret", "security_defense"}
 
 
 def combat_actor_immunity_key(actor_ref: str) -> str:
     return f"combat_immunity:{actor_ref}"
 
 
+def combat_post_battle_immunity_seconds() -> int:
+    return max(5, int(COMBAT_BALANCE.get("post_battle_immunity_seconds", 5) or 5))
+
+
 def set_combat_actor_immunity(conn: sqlite3.Connection, actor_ref: str, seconds: Optional[int] = None) -> None:
-    seconds = int(seconds if seconds is not None else COMBAT_BALANCE.get("post_battle_immunity_seconds", 5))
+    seconds = int(seconds if seconds is not None else combat_post_battle_immunity_seconds())
     app_state_put_json(conn, combat_actor_immunity_key(str(actor_ref)), {"until": iso(utcnow() + timedelta(seconds=max(1, seconds)))})
 
 
@@ -15166,7 +19762,7 @@ def combat_actor_active_battle(conn: sqlite3.Connection, actor_ref: str) -> Opti
 
 
 def combat_actor_is_immune(conn: sqlite3.Connection, actor_ref: str) -> bool:
-    return combat_actor_active_battle(conn, actor_ref) is not None or combat_actor_immunity_until(conn, actor_ref) is not None
+    return bool(combat_actor_immunity_until(conn, actor_ref) or galaxy_spawn_immunity_until(conn, actor_ref))
 
 
 def player_escape_chance(conn: sqlite3.Connection, player: Dict[str, Any]) -> float:
@@ -15185,12 +19781,19 @@ def combat_now_block_reason(conn: sqlite3.Connection, player: Dict[str, Any]) ->
     status = jail_heat_status(conn, player["id"])
     if status.get("jailed"):
         return f"Jailed: {status.get('jailReason') or 'detained'}"
+
+    travel = build_travel_state(conn, player)
+    mode = str(travel.get("mode") or player.get("travel_mode") or "").lower()
+
+    # Combat immunity is intentionally narrow: docked ships and galaxy-map
+    # travel are protected. Local/system travel, open-space waypoints, cargo
+    # work, and intercept paths remain valid battle states.
+    if travel.get("docked"):
+        return "Docked ships cannot be attacked. Undock or move into open space to fight."
     travel_until = parse_dt(player.get("travel_until"))
-    if travel_until and travel_until > utcnow():
-        return f"In transit until {player.get('travel_until')}"
-    cargo_status = cargo_operation_status(conn, player["id"])
-    if cargo_status.get("active"):
-        return f"Cargo {cargo_status.get('operationLabel','handling')} in progress. You are protected but cannot fight until {cargo_status.get('completeAt')}."
+    if travel_until and travel_until > utcnow() and mode in {"galaxy", "galaxy_route"}:
+        return f"Galaxy travel in progress until {player.get('travel_until')}"
+
     if not player.get("active_ship_id"):
         return "No active ship"
     ship = row(conn, "SELECT * FROM ships WHERE id=?", (player.get("active_ship_id"),))
@@ -15213,7 +19816,8 @@ def combat_ship_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]
         if any(x in {"weapon", "mining"} for x in compat) or stats.get("damage"):
             dmg = int(stats.get("damage") or stats.get("mining", 0) * 2.2 or 60)
             wtype = "missile" if "missile" in str(m.get("name", "")).lower() else "laser" if "laser" in str(m.get("name", "")).lower() else "projectile"
-            weapons.append({"name": m.get("name") or "Weapon", "type": wtype, "damage": max(35, dmg), "accuracy": min(0.88, 0.55 + int(m.get("current_tier") or 1) * 0.035), "energy": int(m.get("power_usage") or stats.get("energy_use") or 8)})
+            projectile_count = clamp_int(int(stats.get("projectile_count") or stats.get("projectileCount") or stats.get("volley") or 1), 1, 6)
+            weapons.append({"name": m.get("name") or "Weapon", "type": wtype, "damage": max(35, dmg), "accuracy": min(0.88, 0.55 + int(m.get("current_tier") or 1) * 0.035), "energy": int(m.get("power_usage") or stats.get("energy_use") or 8), "projectileCount": projectile_count, "projectile_count": projectile_count})
     combat_role = str(ship.get("role") or ship.get("class_name") or "").lower() in {"combat", "siege", "fleet", "gunship", "interceptor", "patrol", "security", "bounty", "mercenary"}
     weapons = normalize_combat_weapons(weapons, int(derived.get("combat_rating") or get_ship_power(conn, int(ship["id"])) or 100), combat_role)
     utilities = combat_utilities_from_modules(installed, derived)
@@ -15232,14 +19836,189 @@ def combat_ship_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]
         "weapons": weapons, "utilities": utilities, "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)), "stats": derived,
     }
 
+PIRATE_SECURITY_BANDS = [
+    {"key": "null_sec", "name": "0-sec endgame", "security_min": 0, "security_max": 14, "level_min": 45, "level_max": 80, "tier_min": 5, "tier_max": 7, "power_floor": 3600, "power_per_level": 86, "power_cap": 14000},
+    {"key": "deep_low_sec", "name": "deep low-sec", "security_min": 15, "security_max": 34, "level_min": 30, "level_max": 58, "tier_min": 4, "tier_max": 6, "power_floor": 2400, "power_per_level": 68, "power_cap": 9800},
+    {"key": "low_sec", "name": "low-sec", "security_min": 35, "security_max": 54, "level_min": 18, "level_max": 38, "tier_min": 3, "tier_max": 5, "power_floor": 1400, "power_per_level": 50, "power_cap": 6400},
+    {"key": "border_sec", "name": "border-sec", "security_min": 55, "security_max": 74, "level_min": 8, "level_max": 24, "tier_min": 2, "tier_max": 4, "power_floor": 700, "power_per_level": 34, "power_cap": 3800},
+    {"key": "high_sec", "name": "high-sec", "security_min": 75, "security_max": 100, "level_min": 1, "level_max": 14, "tier_min": 1, "tier_max": 2, "power_floor": 160, "power_per_level": 22, "power_cap": 1800},
+]
+
+
+def pirate_like_role(role: str, career: str = "") -> bool:
+    blob = f"{role or ''} {career or ''}".lower()
+    return any(key in blob for key in ("pirate", "raider", "outlaw", "corsair", "reaver")) or str(career or "").lower() == "mercenary"
+
+
+def pirate_security_value(source: Dict[str, Any]) -> int:
+    for key in ("npc_security_level", "npcSecurityLevel", "planet_security_level", "planetSecurityLevel", "security_level", "securityLevel"):
+        value = source.get(key)
+        if value is None or value == "":
+            continue
+        try:
+            return clamp_int(int(float(value)), 0, 100)
+        except Exception:
+            continue
+    return 50
+
+
+def pirate_security_band(security_level: int) -> Dict[str, Any]:
+    security = clamp_int(int(security_level or 0), 0, 100)
+    for band in PIRATE_SECURITY_BANDS:
+        if security >= int(band["security_min"]) and security <= int(band["security_max"]):
+            return band
+    return PIRATE_SECURITY_BANDS[-1]
+
+
+def pirate_level_for_security(base_level: int, security_level: int, rng: random.Random) -> int:
+    band = pirate_security_band(security_level)
+    lo = int(band["level_min"])
+    hi = int(band["level_max"])
+    base = max(1, int(base_level or 1))
+    if base < lo:
+        mode = min(hi, lo + max(1, int((hi - lo) * 0.35)))
+        return clamp_int(int(rng.triangular(lo, hi, mode)), lo, hi)
+    return clamp_int(base, lo, hi)
+
+
+def pirate_power_for_security(base_power: int, level: int, band: Dict[str, Any]) -> int:
+    floor = int(band.get("power_floor") or 80) + int(level) * int(band.get("power_per_level") or 32)
+    cap = int(band.get("power_cap") or 99999)
+    return clamp_int(max(80, int(base_power or 0), floor), 80, cap)
+
+
+def pirate_tier_for_security(level: int, security_level: int, rng: random.Random) -> int:
+    band = pirate_security_band(security_level)
+    lo = int(band["tier_min"])
+    hi = int(band["tier_max"])
+    base = max(lo, int(math.ceil(max(1, int(level or 1)) / 10.0)))
+    roll = base + rng.choice([-1, 0, 0, 1])
+    if band["key"] == "null_sec" and rng.random() < 0.35:
+        roll = max(roll, hi - rng.randint(0, 1))
+    return clamp_int(roll, lo, min(hi, int(TIER_BALANCE.get("max_tier", 7) or 7)))
+
+
+def pirate_weapon_entry(name: str, weapon_type: str, level: int, power: int, tier: int, base: int, scale: float, accuracy: float, energy: int, projectile_count: int = 1) -> Dict[str, Any]:
+    tier_mult = 1.0 + max(0, int(tier) - 1) * 0.12
+    return {
+        "name": name,
+        "type": weapon_type,
+        "damage": int((base + int(power) * scale) * tier_mult),
+        "accuracy": min(0.92, float(accuracy) + int(level) * 0.005 + int(tier) * 0.006),
+        "requiredEnergy": clamp_attack_energy_cost(energy),
+        "projectileCount": clamp_int(projectile_count, 1, 6),
+        "projectile_count": clamp_int(projectile_count, 1, 6),
+    }
+
+
+def pirate_weapon_pool_for_security(level: int, power: int, tier: int, security_level: int) -> List[Dict[str, Any]]:
+    bands = [
+        [
+            ("Cutdown Rail Spitter", "projectile", 34, 0.070, 0.56, 1, 1),
+            ("Rust Pulse Laser", "laser", 30, 0.062, 0.60, 1, 1),
+            ("Boarding Flak Tube", "projectile", 22, 0.045, 0.64, 1, 3),
+            ("Stolen Mining Lance", "laser", 42, 0.082, 0.52, 2, 1),
+            ("Black-Market Micro Missile", "missile", 46, 0.088, 0.48, 2, 1),
+        ],
+        [
+            ("Corsair Burst Laser", "laser", 48, 0.095, 0.60, 2, 1),
+            ("Sabot Rail Battery", "projectile", 58, 0.115, 0.55, 2, 1),
+            ("Grapple Flak Array", "projectile", 32, 0.070, 0.66, 2, 3),
+            ("Smuggler Ion Hook", "laser", 50, 0.100, 0.58, 2, 1),
+            ("Raider Missile Pack", "missile", 66, 0.125, 0.52, 3, 2),
+        ],
+        [
+            ("Voidhook Scrambler Beam", "laser", 64, 0.130, 0.60, 2, 1),
+            ("Reaver Torpedo Rack", "missile", 88, 0.165, 0.50, 4, 1),
+            ("Tri-Barrel Coilgun", "projectile", 58, 0.110, 0.58, 3, 3),
+            ("Fang Scatter Battery", "projectile", 42, 0.092, 0.68, 2, 4),
+            ("EMP Cutlass Lance", "laser", 76, 0.145, 0.57, 3, 1),
+        ],
+        [
+            ("Dread Corsair Lance", "laser", 96, 0.175, 0.61, 4, 1),
+            ("Siegebreaker Rail Nest", "projectile", 82, 0.150, 0.58, 4, 3),
+            ("Grav-Snare Missile Web", "missile", 78, 0.142, 0.56, 4, 4),
+            ("Blackwake Plasma Maul", "laser", 118, 0.205, 0.54, 5, 1),
+            ("Marauder Hex Flak", "projectile", 58, 0.118, 0.66, 3, 6),
+        ],
+        [
+            ("Relic Maw Beam", "laser", 148, 0.238, 0.63, 5, 1),
+            ("Abyssal Rift Cannon", "projectile", 136, 0.222, 0.59, 5, 2),
+            ("Null-Crown Torpedo Choir", "missile", 112, 0.190, 0.56, 5, 5),
+            ("Singularity Grapple Array", "laser", 102, 0.180, 0.66, 4, 4),
+            ("Event Horizon Rail Crucible", "projectile", 166, 0.260, 0.55, 5, 1),
+            ("Deadspace Disassembler", "laser", 126, 0.210, 0.61, 5, 3),
+        ],
+    ]
+    key_order = ["high_sec", "border_sec", "low_sec", "deep_low_sec", "null_sec"]
+    band = pirate_security_band(security_level)
+    idx = max(0, key_order.index(str(band["key"])) if str(band["key"]) in key_order else 0)
+    usable_rows = [bands[max(0, idx - 1)], bands[idx]] if idx > 0 else [bands[0]]
+    weapons: List[Dict[str, Any]] = []
+    for row_items in usable_rows:
+        for spec in row_items:
+            weapons.append(pirate_weapon_entry(spec[0], spec[1], level, power, tier, spec[2], spec[3], spec[4], spec[5], spec[6]))
+    return weapons
+
+
+def scaled_combat_utility(index: int, name: str, tier: int, mult: float) -> Dict[str, Any]:
+    util = dict(UTILITY_ARCHETYPES[index])
+    util["name"] = name
+    util["id"] = name.lower().replace(" ", "_").replace("-", "_")
+    util["requiredEnergy"] = clamp_attack_energy_cost(util.get("cost"))
+    util["cost"] = clamp_attack_energy_cost(util.get("cost"))
+    util["duration"] = int(util.get("duration") or 30)
+    power_mult = float(mult) * (1.0 + max(0, int(tier) - 1) * 0.055)
+    for key in ["attackPct", "defenseDownPct", "dodgeDownPct", "repairHullPct", "shieldPct", "dodgePct", "accuracyDownPct", "defensePct", "energyGain", "attackDownPct"]:
+        if key in util:
+            value = util[key]
+            util[key] = int(round(float(value) * power_mult)) if key == "energyGain" else round(float(value) * power_mult, 3)
+    return util
+
+
+def pirate_utility_pool_for_security(tier: int, security_level: int) -> List[Dict[str, Any]]:
+    band = pirate_security_band(security_level)
+    key = str(band["key"])
+    if key == "high_sec":
+        specs = [(5, "Burnout Jets", 0.72), (6, "Dirty Target Painter", 0.72), (3, "Patch Foam", 0.65)]
+    elif key == "border_sec":
+        specs = [(5, "Corsair Drift Jets", 0.86), (2, "Grapple Scrambler", 0.84), (4, "Looted Shield Tap", 0.82), (6, "Smuggler Target Painter", 0.82)]
+    elif key == "low_sec":
+        specs = [(1, "Hull-Ripper Disruptor", 0.95), (2, "Blackwake Scrambler", 0.94), (7, "Raider Armor Plates", 0.92), (8, "Capacitor Spike Injector", 0.90)]
+    elif key == "deep_low_sec":
+        specs = [(0, "Overclocked Kill Relay", 1.05), (1, "Siege Disruptor Pulse", 1.05), (7, "Marauder Reactive Plating", 1.02), (9, "Weapon Jammer Web", 1.00), (8, "Capacitor Spike Injector", 1.00)]
+    else:
+        specs = [(0, "Deadspace Fire Control", 1.18), (1, "Abyssal Defense Breaker", 1.16), (4, "Void Shield Surge", 1.12), (7, "Relic Armor Hardener", 1.14), (8, "Null Capacitor Injector", 1.12), (9, "Event Horizon Jammer", 1.10)]
+    return [scaled_combat_utility(index, name, tier, mult) for index, name, mult in specs]
+
+
+def choose_unique_utilities(pool: List[Dict[str, Any]], count: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen: set = set()
+    for util in pool:
+        category = str(util.get("category") or util.get("key") or "")
+        if category in seen:
+            continue
+        seen.add(category)
+        out.append(util)
+        if len(out) >= count:
+            break
+    return out
+
+
 def npc_combat_ship_profile(npc: Dict[str, Any]) -> Dict[str, Any]:
-    level = max(1, int(npc.get("level") or 1))
-    power = max(80, int(npc.get("power") or level * 220))
+    base_level = max(1, int(npc.get("level") or 1))
     role = str(npc.get("role") or npc.get("career_code") or "npc").lower()
     career = str(npc.get("career_code") or role).lower()
     ship_class = npc.get("ship_class") or "NPC Ship"
-    rng = random.Random(f"npc-build:{npc.get('id') or npc.get('name')}:{role}:{career}:{level}:{power}")
-    is_combat = role in COMBAT_LEGAL_ROLES or role in COMBAT_SECURITY_ROLES or int(npc.get("aggression") or 0) > 55
+    base_power = max(80, int(npc.get("power") or base_level * 220))
+    rng = random.Random(f"npc-build:{npc.get('id') or npc.get('name')}:{role}:{career}:{base_level}:{base_power}")
+    pirate_like = pirate_like_role(role, career)
+    security_level = pirate_security_value(npc)
+    security_band = pirate_security_band(security_level)
+    level = pirate_level_for_security(base_level, security_level, rng) if pirate_like else base_level
+    power = pirate_power_for_security(base_power, level, security_band) if pirate_like else base_power
+    is_combat = pirate_like or role in COMBAT_LEGAL_ROLES or role in COMBAT_SECURITY_ROLES or int(npc.get("aggression") or 0) > 55
 
     build_styles = [
         {"key": "balanced", "hull": 1.00, "shield": 1.00, "armor": 1.00, "accuracy": 0.00, "evasion": 0.00},
@@ -15248,11 +20027,22 @@ def npc_combat_ship_profile(npc: Dict[str, Any]) -> Dict[str, Any]:
         {"key": "glass_cannon", "hull": 0.76, "shield": 0.92, "armor": 0.84, "accuracy": 0.06, "evasion": 0.02},
         {"key": "evasive", "hull": 0.86, "shield": 1.02, "armor": 0.82, "accuracy": 0.01, "evasion": 0.08},
     ]
+    if pirate_like and security_band["key"] == "high_sec":
+        build_styles.extend([
+            {"key": "scrappy", "hull": 0.82, "shield": 0.72, "armor": 0.78, "accuracy": -0.03, "evasion": 0.04},
+            {"key": "cheap_brawler", "hull": 1.05, "shield": 0.62, "armor": 0.92, "accuracy": -0.04, "evasion": -0.01},
+        ])
+    elif pirate_like and security_band["key"] in {"deep_low_sec", "null_sec"}:
+        build_styles.extend([
+            {"key": "dread_kite", "hull": 0.95, "shield": 1.32, "armor": 1.04, "accuracy": 0.04, "evasion": 0.05},
+            {"key": "siege_raider", "hull": 1.26, "shield": 1.04, "armor": 1.22, "accuracy": 0.02, "evasion": -0.02},
+            {"key": "relic_glass", "hull": 0.78, "shield": 1.08, "armor": 0.88, "accuracy": 0.08, "evasion": 0.06},
+        ])
     if career in {"miner", "trader", "dockmaster", "quartermaster"}:
         build_styles.append({"key": "industrial_tank", "hull": 1.28, "shield": 0.95, "armor": 1.10, "accuracy": -0.03, "evasion": -0.03})
     style = rng.choice(build_styles)
 
-    tier = max(1, min(int(WORLD_PROGRESSION_BALANCE.get("resource_tier_max", 5)), level // 9 + (1 if is_combat else 0)))
+    tier = pirate_tier_for_security(level, security_level, rng) if pirate_like else max(1, min(int(WORLD_PROGRESSION_BALANCE.get("resource_tier_max", 5)), level // 9 + (1 if is_combat else 0)))
     hull = int((380 + power * (1.4 if is_combat else 0.95)) * float(style["hull"]))
     shield = int((160 + power * (0.55 if is_combat else 0.32)) * float(style["shield"]))
     armor = int((8 + level * (1.1 if is_combat else 0.55)) * float(style["armor"]))
@@ -15265,11 +20055,8 @@ def npc_combat_ship_profile(npc: Dict[str, Any]) -> Dict[str, Any]:
         {"name": "Ion Lance", "type": "laser", "damage": int(72 + power * 0.17), "accuracy": min(0.82, 0.50 + level * 0.007), "requiredEnergy": 4},
         {"name": "Scatter Flak", "type": "projectile", "damage": int(42 + power * 0.10), "accuracy": min(0.90, 0.60 + level * 0.004), "requiredEnergy": 2},
     ]
-    if role in {"pirate", "mercenary", "outlaw", "raider"}:
-        weapon_pool.extend([
-            {"name": "Pirate Cannon", "type": "projectile", "damage": int(70 + power * 0.18), "accuracy": min(0.82, 0.50 + level * 0.007), "requiredEnergy": 3},
-            {"name": "Scrambler Beam", "type": "laser", "damage": int(48 + power * 0.11), "accuracy": min(0.86, 0.55 + level * 0.006), "requiredEnergy": 2},
-        ])
+    if pirate_like:
+        weapon_pool = pirate_weapon_pool_for_security(level, power, tier, security_level)
     if role in COMBAT_SECURITY_ROLES or career in {"security_pilot", "marshal", "bounty_hunter"}:
         weapon_pool.extend([
             {"name": "Patrol Laser", "type": "laser", "damage": int(58 + power * 0.16), "accuracy": min(0.86, 0.55 + level * 0.007), "requiredEnergy": 3},
@@ -15285,15 +20072,26 @@ def npc_combat_ship_profile(npc: Dict[str, Any]) -> Dict[str, Any]:
     weapon_count = 3 if is_combat else 1
     if style["key"] == "glass_cannon" and is_combat:
         weapon_count = 4
+    if pirate_like:
+        weapon_count = 2 if security_band["key"] == "high_sec" else 3
+        if tier >= 5 or style["key"] in {"glass_cannon", "relic_glass"}:
+            weapon_count += 1
+        if security_band["key"] == "null_sec" and tier >= 6:
+            weapon_count += 1
     weapons = weapon_pool[:weapon_count]
 
-    utility_pool = [dict(UTILITY_ARCHETYPES[i]) for i in ([1, 5, 7, 8] if is_combat else [7, 1])]
+    utility_pool = pirate_utility_pool_for_security(tier, security_level) if pirate_like else [dict(UTILITY_ARCHETYPES[i]) for i in ([1, 5, 7, 8] if is_combat else [7, 1])]
     if style["key"] in {"shield_kite", "industrial_tank"}:
         utility_pool.insert(0, dict(UTILITY_ARCHETYPES[1]))
     if style["key"] == "evasive":
         utility_pool.insert(0, dict(UTILITY_ARCHETYPES[5]))
     rng.shuffle(utility_pool)
-    utilities = utility_pool[:(2 if is_combat else 1)]
+    utility_count = (2 if is_combat else 1)
+    if pirate_like:
+        utility_count = 1 if security_band["key"] == "high_sec" and tier <= 1 else 2
+        if tier >= 5:
+            utility_count += 1
+    utilities = choose_unique_utilities(utility_pool, utility_count) if pirate_like else utility_pool[:utility_count]
 
     accuracy = min(0.89, 0.48 + level * 0.009 + (0.06 if is_combat else 0) + float(style["accuracy"]))
     evasion = min(0.48, 0.06 + level * 0.004 + (0.06 if role in {"smuggler", "scout"} else 0) + float(style["evasion"]))
@@ -15315,8 +20113,44 @@ def npc_combat_ship_profile(npc: Dict[str, Any]) -> Dict[str, Any]:
         "weapons": normalize_combat_weapons(weapons, power, is_combat),
         "utilities": utilities,
         "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)),
-        "stats": {"buildStyle": style["key"]},
+        "stats": {"buildStyle": style["key"], "baseLevel": base_level, "effectiveLevel": level, "securityLevel": security_level, "securityBand": security_band["key"], "pirateLoadout": pirate_like},
     }
+
+
+def security_defense_combat_profile(defender: Dict[str, Any]) -> Dict[str, Any]:
+    npc_id = str(defender.get("id") or "")
+    role = str(defender.get("role") or defender.get("defense_type") or "").lower()
+    is_turret = npc_id.startswith("sec_turret:") or role in {"turret", "gate_turret"}
+    level = max(1, int(defender.get("level") or (28 if is_turret else 18)))
+    max_hp = max(80, int(defender.get("max_hp") or defender.get("hp") or (360 if is_turret else 240)))
+    power = max(180, int(level * (270 if is_turret else 190) + max_hp * (2.2 if is_turret else 1.6)))
+    role_key = "turret" if is_turret else "patrol"
+    ship_class = "Gate Defense Turret" if is_turret else "Security Patrol Frigate"
+    weapons = [
+        {"name": "Gate Lance Battery" if is_turret else "Patrol Laser Array", "type": "laser", "damage": int(80 + power * (0.18 if is_turret else 0.14)), "accuracy": min(0.90, 0.58 + level * 0.006), "requiredEnergy": 3},
+        {"name": "Tracking Flak Grid" if is_turret else "Interceptor Missile Rack", "type": "projectile" if is_turret else "missile", "damage": int(70 + power * (0.14 if is_turret else 0.16)), "accuracy": min(0.84, 0.52 + level * 0.005), "requiredEnergy": 2},
+    ]
+    if is_turret:
+        weapons.append({"name": "Automated Kill Beam", "type": "laser", "damage": int(120 + power * 0.22), "accuracy": min(0.88, 0.50 + level * 0.006), "requiredEnergy": 5})
+    return {
+        "name": ship_class,
+        "class": ship_class,
+        "role": role_key,
+        "tier": max(1, min(6, level // 9 + (2 if is_turret else 1))),
+        "image_url": ship_visual_payload(ship_class, role_key),
+        "hull": max_hp * (8 if is_turret else 6),
+        "shield": int(max_hp * (4.2 if is_turret else 2.8)),
+        "armor": int(18 + level * (1.6 if is_turret else 1.0)),
+        "energy": int(90 + level * (4 if is_turret else 3)),
+        "combatRating": power,
+        "accuracy": min(0.90, 0.55 + level * 0.006 + (0.05 if is_turret else 0.02)),
+        "evasion": 0.02 if is_turret else min(0.32, 0.08 + level * 0.003),
+        "weapons": normalize_combat_weapons(weapons, power, True),
+        "utilities": [dict(UTILITY_ARCHETYPES[7]), dict(UTILITY_ARCHETYPES[9])] if is_turret else [dict(UTILITY_ARCHETYPES[5]), dict(UTILITY_ARCHETYPES[7])],
+        "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)),
+        "stats": {"securityDefense": True, "stationary": is_turret},
+    }
+
 
 def combat_target_legality(conn: sqlite3.Connection, player: Dict[str, Any], target: Dict[str, Any], mode: str = "attack") -> Dict[str, Any]:
     planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],)) or {}
@@ -15523,7 +20357,8 @@ def create_salvage_site(conn: sqlite3.Connection, planet_id: int, battle_id: Opt
     difficulty = combat_target_difficulty(target, enemy)
     energy_cost = int(COMBAT_BALANCE["salvage_energy_base"] + tier * COMBAT_BALANCE["salvage_energy_per_tier"] + difficulty * COMBAT_BALANCE["salvage_energy_per_difficulty"])
     value = int(sum(int(v) for v in materials.values()) * (18 + tier * 9))
-    expires = utcnow() + timedelta(hours=COMBAT_BALANCE["salvage_site_expire_hours"])
+    lifetime_minutes = max(1, int(OPEN_WORLD_BALANCE.get("salvage_site_lifetime_minutes", 10) or 10))
+    expires = utcnow() + timedelta(minutes=lifetime_minutes)
     conn.execute(
         """
         INSERT INTO salvage_sites (planet_id,battle_id,source_type,source_name,ship_name,ship_role,ship_tier,difficulty,energy_cost,salvage_value,qty_remaining,materials_json,created_at,expires_at,x_pct,y_pct)
@@ -15600,11 +20435,12 @@ def simulate_npc_vs_npc_salvage(conn: sqlite3.Connection, force: bool = False) -
 
 def nearby_combat_targets(conn: sqlite3.Connection, player: Dict[str, Any]) -> List[Dict[str, Any]]:
     targets: List[Dict[str, Any]] = []; player_power = get_ship_power(conn, player.get("active_ship_id") or 0)
-    for n in rows(conn, "SELECT * FROM npc_agents WHERE planet_id=? AND COALESCE(alive,1)=1 ORDER BY aggression DESC, level DESC LIMIT 42", (player["location_planet_id"],)):
+    for n in rows(conn, "SELECT n.*, p.security_level AS npc_security_level FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id WHERE n.planet_id=? AND COALESCE(n.alive,1)=1 ORDER BY n.aggression DESC, n.level DESC LIMIT 42", (player["location_planet_id"],)):
         if combat_actor_is_immune(conn, f"npc:{n['id']}"):
             continue
         profile = npc_combat_ship_profile(n)
-        base = {"id": f"npc:{n['id']}", "rawId": n["id"], "kind":"npc", "targetType":"npc", "name": n.get("name"), "role": n.get("role") or n.get("career_code"), "career": n.get("career_code"), "level": n.get("level"), "power": n.get("power"), "disposition": n.get("disposition"), "shipName": n.get("ship_class"), "ship": profile, "image_url": profile["image_url"]}
+        profile_stats = profile.get("stats") or {}
+        base = {"id": f"npc:{n['id']}", "rawId": n["id"], "kind":"npc", "targetType":"npc", "name": n.get("name"), "role": n.get("role") or n.get("career_code"), "career": n.get("career_code"), "level": profile_stats.get("effectiveLevel") or n.get("level"), "power": profile["combatRating"], "disposition": n.get("disposition"), "shipName": n.get("ship_class"), "ship": profile, "image_url": profile["image_url"], "securityLevel": profile_stats.get("securityLevel")}
         legal = combat_target_legality(conn, player, base)
         danger = "Extreme" if int(n.get("power") or 0) > player_power * 1.6 else "High" if int(n.get("power") or 0) > player_power else "Manageable"
         reward_profile = combat_reward_profile(base, profile, legal)
@@ -15622,7 +20458,7 @@ def get_combat_target(conn: sqlite3.Connection, player: Dict[str, Any], target_r
     if not target_ref or ":" not in target_ref: raise HTTPException(400, "Invalid combat target")
     kind, raw = target_ref.split(":", 1)
     if combat_actor_is_immune(conn, target_ref):
-        raise HTTPException(409, "That ship has post-battle immunity for a few seconds.")
+        raise HTTPException(409, "That ship has temporary battle immunity.")
     if kind == "traveler":
         m = re.match(r"(\d+)-(\d+)-(\d+)-([a-zA-Z_]+)-(\d+)", raw)
         if m:
@@ -15633,23 +20469,56 @@ def get_combat_target(conn: sqlite3.Connection, player: Dict[str, Any], target_r
                 raise HTTPException(400, "Invalid traveler target")
             npc_id = int(simple.group(1))
         if combat_actor_is_immune(conn, f"npc:{npc_id}"):
-            raise HTTPException(409, "That ship has post-battle immunity for a few seconds.")
-        n = row(conn, "SELECT * FROM npc_agents WHERE id=? AND COALESCE(alive,1)=1", (npc_id,))
+            raise HTTPException(409, "That ship has temporary battle immunity.")
+        n = row(conn, "SELECT n.*, p.security_level AS npc_security_level FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id WHERE n.id=? AND COALESCE(n.alive,1)=1", (npc_id,))
         if not n:
             raise HTTPException(404, "Traveler is gone")
         prof = npc_combat_ship_profile(n)
-        return {"id": target_ref, "rawId": n["id"], "kind":"npc", "targetType":"traveler", "inTransit": True, "name": n.get("name") or "NPC Traveler", "role": n.get("role") or n.get("career_code"), "career": n.get("career_code"), "level": n.get("level"), "power": n.get("power"), "disposition": n.get("disposition"), "shipName": n.get("ship_class"), "ship": prof, "image_url": prof["image_url"]}
+        prof_stats = prof.get("stats") or {}
+        return {"id": target_ref, "rawId": n["id"], "kind":"npc", "targetType":"traveler", "inTransit": True, "name": n.get("name") or "NPC Traveler", "role": n.get("role") or n.get("career_code"), "career": n.get("career_code"), "level": prof_stats.get("effectiveLevel") or n.get("level"), "power": prof["combatRating"], "disposition": n.get("disposition"), "shipName": n.get("ship_class"), "ship": prof, "image_url": prof["image_url"], "securityLevel": prof_stats.get("securityLevel")}
+    if kind == "security":
+        n = row(conn, "SELECT * FROM npcs WHERE id=? AND id LIKE 'sec_%' AND COALESCE(active,1)=1 AND COALESCE(hp,1)>0", (raw,))
+        if not n:
+            raise HTTPException(404, "Security defender is gone")
+        current = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (player.get("location_planet_id"),)) or {}
+        if str(n.get("galaxy_id") or "") != str(current.get("galaxy_id") or ""):
+            raise HTTPException(400, "Security defender is not in your current galaxy")
+        prof = security_defense_combat_profile(n)
+        is_turret = str(n.get("id") or "").startswith("sec_turret:") or str(n.get("role") or "").lower() == "turret"
+        role = "turret" if is_turret else "patrol"
+        return {
+            "id": target_ref,
+            "rawId": n["id"],
+            "securityNpcId": n["id"],
+            "kind": "security_defense",
+            "targetType": "security_defense",
+            "inTransit": False,
+            "name": n.get("name") or ("Gate Defense Turret" if is_turret else "Security Patrol"),
+            "role": role,
+            "career": "security",
+            "level": n.get("level"),
+            "power": prof.get("combatRating"),
+            "disposition": "lawful",
+            "shipName": prof.get("name"),
+            "ship": prof,
+            "image_url": prof["image_url"],
+            "x_pct": _nova_sec_coord_to_pct(n.get("x")),
+            "y_pct": _nova_sec_coord_to_pct(n.get("y")),
+        }
     if kind == "npc":
         if combat_actor_is_immune(conn, f"npc:{int(raw)}"):
-            raise HTTPException(409, "That ship has post-battle immunity for a few seconds.")
-        n = row(conn, "SELECT * FROM npc_agents WHERE id=? AND COALESCE(alive,1)=1", (int(raw),))
+            raise HTTPException(409, "That ship has temporary battle immunity.")
+        n = row(conn, "SELECT n.*, p.security_level AS npc_security_level FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id WHERE n.id=? AND COALESCE(n.alive,1)=1", (int(raw),))
         if not n or int(n.get("planet_id") or 0) != int(player["location_planet_id"]): raise HTTPException(400, "Target is no longer at your current location")
         prof = npc_combat_ship_profile(n)
-        return {"id": target_ref, "rawId": n["id"], "kind":"npc", "targetType":"npc", "name": n.get("name"), "role": n.get("role") or n.get("career_code"), "career": n.get("career_code"), "level": n.get("level"), "power": n.get("power"), "disposition": n.get("disposition"), "shipName": n.get("ship_class"), "ship": prof, "image_url": prof["image_url"]}
+        prof_stats = prof.get("stats") or {}
+        return {"id": target_ref, "rawId": n["id"], "kind":"npc", "targetType":"npc", "name": n.get("name"), "role": n.get("role") or n.get("career_code"), "career": n.get("career_code"), "level": prof_stats.get("effectiveLevel") or n.get("level"), "power": prof["combatRating"], "disposition": n.get("disposition"), "shipName": n.get("ship_class"), "ship": prof, "image_url": prof["image_url"], "securityLevel": prof_stats.get("securityLevel")}
     if kind == "player":
         if combat_actor_is_immune(conn, f"player:{int(raw)}"):
-            raise HTTPException(409, "That ship has post-battle immunity for a few seconds.")
+            raise HTTPException(409, "That ship has temporary battle immunity.")
         other = row(conn, "SELECT p.*, u.username, up.display_name FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id=?", (int(raw),))
+        if other and players_in_same_party(conn, player["id"], other["id"]):
+            raise HTTPException(409, "Party members cannot attack each other.")
         if not other or int(other.get("location_planet_id") or 0) != int(player["location_planet_id"]): raise HTTPException(400, "Player target is not at your current location")
         ship = row(conn, "SELECT s.*, t.name as template_name, t.class_name, t.role, t.slots_json, t.ship_tier FROM ships s JOIN ship_templates t ON t.id=s.template_id WHERE s.id=?", (other.get("active_ship_id"),)) if other.get("active_ship_id") else None
         prof = combat_ship_profile(conn, ship, "Player Ship")
@@ -15745,6 +20614,15 @@ def normalize_combat_weapon(weapon: Dict[str, Any], index: int = 0) -> Dict[str,
     w = dict(weapon or {})
     cost = combat_weapon_energy_requirement(w)
     name = str(w.get("name") or f"Weapon {index + 1}")
+    raw_projectiles = w.get("projectileCount", w.get("projectile_count", w.get("volley", 1)))
+    try:
+        projectile_count = clamp_int(int(raw_projectiles or 1), 1, 6)
+    except Exception:
+        projectile_count = 1
+    lower_name = name.lower()
+    if projectile_count == 1 and any(k in lower_name for k in ["splitter", "scatter", "swarm", "quad", "penta", "hex"]):
+        projectile_count = 6 if "hex" in lower_name else 5 if "penta" in lower_name or "swarm" in lower_name else 4 if "quad" in lower_name else 3
+    label_suffix = f" · x{projectile_count} split" if projectile_count > 1 else ""
     w.update({
         "id": str(w.get("id") or w.get("code") or f"weapon_{index + 1}"),
         "name": name,
@@ -15753,7 +20631,10 @@ def normalize_combat_weapon(weapon: Dict[str, Any], index: int = 0) -> Dict[str,
         "accuracy": max(0.12, min(0.96, float(w.get("accuracy") or 0.55))),
         "requiredEnergy": cost,
         "energy": cost,
-        "label": f"{name} · Req {cost} E",
+        "projectileCount": projectile_count,
+        "projectile_count": projectile_count,
+        "splitDamage": projectile_count > 1,
+        "label": f"{name} · Req {cost} E{label_suffix}",
     })
     return w
 
@@ -15940,6 +20821,13 @@ def combat_tick_attack_energy(session: Dict[str, Any], now: Optional[datetime] =
     e_rate = max(0.1, float(session.get("enemy_energy_rate_seconds") or 4.0))
     session["player_attack_energy"] = min(max_e, float(session.get("player_attack_energy") or 0) + elapsed / p_rate)
     session["enemy_attack_energy"] = min(max_e, float(session.get("enemy_attack_energy") or 0) + elapsed / e_rate)
+    for key in ("player_support", "enemy_support"):
+        changed = []
+        for participant in session.get(key) or []:
+            rate = max(0.1, float(participant.get("energyRateSeconds") or 4.0))
+            participant["attackEnergy"] = min(max_e, float(participant.get("attackEnergy") or 0) + elapsed / rate)
+            changed.append(participant)
+        session[key] = changed
     session["last_energy_at"] = iso(now)
     combat_effects_active(session, now)
 
@@ -15977,7 +20865,103 @@ def combat_find_utility(session: Dict[str, Any], utility_id: str) -> Optional[Di
     return None
 
 
+def combat_find_actor_weapon(session: Dict[str, Any], actor_ref: str, weapon_id: str) -> Optional[Dict[str, Any]]:
+    weapons = combat_actor_weapons(session, actor_ref)
+    for i, w in enumerate(weapons):
+        if str(w.get("id") or f"weapon_{i + 1}") == str(weapon_id) or str(i) == str(weapon_id):
+            return w
+    return None
+
+
+def combat_find_actor_utility(session: Dict[str, Any], actor_ref: str, utility_id: str) -> Optional[Dict[str, Any]]:
+    utilities = combat_actor_utilities(session, actor_ref)
+    for i, u in enumerate(utilities):
+        if str(u.get("id") or f"utility_{i + 1}") == str(utility_id) or str(i) == str(utility_id):
+            return u
+    return None
+
+
+def apply_combatant_attack(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], actor_ref: str, target_ref: str, action: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    now = now or utcnow()
+    actor_ref = str(actor_ref or combat_primary_ref(session, "player"))
+    target_ref = combat_default_target_for_actor(session, actor_ref, target_ref)
+    actor_side = combat_participant_side(session, actor_ref) or "player"
+    actor_profile = combat_actor_profile(session, actor_ref)
+    defender_profile = combat_actor_profile(session, target_ref)
+    actor_state = combat_actor_state(session, actor_ref)
+    defender_state = combat_actor_state(session, target_ref)
+    if not actor_profile or not defender_profile or not defender_state:
+        raise HTTPException(400, "Combat target is no longer available")
+    if combat_ref_is_defeated(session, actor_ref):
+        raise HTTPException(409, "Defeated ships cannot attack.")
+    if combat_ref_is_defeated(session, target_ref):
+        target_ref = combat_default_target_for_actor(session, actor_ref, "")
+        defender_profile = combat_actor_profile(session, target_ref)
+        defender_state = combat_actor_state(session, target_ref)
+    if not target_ref or combat_participant_side(session, target_ref) == actor_side:
+        raise HTTPException(400, "Select an opposing combatant.")
+
+    legal = session.get("legal") or {}
+    actor_mod_key = actor_ref if combat_primary_side_for_ref(session, actor_ref) is None else actor_side
+    defender_side = combat_participant_side(session, target_ref) or ("enemy" if actor_side == "player" else "player")
+    defender_mod_key = target_ref if combat_primary_side_for_ref(session, target_ref) is None else defender_side
+    attacker_mods = combat_effect_mods(session, actor_mod_key, now)
+    defender_mods = combat_effect_mods(session, defender_mod_key, now)
+    combat_bonus = float(session.get("combat_bonus") or 0) if actor_ref == combat_primary_ref(session, "player") else 0.0
+    base_acc = float(action.get("accuracy") or actor_profile.get("accuracy") or 0.55)
+    dodge = float(defender_profile.get("evasion") or 0) + float(defender_mods.get("dodgePct") or 0) - float(defender_mods.get("dodgeDownPct") or 0)
+    acc = max(0.12, min(0.94, base_acc + combat_bonus - dodge - float(attacker_mods.get("accuracyDownPct") or 0)))
+    log = session.get("log") or []
+    rng = random.Random(f"combat-action:{session.get('battle_id')}:{len(log)}:{actor_ref}:{target_ref}:{action.get('id') or action.get('name')}")
+    hit = rng.random() <= acc
+    actor_name = actor_profile.get("name") or label_for_api(actor_side)
+    target_name = defender_profile.get("name") or "target"
+    projectile_count = clamp_int(int(action.get("projectileCount") or action.get("projectile_count") or action.get("volley") or 1), 1, 6)
+    if hit:
+        crit = rng.random() <= (0.05 + (combat_bonus if actor_ref == combat_primary_ref(session, "player") else 0))
+        base = int(action.get("damage") or 50)
+        career_bonus = 1.08 if actor_ref == combat_primary_ref(session, "player") and legal.get("state") == "legal" and active_career_code(conn, player["id"]) in {"bounty_hunter", "security_pilot", "mercenary"} else 1.0
+        attack_mult = 1.0 + float(attacker_mods.get("attackPct") or 0) - float(attacker_mods.get("attackDownPct") or 0)
+        defense_mult = 1.0 + float(defender_mods.get("defenseDownPct") or 0) - float(defender_mods.get("defensePct") or 0)
+        raw = int(base * (1.45 if crit else 1.0) * career_bonus * max(0.25, attack_mult) * max(0.25, defense_mult))
+        pierce = 0.12 if action.get("type") == "missile" else 0.0
+        if projectile_count > 1:
+            total = {"shield": 0, "hull": 0}
+            remaining = raw
+            remaining_slots = projectile_count
+            projectile_damage = []
+            for _ in range(projectile_count):
+                shot_raw = max(1, int(round(remaining / max(1, remaining_slots))))
+                remaining -= shot_raw
+                remaining_slots -= 1
+                dealt_one = apply_damage_to_track(defender_state, shot_raw, pierce=pierce)
+                projectile_damage.append({"raw": shot_raw, "shield": dealt_one["shield"], "hull": dealt_one["hull"]})
+                total["shield"] += int(dealt_one["shield"])
+                total["hull"] += int(dealt_one["hull"])
+            dealt = total
+            text = f"{actor_name} fires {action.get('name')} at {target_name} as a {projectile_count}-projectile split volley for {dealt['shield']} shield / {dealt['hull']} hull total damage."
+        else:
+            projectile_damage = [{"raw": raw}]
+            dealt = apply_damage_to_track(defender_state, raw, pierce=pierce)
+            text = f"{actor_name} fires {action.get('name')} at {target_name} and hits for {dealt['shield']} shield / {dealt['hull']} hull damage."
+        entry = {"round": int(session.get("round_no") or 1), "actor": actor_side, "actorRef": actor_ref, "targetRef": target_ref, "targetName": target_name, "action": action.get("name"), "weaponType": action.get("type"), "hit": True, "critical": crit, "projectileCount": projectile_count, "projectileDamage": projectile_damage, "splitDamage": projectile_count > 1, "shieldDamage": dealt["shield"], "hullDamage": dealt["hull"], "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "targetHull": int(defender_state.get("hull") or 0), "targetShield": int(defender_state.get("shield") or 0), "text": ("CRITICAL: " if crit else "") + text}
+    else:
+        entry = {"round": int(session.get("round_no") or 1), "actor": actor_side, "actorRef": actor_ref, "targetRef": target_ref, "targetName": target_name, "action": action.get("name"), "weaponType": action.get("type"), "hit": False, "projectileCount": projectile_count, "splitDamage": projectile_count > 1, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "targetHull": int(defender_state.get("hull") or 0), "targetShield": int(defender_state.get("shield") or 0), "text": f"{actor_name} fires {action.get('name')} at {target_name} but misses."}
+    log.append(entry)
+    session["log"] = log
+    session["rounds"] = int(session.get("round_no") or 1)
+    session["round_no"] = int(session.get("round_no") or 1) + 1
+    combat_actor_set_target_ref(session, actor_ref, target_ref)
+    session["summary"] = f"Battle in progress. {actor_name} is targeting {target_name}."
+    return entry
+
+
 def apply_realtime_combat_attack(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], side: str, action: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    actor_ref = combat_primary_ref(session, "player" if side == "player" else "enemy")
+    target_ref = combat_actor_target_ref(session, actor_ref) or combat_side_opponent_primary_ref(session, side)
+    return apply_combatant_attack(conn, player, session, actor_ref, target_ref, action, now)
+
+def apply_legacy_realtime_combat_attack(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], side: str, action: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
     now = now or utcnow()
     your = session.get("yourShip") or {}
     enemy = session.get("enemyShip") or {}
@@ -16006,11 +20990,31 @@ def apply_realtime_combat_attack(conn: sqlite3.Connection, player: Dict[str, Any
         attack_mult = 1.0 + float(attacker_mods.get("attackPct") or 0) - float(attacker_mods.get("attackDownPct") or 0)
         defense_mult = 1.0 + float(defender_mods.get("defenseDownPct") or 0) - float(defender_mods.get("defensePct") or 0)
         raw = int(base * (1.45 if crit else 1.0) * career_bonus * max(0.25, attack_mult) * max(0.25, defense_mult))
-        dealt = apply_damage_to_track(defender_state, raw, pierce=0.12 if action.get("type") == "missile" else 0.0)
-        text = f"{attacker.get('name') or side} fires {action.get('name')} and hits for {dealt['shield']} shield / {dealt['hull']} hull damage."
-        entry = {"round": int(session.get("round_no") or 1), "actor": side, "action": action.get("name"), "weaponType": action.get("type"), "hit": True, "critical": crit, "shieldDamage": dealt["shield"], "hullDamage": dealt["hull"], "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": ("CRITICAL: " if crit else "") + text}
+        projectile_count = clamp_int(int(action.get("projectileCount") or action.get("projectile_count") or action.get("volley") or 1), 1, 6)
+        pierce = 0.12 if action.get("type") == "missile" else 0.0
+        if projectile_count > 1:
+            total = {"shield": 0, "hull": 0}
+            remaining = raw
+            remaining_slots = projectile_count
+            projectile_damage = []
+            for _ in range(projectile_count):
+                shot_raw = max(1, int(round(remaining / max(1, remaining_slots))))
+                remaining -= shot_raw
+                remaining_slots -= 1
+                dealt_one = apply_damage_to_track(defender_state, shot_raw, pierce=pierce)
+                projectile_damage.append({"raw": shot_raw, "shield": dealt_one["shield"], "hull": dealt_one["hull"]})
+                total["shield"] += int(dealt_one["shield"])
+                total["hull"] += int(dealt_one["hull"])
+            dealt = total
+            text = f"{attacker.get('name') or side} fires {action.get('name')} as a {projectile_count}-projectile split volley for {dealt['shield']} shield / {dealt['hull']} hull total damage."
+        else:
+            projectile_damage = [{"raw": raw}]
+            dealt = apply_damage_to_track(defender_state, raw, pierce=pierce)
+            text = f"{attacker.get('name') or side} fires {action.get('name')} and hits for {dealt['shield']} shield / {dealt['hull']} hull damage."
+        entry = {"round": int(session.get("round_no") or 1), "actor": side, "action": action.get("name"), "weaponType": action.get("type"), "hit": True, "critical": crit, "projectileCount": projectile_count, "projectileDamage": projectile_damage, "splitDamage": projectile_count > 1, "shieldDamage": dealt["shield"], "hullDamage": dealt["hull"], "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": ("CRITICAL: " if crit else "") + text}
     else:
-        entry = {"round": int(session.get("round_no") or 1), "actor": side, "action": action.get("name"), "weaponType": action.get("type"), "hit": False, "shieldDamage": 0, "hullDamage": 0, "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": f"{attacker.get('name') or side} fires {action.get('name')} but misses."}
+        projectile_count = clamp_int(int(action.get("projectileCount") or action.get("projectile_count") or action.get("volley") or 1), 1, 6)
+        entry = {"round": int(session.get("round_no") or 1), "actor": side, "action": action.get("name"), "weaponType": action.get("type"), "hit": False, "projectileCount": projectile_count, "splitDamage": projectile_count > 1, "shieldDamage": 0, "hullDamage": 0, "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": f"{attacker.get('name') or side} fires {action.get('name')} but misses."}
     log.append(entry)
     session["log"] = log
     session["player_state"] = y_state
@@ -16077,16 +21081,145 @@ def apply_realtime_combat_utility(session: Dict[str, Any], side: str, utility: D
     return entry
 
 
+def apply_combatant_defend(session: Dict[str, Any], actor_ref: str, now: Optional[datetime] = None) -> Dict[str, Any]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        return apply_realtime_combat_defend(session, side, now)
+    now = now or utcnow()
+    profile = combat_actor_profile(session, actor_ref)
+    state = combat_actor_state(session, actor_ref)
+    shield_max = int(profile.get("shield") or 0)
+    if shield_max > 0:
+        state["shield"] = min(shield_max, int(state.get("shield") or 0) + max(15, int(shield_max * 0.06)))
+    effect = {"key": "defend", "name": "Defensive Posture", "category": "self_defense_buff", "duration": 9, "defensePct": 0.15, "dodgePct": 0.15}
+    combat_add_effect(session, effect, actor_ref, now)
+    log = session.get("log") or []
+    entry = {"round": int(session.get("round_no") or 1), "actor": combat_participant_side(session, actor_ref) or "player", "actorRef": actor_ref, "action": "Defend", "weaponType": "defend", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{profile.get('name') or actor_ref} takes a defensive posture: +15% defense and dodge briefly."}
+    log.append(entry)
+    session["log"] = log
+    session["rounds"] = int(session.get("round_no") or 1)
+    session["round_no"] = int(session.get("round_no") or 1) + 1
+    return entry
+
+
+def apply_combatant_utility(session: Dict[str, Any], actor_ref: str, utility: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        return apply_realtime_combat_utility(session, side, utility, now)
+    now = now or utcnow()
+    profile = combat_actor_profile(session, actor_ref)
+    state = combat_actor_state(session, actor_ref)
+    target_ref = actor_ref if str(utility.get("target") or "self") == "self" else combat_default_target_for_actor(session, actor_ref)
+    ok, msg = combat_add_effect(session, utility, target_ref, now)
+    if not ok:
+        raise HTTPException(409, msg)
+    if utility.get("repairHullPct"):
+        max_hull = int(profile.get("hull") or state.get("hull") or 1)
+        heal = max(1, int(max_hull * float(utility.get("repairHullPct") or 0)))
+        state["hull"] = min(max_hull, int(state.get("hull") or 0) + heal)
+        msg += f" Hull restored by {heal}."
+    if utility.get("shieldPct"):
+        max_shield = int(profile.get("shield") or state.get("shield") or 0)
+        gain = max(1, int(max_shield * float(utility.get("shieldPct") or 0))) if max_shield else 0
+        state["shield"] = min(max_shield, int(state.get("shield") or 0) + gain)
+        msg += f" Shield restored by {gain}."
+    if utility.get("energyGain"):
+        max_e = float(COMBAT_BALANCE.get("attack_energy_max", 12))
+        _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+        if participant is not None:
+            participant["attackEnergy"] = min(max_e, float(participant.get("attackEnergy") or 0) + float(utility.get("energyGain") or 0))
+        msg += " Attack energy injected."
+    log = session.get("log") or []
+    entry = {"round": int(session.get("round_no") or 1), "actor": combat_participant_side(session, actor_ref) or "player", "actorRef": actor_ref, "targetRef": target_ref, "action": utility.get("name"), "weaponType": "utility", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{profile.get('name') or actor_ref} activates {utility.get('name')}: {msg}"}
+    log.append(entry)
+    session["log"] = log
+    session["rounds"] = int(session.get("round_no") or 1)
+    session["round_no"] = int(session.get("round_no") or 1) + 1
+    return entry
+
+
+def combat_has_extra_combatants(session: Dict[str, Any]) -> bool:
+    return bool(session.get("player_support") or session.get("enemy_support"))
+
+
+def combat_battle_point(conn: sqlite3.Connection, session: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, float]:
+    open_space = get_player_open_space(conn, int(player.get("id") or session.get("player_id") or 0)) if player else {}
+    target = session.get("target") or {}
+    return {
+        "x_pct": float(target.get("x_pct") or open_space.get("x_pct") or 50),
+        "y_pct": float(target.get("y_pct") or open_space.get("y_pct") or 50),
+    }
+
+
+def combat_spawn_defeat_salvage(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], actor_ref: str, combatant: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    ship = combat_actor_profile(session, actor_ref)
+    if not ship:
+        return None
+    target = {
+        "id": actor_ref,
+        "rawId": int(actor_ref.split(":", 1)[1]) if actor_ref.startswith("player:") and actor_ref.split(":", 1)[1].isdigit() else None,
+        "kind": "player" if actor_ref.startswith("player:") else "npc",
+        "name": combatant.get("name") or ship.get("name") or "Destroyed ship",
+        "role": ship.get("role") or combatant.get("kind") or "ship",
+        "level": (player or {}).get("level") or 1,
+        "shipName": ship.get("name") or combatant.get("shipName") or "Ship",
+    }
+    point = combat_battle_point(conn, session, player)
+    target.update(point)
+    site = create_salvage_site(conn, int((player or {}).get("location_planet_id") or session.get("planet_id") or 1), int(session.get("battle_id") or 0) or None, target, ship, source_type="multi_combat_destroyed")
+    rewards = session.get("rewards") or {}
+    rewards.setdefault("defeatSalvageSites", []).append({"ref": actor_ref, "id": site.get("id"), "energyCost": site.get("energyCost"), "value": site.get("value")})
+    session["rewards"] = rewards
+    return site
+
+
+def process_combat_defeats(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any]) -> None:
+    defeated_refs = list(session.get("defeated_refs") or [])
+    log = session.get("log") or []
+    for combatant in combat_build_combatants(session):
+        ref = str(combatant.get("ref") or "")
+        if not ref or ref in defeated_refs or combatant.get("escaped"):
+            continue
+        if int(combatant.get("hull") or 0) > 0:
+            continue
+        defeated_refs.append(ref)
+        site = combat_spawn_defeat_salvage(conn, player, session, ref, combatant)
+        log.append({"round": int(session.get("round_no") or 1), "actor": "system", "actorRef": ref, "action": "Combatant Destroyed", "weaponType": "system", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{combatant.get('name') or ref} is disabled and remains on the battle board. Salvage #{site.get('id') if site else 'n/a'} spawned on the map."})
+    session["defeated_refs"] = defeated_refs
+    session["log"] = log
+
+
+def combat_live_sides(session: Dict[str, Any]) -> set:
+    live = set()
+    for combatant in combat_build_combatants(session):
+        if not combatant.get("defeated") and not combatant.get("escaped"):
+            live.add(str(combatant.get("side") or ""))
+    return {x for x in live if x}
+
+
 def maybe_finalize_combat_after_action(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     y_state = session.get("player_state") or {}
     e_state = session.get("enemy_state") or {}
+    owner = player
+    owner_id = int(session.get("player_id") or 0)
+    if owner_id and int((player or {}).get("id") or 0) != owner_id:
+        owner = get_player(conn, owner_id) or player
+    if combat_has_extra_combatants(session):
+        process_combat_defeats(conn, player, session)
+        live_sides = combat_live_sides(session)
+        if len(live_sides) <= 1:
+            session["forced_winner_side"] = next(iter(live_sides), None) or ("enemy" if combat_ref_is_escaped(session, combat_primary_ref(session, "player")) else "player")
+            return finalize_realtime_combat_battle(conn, owner, session)
+        return None
     if int(y_state.get("hull") or 0) <= 0 or int(e_state.get("hull") or 0) <= 0:
-        return finalize_realtime_combat_battle(conn, player, session)
+        return finalize_realtime_combat_battle(conn, owner, session)
     return None
 
 
 def perform_enemy_combat_ai_if_ready(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     now = now or utcnow()
+    if combat_primary_ref(session, "enemy").startswith("player:"):
+        return None
     ready, _wait = combat_action_ready(session, "enemy", now)
     if not ready:
         return None
@@ -16154,12 +21287,315 @@ def combat_turn_order(your: Dict[str, Any], enemy: Dict[str, Any], skills: Dict[
     return order
 
 
-def build_combat_session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
+def combat_primary_ref(session: Dict[str, Any], side: str) -> str:
+    side = "player" if str(side) == "player" else "enemy"
+    if side == "player":
+        return str(session.get("player_ref") or f"player:{int(session.get('player_id') or 0)}")
+    target = session.get("target") or {}
+    if target.get("kind") == "player" and target.get("rawId"):
+        return f"player:{int(target.get('rawId') or 0)}"
+    if target.get("kind") == "npc" and target.get("rawId"):
+        return str(session.get("target_ref") or f"npc:{int(target.get('rawId') or 0)}")
+    return str(session.get("target_ref") or "enemy:primary")
+
+
+def combat_primary_side_for_ref(session: Dict[str, Any], actor_ref: str) -> Optional[str]:
+    actor_ref = str(actor_ref or "")
+    if actor_ref and actor_ref == combat_primary_ref(session, "player"):
+        return "player"
+    if actor_ref and actor_ref == combat_primary_ref(session, "enemy"):
+        return "enemy"
+    target = session.get("target") or {}
+    if target.get("kind") == "npc" and target.get("rawId") and actor_ref == f"npc:{int(target.get('rawId') or 0)}":
+        return "enemy"
+    return None
+
+
+def combat_all_support(session: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return list(session.get("player_support") or []) + list(session.get("enemy_support") or [])
+
+
+def combat_find_support_participant(session: Dict[str, Any], actor_ref: str) -> Tuple[Optional[str], Optional[int], Optional[Dict[str, Any]]]:
+    actor_ref = str(actor_ref or "")
+    for key in ("player_support", "enemy_support"):
+        for idx, participant in enumerate(session.get(key) or []):
+            if str(participant.get("ref") or "") == actor_ref:
+                return key, idx, participant
+    return None, None, None
+
+
+def combat_participant_side(session: Dict[str, Any], actor_ref: str) -> Optional[str]:
+    primary = combat_primary_side_for_ref(session, actor_ref)
+    if primary:
+        return primary
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    if participant:
+        return "player" if str(participant.get("side")) == "player" else "enemy"
+    return None
+
+
+def combat_side_opponent_primary_ref(session: Dict[str, Any], side: str) -> str:
+    return combat_primary_ref(session, "enemy" if str(side) == "player" else "player")
+
+
+def combat_actor_profile(session: Dict[str, Any], actor_ref: str) -> Dict[str, Any]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        return session.get("yourShip") or {}
+    if side == "enemy":
+        return session.get("enemyShip") or {}
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    return (participant or {}).get("ship") or {}
+
+
+def combat_actor_state(session: Dict[str, Any], actor_ref: str) -> Dict[str, Any]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        profile = session.get("yourShip") or {}
+        state = session.setdefault("player_state", {"hull": profile.get("hull", 1), "shield": profile.get("shield", 0), "armor": profile.get("armor", 0), "energy": profile.get("energy", 0)})
+        return state
+    if side == "enemy":
+        profile = session.get("enemyShip") or {}
+        state = session.setdefault("enemy_state", {"hull": profile.get("hull", 1), "shield": profile.get("shield", 0), "armor": profile.get("armor", 0), "energy": profile.get("energy", 0)})
+        return state
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    if participant is not None:
+        ship = participant.get("ship") or {}
+        state = participant.setdefault("state", {"hull": ship.get("hull", 1), "shield": ship.get("shield", 0), "armor": ship.get("armor", 0), "energy": ship.get("energy", 0)})
+        return state
+    return {}
+
+
+def combat_actor_weapons(session: Dict[str, Any], actor_ref: str) -> List[Dict[str, Any]]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        return session.get("player_weapons") or (session.get("yourShip") or {}).get("weapons") or []
+    if side == "enemy":
+        return session.get("enemy_weapons") or (session.get("enemyShip") or {}).get("weapons") or []
+    profile = combat_actor_profile(session, actor_ref)
+    return profile.get("weapons") or []
+
+
+def combat_actor_utilities(session: Dict[str, Any], actor_ref: str) -> List[Dict[str, Any]]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        return session.get("player_utilities") or (session.get("yourShip") or {}).get("utilities") or []
+    if side == "enemy":
+        return session.get("enemy_utilities") or (session.get("enemyShip") or {}).get("utilities") or []
+    profile = combat_actor_profile(session, actor_ref)
+    return profile.get("utilities") or []
+
+
+def combat_actor_available_energy(session: Dict[str, Any], actor_ref: str) -> int:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        return combat_available_energy(session, side)
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    return int(math.floor(float((participant or {}).get("attackEnergy") or 0)))
+
+
+def combat_actor_energy_value(session: Dict[str, Any], actor_ref: str) -> float:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        return float(session.get(f"{side}_attack_energy") or 0)
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    return float((participant or {}).get("attackEnergy") or 0)
+
+
+def combat_actor_spend_energy(session: Dict[str, Any], actor_ref: str, cost: int) -> None:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        combat_spend_attack_energy(session, side, cost)
+        return
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    if participant is not None:
+        participant["attackEnergy"] = max(0.0, float(participant.get("attackEnergy") or 0) - int(cost))
+
+
+def combat_actor_action_ready(session: Dict[str, Any], actor_ref: str, now: Optional[datetime] = None) -> Tuple[bool, int]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        return combat_action_ready(session, side, now)
+    now = now or utcnow()
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    until = parse_dt((participant or {}).get("actionUntil"))
+    if until and until > now:
+        return False, max(1, int((until - now).total_seconds()))
+    return True, 0
+
+
+def combat_actor_set_action_until(session: Dict[str, Any], actor_ref: str, when: datetime) -> None:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        session[f"{side}_action_until"] = iso(when)
+        return
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    if participant is not None:
+        participant["actionUntil"] = iso(when)
+
+
+def combat_actor_energy_rate(session: Dict[str, Any], actor_ref: str) -> float:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        return float(session.get("player_energy_rate_seconds") or 4.0)
+    if side == "enemy":
+        return float(session.get("enemy_energy_rate_seconds") or 4.0)
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    return float((participant or {}).get("energyRateSeconds") or 4.0)
+
+
+def combat_actor_action_until(session: Dict[str, Any], actor_ref: str) -> Optional[str]:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side:
+        return session.get(f"{side}_action_until")
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    return (participant or {}).get("actionUntil")
+
+
+def combat_actor_target_ref(session: Dict[str, Any], actor_ref: str) -> str:
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        return str(session.get("player_target_ref") or combat_primary_ref(session, "enemy"))
+    if side == "enemy":
+        return str(session.get("enemy_target_ref") or combat_primary_ref(session, "player"))
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    if participant:
+        side = "player" if str(participant.get("side")) == "player" else "enemy"
+        return str(participant.get("targetRef") or combat_side_opponent_primary_ref(session, side))
+    return ""
+
+
+def combat_actor_set_target_ref(session: Dict[str, Any], actor_ref: str, target_ref: str) -> None:
+    target_ref = str(target_ref or "")
+    if not target_ref:
+        return
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        session["player_target_ref"] = target_ref
+        return
+    if side == "enemy":
+        session["enemy_target_ref"] = target_ref
+        return
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    if participant is not None:
+        participant["targetRef"] = target_ref
+
+
+def combat_ref_is_escaped(session: Dict[str, Any], actor_ref: str) -> bool:
+    return str(actor_ref or "") in set(str(x) for x in (session.get("escaped_refs") or []))
+
+
+def combat_remove_actor_from_session(conn: sqlite3.Connection, session: Dict[str, Any], actor_ref: str, escaped: bool = False) -> None:
+    actor_ref = str(actor_ref or "")
+    if not actor_ref:
+        return
+    for key in ("player_support", "enemy_support"):
+        session[key] = [p for p in (session.get(key) or []) if str(p.get("ref") or "") != actor_ref]
+    session["actor_refs"] = [r for r in (session.get("actor_refs") or []) if str(r) != actor_ref]
+    session["pending_actor_actions"] = [a for a in (session.get("pending_actor_actions") or []) if str(a.get("actorRef") or "") != actor_ref]
+    cooldowns = dict(session.get("escape_cooldowns") or {})
+    cooldowns.pop(actor_ref, None)
+    session["escape_cooldowns"] = cooldowns
+    if escaped:
+        escaped_refs = list(session.get("escaped_refs") or [])
+        if actor_ref not in escaped_refs:
+            escaped_refs.append(actor_ref)
+        session["escaped_refs"] = escaped_refs
+    clear_combat_actor_active_battle(conn, actor_ref)
+
+
+def combat_ref_is_defeated(session: Dict[str, Any], actor_ref: str) -> bool:
+    actor_ref = str(actor_ref or "")
+    if actor_ref in set(str(x) for x in (session.get("defeated_refs") or [])):
+        return True
+    state = combat_actor_state(session, actor_ref)
+    return bool(state and int(state.get("hull") or 0) <= 0)
+
+
+def combat_build_combatants(session: Dict[str, Any], viewer_ref: str = "") -> List[Dict[str, Any]]:
+    combatants: List[Dict[str, Any]] = []
+
+    def add_card(ref: str, side: str, kind: str, name: str, ship: Dict[str, Any], state: Dict[str, Any], joined_at: Optional[str] = None) -> None:
+        ref = str(ref or "")
+        if not ref or combat_ref_is_escaped(session, ref):
+            return
+        max_hull = max(1, int(ship.get("hull") or ship.get("maxHull") or state.get("hull") or 1))
+        max_shield = max(0, int(ship.get("shield") or ship.get("maxShield") or state.get("shield") or 0))
+        effect_keys = {side, ref}
+        effects = [e for e in combat_effects_active(session) if str(e.get("side")) in effect_keys]
+        target_ref = combat_actor_target_ref(session, ref)
+        primary_side = combat_primary_side_for_ref(session, ref)
+        effect_key = primary_side or ref
+        combatants.append({
+            "ref": ref,
+            "side": side,
+            "effectKey": effect_key,
+            "primary": bool(primary_side),
+            "kind": kind,
+            "name": name or ship.get("name") or label_for_api(kind),
+            "shipName": ship.get("name") or name or label_for_api(kind),
+            "hull": max(0, int(state.get("hull") or 0)),
+            "maxHull": max_hull,
+            "shield": max(0, int(state.get("shield") or 0)),
+            "maxShield": max_shield,
+            "effects": effects,
+            "targetRef": target_ref,
+            "defeated": combat_ref_is_defeated(session, ref),
+            "escaped": combat_ref_is_escaped(session, ref),
+            "isYou": bool(viewer_ref and ref == viewer_ref),
+            "joinedAt": joined_at,
+            "attackEnergy": round(float(session.get(f"{side}_attack_energy") or 0), 2) if combat_primary_side_for_ref(session, ref) else round(float((combat_find_support_participant(session, ref)[2] or {}).get("attackEnergy") or 0), 2),
+            "actionUntil": combat_actor_action_until(session, ref),
+        })
+
+    player_ref = combat_primary_ref(session, "player")
+    enemy_ref = combat_primary_ref(session, "enemy")
+    add_card(player_ref, "player", "player", (session.get("player_name") or (session.get("yourShip") or {}).get("name") or "Pilot"), session.get("yourShip") or {}, combat_actor_state(session, player_ref), session.get("started_at"))
+    target = session.get("target") or {}
+    add_card(enemy_ref, "enemy", target.get("kind") or target.get("targetType") or "enemy", target.get("name") or (session.get("enemyShip") or {}).get("name") or "Target", session.get("enemyShip") or {}, combat_actor_state(session, enemy_ref), session.get("started_at"))
+    for participant in session.get("player_support") or []:
+        ship = participant.get("ship") or {}
+        add_card(str(participant.get("ref") or ""), "player", participant.get("kind") or "support", participant.get("name") or ship.get("name") or "Support", ship, combat_actor_state(session, str(participant.get("ref") or "")), participant.get("joinedAt"))
+    for participant in session.get("enemy_support") or []:
+        ship = participant.get("ship") or {}
+        add_card(str(participant.get("ref") or ""), "enemy", participant.get("kind") or "support", participant.get("name") or ship.get("name") or "Support", ship, combat_actor_state(session, str(participant.get("ref") or "")), participant.get("joinedAt"))
+    return combatants
+
+
+def combat_default_target_for_actor(session: Dict[str, Any], actor_ref: str, requested_ref: str = "") -> str:
+    actor_side = combat_participant_side(session, actor_ref) or "player"
+    requested_ref = str(requested_ref or "")
+    combatants = combat_build_combatants(session, actor_ref)
+    refs = {str(c.get("ref")): c for c in combatants}
+    if requested_ref and requested_ref in refs and refs[requested_ref].get("side") != actor_side and not refs[requested_ref].get("defeated"):
+        return requested_ref
+    current = combat_actor_target_ref(session, actor_ref)
+    if current in refs and refs[current].get("side") != actor_side and not refs[current].get("defeated"):
+        return current
+    for combatant in combatants:
+        if combatant.get("side") != actor_side and not combatant.get("defeated"):
+            return str(combatant.get("ref") or "")
+    return combat_side_opponent_primary_ref(session, actor_side)
+
+
+def build_combat_session_payload(session: Dict[str, Any], viewer_player_id: Optional[int] = None) -> Dict[str, Any]:
     max_e = int(COMBAT_BALANCE.get("attack_energy_max", 12))
-    player_energy = float(session.get("player_attack_energy") or 0)
-    enemy_energy = float(session.get("enemy_attack_energy") or 0)
-    player_weapons = session.get("player_weapons") or (session.get("yourShip") or {}).get("weapons") or []
-    player_utilities = session.get("player_utilities") or (session.get("yourShip") or {}).get("utilities") or []
+    viewer_ref = f"player:{int(viewer_player_id)}" if viewer_player_id else combat_primary_ref(session, "player")
+    if not combat_participant_side(session, viewer_ref):
+        viewer_ref = combat_primary_ref(session, "player")
+    default_target_ref = combat_default_target_for_actor(session, viewer_ref)
+    target_profile = combat_actor_profile(session, default_target_ref) or session.get("enemyShip") or {}
+    target_state = combat_actor_state(session, default_target_ref) or session.get("enemy_state") or {}
+    player_energy = combat_actor_energy_value(session, viewer_ref)
+    enemy_energy = combat_actor_energy_value(session, default_target_ref) if default_target_ref else float(session.get("enemy_attack_energy") or 0)
+    player_weapons = combat_actor_weapons(session, viewer_ref)
+    player_utilities = combat_actor_utilities(session, viewer_ref)
+    viewer_side = combat_participant_side(session, viewer_ref) or "player"
+    viewer_ship = combat_actor_profile(session, viewer_ref) or session.get("yourShip") or {}
+    viewer_state = combat_actor_state(session, viewer_ref) or session.get("player_state") or {}
+    combatants = combat_build_combatants(session, viewer_ref)
+    escape_cooldowns = session.get("escape_cooldowns") or {}
+    viewer_escape_at = escape_cooldowns.get(viewer_ref) or (session.get("next_escape_at") if viewer_ref == combat_primary_ref(session, "player") else None)
     return {
         "id": int(session.get("battle_id") or session.get("id") or 0),
         "status": session.get("status") or "active",
@@ -16170,34 +21606,41 @@ def build_combat_session_payload(session: Dict[str, Any]) -> Dict[str, Any]:
         "rewards": session.get("rewards") or {},
         "penalties": session.get("penalties") or {},
         "summary": session.get("summary") or "Battle engaged. Attack energy charging.",
-        "yourShip": session.get("yourShip") or {},
-        "enemyShip": session.get("enemyShip") or {},
+        "yourShip": viewer_ship,
+        "enemyShip": target_profile,
         "target": session.get("target") or {},
         "legal": session.get("legal") or {},
         "started_at": session.get("started_at"),
         "completed_at": session.get("completed_at"),
         "nextActionAt": session.get("next_action_at"),
-        "nextEscapeAt": session.get("next_escape_at"),
-        "playerActionUntil": session.get("player_action_until"),
-        "enemyActionUntil": session.get("enemy_action_until"),
+        "nextEscapeAt": viewer_escape_at,
+        "playerActionUntil": combat_actor_action_until(session, viewer_ref),
+        "enemyActionUntil": combat_actor_action_until(session, default_target_ref),
         "actionDelayMs": int(COMBAT_BALANCE.get("round_ms", 3000)),
         "escapeCooldownSeconds": combat_escape_cooldown_seconds(),
-        "postBattleImmunitySeconds": int(COMBAT_BALANCE.get("post_battle_immunity_seconds", 5)),
+        "postBattleImmunitySeconds": combat_post_battle_immunity_seconds(),
         "escapeChance": round(float(session.get("escape_chance") or 0.2), 3),
         "attackEnergyMax": max_e,
         "playerAttackEnergy": round(min(max_e, player_energy), 2),
         "enemyAttackEnergy": round(min(max_e, enemy_energy), 2),
-        "playerEnergyRateSeconds": float(session.get("player_energy_rate_seconds") or 4.0),
-        "enemyEnergyRateSeconds": float(session.get("enemy_energy_rate_seconds") or 4.0),
+        "playerEnergyRateSeconds": combat_actor_energy_rate(session, viewer_ref),
+        "enemyEnergyRateSeconds": combat_actor_energy_rate(session, default_target_ref) if default_target_ref else float(session.get("enemy_energy_rate_seconds") or 4.0),
         "playerWeapons": player_weapons,
         "playerUtilities": player_utilities,
+        "playerSupport": session.get("player_support") or [],
+        "enemySupport": session.get("enemy_support") or [],
+        "combatants": combatants,
+        "viewerRef": viewer_ref,
+        "viewerSide": viewer_side,
+        "viewerEffectKey": combat_primary_side_for_ref(session, viewer_ref) or viewer_ref,
+        "defaultTargetRef": default_target_ref,
         "activeEffects": session.get("active_effects") or [],
         "pendingPlayerActions": session.get("pending_player_actions") or [],
         "escapeEnergyCost": int(COMBAT_BALANCE.get("attack_energy_escape_cost", 2)),
         "defendEnergyCost": int(COMBAT_BALANCE.get("attack_energy_defend_cost", 1)),
         "balance": COMBAT_BALANCE,
-        "playerState": session.get("player_state") or {},
-        "enemyState": session.get("enemy_state") or {},
+        "playerState": viewer_state,
+        "enemyState": target_state,
     }
 
 
@@ -16254,6 +21697,280 @@ def release_combat_actor_locks(conn: sqlite3.Connection, session: Dict[str, Any]
     for ref in session.get("actor_refs") or []:
         clear_combat_actor_active_battle(conn, ref)
 
+
+
+
+def combat_support_key(side: str) -> str:
+    return "player_support" if str(side) == "player" else "enemy_support"
+
+
+def combat_support_refs(session: Dict[str, Any]) -> set:
+    refs = set(str(x.get("ref") or "") for x in (session.get("player_support") or []))
+    refs.update(str(x.get("ref") or "") for x in (session.get("enemy_support") or []))
+    return {r for r in refs if r}
+
+
+def add_combat_support_participant(conn: sqlite3.Connection, session: Dict[str, Any], side: str, actor_ref: str, name: str, ship: Dict[str, Any], kind: str = "npc", target_ref: str = "") -> bool:
+    side = "player" if str(side) == "player" else "enemy"
+    actor_ref = str(actor_ref or "")
+    if not actor_ref:
+        return False
+    actor_refs = list(session.get("actor_refs") or [])
+    if actor_ref in actor_refs or actor_ref in combat_support_refs(session):
+        return False
+    now = utcnow()
+    key = combat_support_key(side)
+    support = list(session.get(key) or [])
+    weapons = normalize_combat_weapons((ship or {}).get("weapons") or [], int((ship or {}).get("combatRating") or 100), True)
+    ship = {**(ship or {}), "weapons": weapons}
+    ship.setdefault("utilities", [dict(UTILITY_ARCHETYPES[0]), dict(UTILITY_ARCHETYPES[5])] if kind == "player" else [dict(UTILITY_ARCHETYPES[7])])
+    for idx, util in enumerate(ship.get("utilities") or []):
+        util.setdefault("id", f"{actor_ref.replace(':', '_')}_utility_{idx + 1}")
+        util["requiredEnergy"] = clamp_attack_energy_cost(util.get("requiredEnergy") or util.get("cost") or 2)
+        util["cost"] = util["requiredEnergy"]
+    default_target_ref = str(target_ref or combat_side_opponent_primary_ref(session, side))
+    payload = {
+        "ref": actor_ref,
+        "side": side,
+        "kind": kind,
+        "name": name or ship.get("name") or label_for_api(kind),
+        "ship": ship,
+        "state": {"hull": int(ship.get("hull") or 1), "shield": int(ship.get("shield") or 0), "armor": int(ship.get("armor") or 0), "energy": int(ship.get("energy") or 0)},
+        "targetRef": default_target_ref,
+        "attackEnergy": 0.0,
+        "energyRateSeconds": combat_energy_rate_seconds(ship, {}, npc=(kind != "player")),
+        "actionUntil": iso(now),
+        "joinedAt": iso(now),
+        "nextActionAt": iso(now + timedelta(milliseconds=900 + (abs(hash(actor_ref)) % 1800))),
+    }
+    support.append(payload)
+    session[key] = support
+    actor_refs.append(actor_ref)
+    session["actor_refs"] = list(dict.fromkeys(actor_refs))
+    set_combat_actor_active_battle(conn, actor_ref, int(session.get("battle_id") or 0))
+    log = list(session.get("log") or [])
+    log.append({
+        "round": int(session.get("round_no") or 1),
+        "actor": "system",
+        "action": "Combatant Joined",
+        "weaponType": "join",
+        "hit": True,
+        "shieldDamage": 0,
+        "hullDamage": 0,
+        "playerHull": int((session.get("player_state") or {}).get("hull") or 0),
+        "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0),
+        "playerShield": int((session.get("player_state") or {}).get("shield") or 0),
+        "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0),
+        "text": f"{payload['name']} joined the {'player' if side == 'player' else 'enemy'} side.",
+    })
+    session["log"] = log
+    session["summary"] = f"Battle widened: {payload['name']} joined the {'player' if side == 'player' else 'enemy'} side."
+    return True
+
+
+def apply_support_combat_attack(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], side: str, participant: Dict[str, Any], now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    now = now or utcnow()
+    side = "player" if str(side) == "player" else "enemy"
+    if str(participant.get("kind") or "") == "player":
+        return None
+    actor_ref = str(participant.get("ref") or "")
+    if not actor_ref or combat_ref_is_defeated(session, actor_ref):
+        return None
+    ship = participant.get("ship") or {}
+    weapons = normalize_combat_weapons(ship.get("weapons") or [], int(ship.get("combatRating") or 100), True)
+    if not weapons:
+        return None
+    log = session.get("log") or []
+    rng = random.Random(f"support-combat:{session.get('battle_id')}:{participant.get('ref')}:{len(log)}")
+    action = weapons[int(rng.random() * len(weapons)) % len(weapons)]
+    target_ref = combat_default_target_for_actor(session, actor_ref, str(participant.get("targetRef") or ""))
+    return apply_combatant_attack(conn, player, session, actor_ref, target_ref, action, now)
+
+
+def perform_combat_support_ai_if_ready(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], now: Optional[datetime] = None) -> int:
+    now = now or utcnow()
+    fired = 0
+    for side in ("player", "enemy"):
+        key = combat_support_key(side)
+        changed = []
+        for participant in list(session.get(key) or []):
+            if str(participant.get("kind") or "") == "player":
+                changed.append(participant)
+                continue
+            next_at = parse_dt(participant.get("nextActionAt"))
+            if next_at and next_at > now:
+                changed.append(participant)
+                continue
+            entry = apply_support_combat_attack(conn, player, session, side, participant, now)
+            if entry:
+                fired += 1
+            delay_ms = 2800 + (abs(hash(str(participant.get("ref") or "support"))) % 3400)
+            participant["nextActionAt"] = iso(now + timedelta(milliseconds=delay_ms))
+            changed.append(participant)
+            if int((session.get("player_state") or {}).get("hull") or 0) <= 0 or int((session.get("enemy_state") or {}).get("hull") or 0) <= 0:
+                break
+        session[key] = changed
+    return fired
+
+
+def npc_attack_contact_range_pct(npc: Dict[str, Any], map_type: str) -> float:
+    # Close contact only. This replaces the old radar-radius style chase behavior.
+    base = 1.05 if str(map_type) == "system" else 0.85
+    role = str(npc.get("role") or npc.get("career_code") or "").lower()
+    if role in {"pirate", "raider", "outlaw", "mercenary"}:
+        base += 0.18
+    return base
+
+
+def force_player_open_space_for_npc_battle(conn: sqlite3.Connection, player: Dict[str, Any], contact: Dict[str, Any], map_type: str) -> Dict[str, Any]:
+    map_type = "galaxy" if str(map_type).lower() == "galaxy" else "system"
+    clear_player_waypoint(conn, int(player["id"]))
+    clear_player_intercept(conn, int(player["id"]))
+    clear_player_route(conn, int(player["id"]))
+    set_player_open_space(conn, int(player["id"]), {
+        "active": True,
+        "map_type": map_type,
+        "x_pct": float(contact.get("x_pct") or 50),
+        "y_pct": float(contact.get("y_pct") or 50),
+        "anchor_planet_id": player.get("location_planet_id"),
+        "anchor_galaxy_id": (row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (player.get("location_planet_id"),)) or {}).get("galaxy_id"),
+        "arrived_at": iso(),
+        "label": "Combat contact point",
+    })
+    conn.execute(
+        """UPDATE players
+           SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+               travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL,
+               travel_destination_galaxy_id=NULL, player_base_docked_id=NULL
+           WHERE id=?""",
+        (int(player["id"]),),
+    )
+    return get_player(conn, int(player["id"]))
+
+
+def start_npc_player_battle_if_contact(conn: sqlite3.Connection, player: Dict[str, Any], npc: Dict[str, Any], state: Dict[str, Any], contact: Dict[str, Any], map_type: str, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+    now = now or utcnow()
+    map_type = "galaxy" if str(map_type).lower() == "galaxy" else "system"
+    if map_type == "galaxy":
+        return None
+    if not contact or not npc_should_attack_player_contact(npc, contact):
+        return None
+    travel = build_travel_state(conn, player)
+    mode = str(travel.get("mode") or "").lower()
+    if travel.get("docked") or mode in {"galaxy", "galaxy_route"}:
+        return None
+    if combat_actor_is_immune(conn, f"player:{player['id']}"):
+        return None
+    npc_id = int(npc.get("id") or 0)
+    if not npc_id:
+        return None
+    actor_ref = f"npc:{npc_id}"
+    traveler_ref = f"traveler:{npc_id}:{map_type}"
+    if combat_actor_active_battle(conn, actor_ref) or combat_actor_active_battle(conn, traveler_ref):
+        return None
+
+    active = row(conn, "SELECT id FROM combat_battles WHERE player_id=? AND status='active' ORDER BY id DESC LIMIT 1", (int(player["id"]),))
+    if active:
+        session = load_combat_session(conn, int(active["id"]), int(player["id"]))
+        ship = npc_combat_ship_profile(npc)
+        joined = add_combat_support_participant(conn, session, "enemy", actor_ref, npc.get("name") or "NPC attacker", ship, "npc")
+        if joined:
+            actor_refs = list(session.get("actor_refs") or [])
+            if traveler_ref not in actor_refs:
+                actor_refs.append(traveler_ref)
+                session["actor_refs"] = list(dict.fromkeys(actor_refs))
+            set_combat_actor_active_battle(conn, traveler_ref, int(session.get("battle_id") or active["id"]))
+            persist_combat_session(conn, session)
+            add_event(conn, int(player["id"]), "combat", f"{npc.get('name') or 'An NPC'} joined the enemy side of your active battle.", {"battleId": int(active["id"]), "npcId": npc_id})
+        return {"joined": bool(joined), "battleId": int(active["id"])}
+
+    try:
+        battle_player = force_player_open_space_for_npc_battle(conn, player, contact, map_type)
+        result = simulate_combat_battle(
+            conn,
+            battle_player,
+            traveler_ref,
+            "ambush",
+            False,
+            free_start=True,
+            initiator_label=npc.get("name") or "Hostile NPC",
+        )
+        battle = result.get("battle") or {}
+        battle_id = int(result.get("battleId") or battle.get("id") or 0)
+        if battle_id:
+            set_combat_actor_active_battle(conn, actor_ref, battle_id)
+            set_combat_actor_active_battle(conn, traveler_ref, battle_id)
+            conn.execute("UPDATE npc_map_state SET x_pct=?, y_pct=?, destination_x_pct=?, destination_y_pct=?, arrival_at=?, action_state='working', action_until=?, updated_at=? WHERE id=?", (float(contact.get("x_pct") or 50), float(contact.get("y_pct") or 50), float(contact.get("x_pct") or 50), float(contact.get("y_pct") or 50), iso(now), iso(now + timedelta(seconds=20)), iso(now), int(state["id"])))
+            add_event(conn, int(player["id"]), "combat", f"{npc.get('name') or 'A hostile NPC'} ambushed you in open space.", {"battleId": battle_id, "npcId": npc_id, "mapType": map_type})
+        return {"started": bool(battle_id), "battleId": battle_id, "battle": battle}
+    except HTTPException as ex:
+        conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (player.get("location_planet_id"), "npc_player_ambush_blocked", npc.get("name") or "NPC", f"NPC ambush blocked: {getattr(ex, 'detail', ex)}", encode_json({"npcId": npc_id}), iso(now)))
+        return None
+    except Exception as ex:
+        conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (player.get("location_planet_id"), "npc_player_ambush_failed", npc.get("name") or "NPC", f"NPC ambush failed: {ex}", encode_json({"npcId": npc_id}), iso(now)))
+        return None
+
+
+def _nova_sec_start_security_battle(conn, defender: dict, player_ctx: dict, reason: str) -> bool:
+    try:
+        pid = int(player_ctx.get('id') or 0)
+    except Exception:
+        return False
+    if not pid:
+        return False
+    defender_id = str(defender.get('id') or '')
+    if not defender_id:
+        return False
+    try:
+        player = get_player(conn, pid)
+        travel = build_travel_state(conn, player)
+        if travel.get("docked") or str(travel.get("mode") or "").lower() in {"galaxy", "galaxy_route"}:
+            return False
+        security_ref = f"security:{defender_id}"
+        player_ref = f"player:{pid}"
+        if combat_actor_is_immune(conn, player_ref):
+            return False
+        if combat_actor_active_battle(conn, security_ref):
+            return True
+        ship = security_defense_combat_profile(defender)
+        active = row(conn, "SELECT id FROM combat_battles WHERE player_id=? AND status='active' ORDER BY id DESC LIMIT 1", (pid,))
+        if not active:
+            active = combat_actor_active_battle(conn, player_ref)
+        if active:
+            session = load_combat_session(conn, int(active["id"]), None)
+            if combat_ref_is_escaped(session, player_ref):
+                return False
+            joined = add_combat_support_participant(conn, session, "enemy", security_ref, defender.get("name") or ship.get("name") or "Security defender", ship, "npc", target_ref=player_ref)
+            if joined:
+                combat_actor_set_target_ref(session, security_ref, player_ref)
+                persist_combat_session(conn, session)
+                add_event(conn, pid, "security", f"{defender.get('name') or 'Security'} joined your active battle ({reason.replace('_', ' ')}).", {"battleId": int(active["id"]), "securityNpcId": defender_id, "reason": reason})
+            return bool(joined)
+        contact = {
+            "x_pct": _nova_sec_coord_to_pct(defender.get("x")),
+            "y_pct": _nova_sec_coord_to_pct(defender.get("y")),
+            "name": defender.get("name") or "Security defender",
+        }
+        battle_player = force_player_open_space_for_npc_battle(conn, player, contact, "system")
+        result = simulate_combat_battle(
+            conn,
+            battle_player,
+            security_ref,
+            "ambush",
+            False,
+            free_start=True,
+            initiator_label=defender.get("name") or "Security defender",
+        )
+        battle = result.get("battle") or {}
+        battle_id = int(result.get("battleId") or battle.get("id") or 0)
+        if battle_id:
+            set_combat_actor_active_battle(conn, security_ref, battle_id)
+            add_event(conn, pid, "security", f"{defender.get('name') or 'Security'} opened fire ({reason.replace('_', ' ')}).", {"battleId": battle_id, "securityNpcId": defender_id, "reason": reason})
+        return bool(battle_id)
+    except HTTPException:
+        return False
+    except Exception:
+        return False
 
 
 def route_surviving_npc_after_player_battle(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], destroyed: bool = False) -> Optional[Dict[str, Any]]:
@@ -16353,9 +22070,57 @@ def route_surviving_npc_after_player_battle(conn: sqlite3.Connection, player: Di
     return {"state": "resume_objective", "hullPct": round(hull_pct, 3), "shieldPct": round(shield_pct, 3)}
 
 
+def reroll_npc_targets_after_player_escape(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any]) -> None:
+    npc_ids: set[int] = set()
+
+    def remember_ref(ref: Any) -> None:
+        raw_ref = str(ref or "")
+        if raw_ref.startswith("npc:"):
+            try:
+                npc_ids.add(int(raw_ref.split(":", 1)[1]))
+            except Exception:
+                pass
+            return
+        if raw_ref.startswith("traveler:"):
+            m = re.match(r"traveler:(\d+)(?::|$)", raw_ref)
+            if m:
+                npc_ids.add(int(m.group(1)))
+
+    target = session.get("target") or {}
+    if target.get("kind") == "npc" and target.get("rawId"):
+        try:
+            npc_ids.add(int(target.get("rawId")))
+        except Exception:
+            pass
+    for ref in (session.get("actor_refs") or []):
+        remember_ref(ref)
+    for ref in (session.get("target_ref"), session.get("enemy_ref")):
+        remember_ref(ref)
+    for participant in (session.get("player_support") or []) + (session.get("enemy_support") or []):
+        remember_ref((participant or {}).get("ref"))
+
+    if npc_ids:
+        marks = ",".join("?" for _ in npc_ids)
+        conn.execute(
+            f"""UPDATE npc_map_state
+                SET target_object_key='', objective='search', action_state='working', action_until=?, updated_at=?
+                WHERE npc_id IN ({marks}) AND target_object_key='player:self'""",
+            (iso(), iso(), *sorted(npc_ids)),
+        )
+    conn.execute(
+        "UPDATE security_auto_engagements SET resolved=1 WHERE target_player_id=? AND resolved=0",
+        (str(player.get("id") or ""),),
+    )
+
+
 def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any], outcome_override: Optional[str] = None) -> Dict[str, Any]:
+    owner_id = int(session.get("player_id") or 0)
+    if owner_id and int((player or {}).get("id") or 0) != owner_id:
+        owner = get_player(conn, owner_id)
+        if owner:
+            player = owner
     if session.get("status") == "complete":
-        return build_combat_session_payload(session)
+        return build_combat_session_payload(session, int((player or {}).get("id") or 0) or None)
     target = session.get("target") or {}
     enemy = session.get("enemyShip") or {}
     your = session.get("yourShip") or {}
@@ -16373,7 +22138,7 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         summary = f"Escape successful against {target.get('name') or 'target'}. Both ships retain damage and receive brief immunity."
         rewards.setdefault("credits", 0); rewards.setdefault("xp", 0); rewards.setdefault("items", [])
         penalties["shipDamage"] = max(0, int((your.get("hull") or 0) - int(y_state.get("hull") or 0)))
-        log.append({"round": int(session.get("round_no") or 1), "actor": "system", "action": "Battle Ended", "weaponType": "system", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": f"Battle ended by escape. Both ships are protected for {int(COMBAT_BALANCE.get('post_battle_immunity_seconds', 5))} seconds."})
+        log.append({"round": int(session.get("round_no") or 1), "actor": "system", "action": "Battle Ended", "weaponType": "system", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": f"Battle ended by escape. Both ships are protected for {combat_post_battle_immunity_seconds()} seconds."})
         session["completed_at"] = iso()
         session["status"] = "complete"
         session["outcome"] = outcome
@@ -16392,21 +22157,27 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         release_combat_actor_locks(conn, session)
         for ref in session.get("actor_refs") or []:
             set_combat_actor_immunity(conn, ref)
+        reroll_npc_targets_after_player_escape(conn, player, session)
         persist_combat_session(conn, session)
         add_event(conn, player["id"], "combat", summary, {"battleId": session.get("battle_id"), "outcome": outcome})
-        return build_combat_session_payload(session)
+        return build_combat_session_payload(session, int(player["id"]))
 
     enemy_destroyed = int(e_state.get("hull") or 0) <= 0
     player_destroyed = int(y_state.get("hull") or 0) <= 0
-    player_won = enemy_destroyed or (not player_destroyed and int(e_state.get("hull") or 0) < int(y_state.get("hull") or 0) and int(session.get("round_no") or 1) > int(COMBAT_BALANCE.get("max_rounds", 12)))
+    forced_winner = str(session.pop("forced_winner_side", "") or "")
+    player_won = forced_winner == "player" if forced_winner in {"player", "enemy"} else (enemy_destroyed or (not player_destroyed and int(e_state.get("hull") or 0) < int(y_state.get("hull") or 0) and int(session.get("round_no") or 1) > int(COMBAT_BALANCE.get("max_rounds", 12))))
     outcome = "victory" if player_won else "defeat"
     winner = "player" if player_won else "enemy"
     penalties["shipDamage"] = max(0, int((your.get("hull") or 0) - int(y_state.get("hull") or 0)))
 
     if player_won:
         reward_profile = session.get("rewardProfile") or combat_reward_profile(target, enemy, legal)
+        alien_target = is_alien_combat_target(target, enemy)
         credits = int(reward_profile.get("credits") or 0)
         xp = int(reward_profile.get("xp") or 0)
+        if alien_target:
+            xp = max(1, int(xp * 2))
+            rewards["eventXpMultiplier"] = 2
         conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (credits, player["id"]))
         add_xp(conn, player["id"], xp)
         rewards.update({"credits": credits, "xp": xp, "energySpent": int(session.get("energy_cost") or 0), "rewardProfile": reward_profile, "progression": grant_action_progression(conn, player["id"], "combat", 1.0 + (target.get("level") or 1) / 30, True)})
@@ -16422,6 +22193,15 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
             npc_after_battle = route_surviving_npc_after_player_battle(conn, player, session, destroyed=False)
             if npc_after_battle:
                 rewards["npcAfterBattle"] = npc_after_battle
+        if enemy_destroyed and target.get("targetType") == "security_defense":
+            defender_id = str(target.get("securityNpcId") or target.get("rawId") or "")
+            if defender_id:
+                conn.execute("UPDATE npcs SET hp=0, active=0, updated_at=? WHERE id=?", (iso(), defender_id))
+                conn.execute("UPDATE security_defense_registry SET status='destroyed', respawn_after=0 WHERE npc_id=?", (defender_id,))
+                rewards["securityDefenseDestroyed"] = True
+                rewards["salvageSite"] = None
+                rewards["salvageNote"] = "Security defense wreckage was reclaimed by the grid. The defender will respawn on the configured security timer."
+                add_event(conn, player["id"], "security", f"{target.get('name') or 'Security defender'} was destroyed. Security response timers are now active.", {"securityNpcId": defender_id, "battleId": session.get("battle_id")})
         if enemy_destroyed and target.get("kind") == "npc" and target.get("rawId"):
             defeated = row(conn, "SELECT * FROM npc_agents WHERE id=? AND COALESCE(alive,1)=1", (int(target.get("rawId")),))
             if defeated:
@@ -16432,7 +22212,14 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
             qty = max(1, int((target.get("level") or 1) / 5) + int(enemy.get("tier") or 1))
             add_inventory_item(conn, player["id"], "combat_salvage", "Combat Salvage", "salvage", qty, 1, 420, 0.5, "Recovered loose material after battle", "combat", category="salvage", rarity="uncommon", respect_cargo=True, god=bool(session.get("god")))
             rewards.setdefault("items", []).append({"code":"combat_salvage", "name":"Combat Salvage", "qty":qty})
-        recipe_drops = roll_normal_combat_recipe_drops(conn, player["id"], target, rng)
+        if alien_target and enemy_destroyed:
+            alien_drop = grant_alien_unique_equipment_drop(conn, player["id"], target, enemy, rng)
+            if alien_drop:
+                rewards.setdefault("items", []).append(alien_drop)
+            rewards["alienDropRule"] = "Alien raid enemies drop actual equipment only, not recipe copies."
+            recipe_drops = []
+        else:
+            recipe_drops = roll_normal_combat_recipe_drops(conn, player["id"], target, rng)
         if recipe_drops:
             rewards["recipes"] = recipe_drops
         if legal.get("state") == "legal":
@@ -16441,7 +22228,8 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         if int(y_state.get("hull") or 0) <= 0:
             player_ship_target = {"id": f"player:{player['id']}:destroyed", "rawId": player["id"], "kind": "player", "name": player.get("callsign") or "Destroyed Player Ship", "role": "player", "level": player.get("level"), "shipName": your.get("name") or "Player Ship"}
             penalties["playerSalvageSite"] = create_salvage_site(conn, player["location_planet_id"], None, player_ship_target, your, source_type="player_destroyed")
-        damage_or_destroy_ship(conn, player["id"], max(80, int(((your.get("hull") or 0) - int(y_state.get("hull") or 0)) * 0.35)), "combat defeat", bool(session.get("god")), hospital_minutes=0)
+        destroy_reason = "pvp combat defeat" if target.get("kind") == "player" else "combat defeat"
+        damage_or_destroy_ship(conn, player["id"], max(80, int(((your.get("hull") or 0) - int(y_state.get("hull") or 0)) * 0.35)), destroy_reason, bool(session.get("god")), hospital_minutes=0)
         grant_action_progression(conn, player["id"], "combat", 0.45, False)
 
     if legal.get("criminal"):
@@ -16455,7 +22243,7 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
 
     rounds = max([int(x.get("round", 0) or 0) for x in log] or [0])
     summary = f"{outcome.title()} against {target.get('name')}. {len(log)} real-time actions over {rounds} rounds."
-    log.append({"round": rounds, "actor": "system", "action": "Battle Ended", "weaponType": "system", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": f"Battle ended: {winner} wins. Both combatants are protected for {int(COMBAT_BALANCE.get('post_battle_immunity_seconds', 5))} seconds."})
+    log.append({"round": rounds, "actor": "system", "action": "Battle Ended", "weaponType": "system", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int(y_state.get("hull") or 0), "enemyHull": int(e_state.get("hull") or 0), "playerShield": int(y_state.get("shield") or 0), "enemyShield": int(e_state.get("shield") or 0), "text": f"Battle ended: {winner} wins. Both combatants are protected for {combat_post_battle_immunity_seconds()} seconds."})
     session["status"] = "complete"
     session["outcome"] = outcome
     session["winner"] = winner
@@ -16482,25 +22270,55 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         cd_until = utcnow() + timedelta(seconds=COMBAT_BALANCE["pvp_cooldown_seconds"] if target.get("kind") == "player" else 180)
         conn.execute("INSERT INTO combat_cooldowns (player_id,combat_until,updated_at) VALUES (?,?,?) ON CONFLICT(player_id) DO UPDATE SET combat_until=excluded.combat_until, updated_at=excluded.updated_at", (player["id"], iso(cd_until), iso()))
     else:
-        immune_until = utcnow() + timedelta(seconds=int(COMBAT_BALANCE.get("post_battle_immunity_seconds", 5)))
+        immune_until = utcnow() + timedelta(seconds=combat_post_battle_immunity_seconds())
         conn.execute("INSERT INTO combat_cooldowns (player_id,combat_until,updated_at) VALUES (?,?,?) ON CONFLICT(player_id) DO UPDATE SET combat_until=excluded.combat_until, updated_at=excluded.updated_at", (player["id"], iso(immune_until), iso()))
     persist_combat_session(conn, session)
     add_event(conn, player["id"], "combat", summary, {"battleId": session.get("battle_id"), "outcome": outcome, "legalState": legal.get("state")})
-    return build_combat_session_payload(session)
+    return build_combat_session_payload(session, int(player["id"]))
 
 
 def advance_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], battle_id: int, force: bool = False) -> Dict[str, Any]:
-    session = load_combat_session(conn, int(battle_id), int(player["id"]))
+    session = load_combat_session(conn, int(battle_id), None)
+    player_ref = f"player:{player['id']}"
+    if int(session.get("player_id") or 0) != int(player["id"]) and player_ref not in (session.get("actor_refs") or []):
+        raise HTTPException(403, "Battle does not belong to this pilot")
     if session.get("status") == "complete":
-        return build_combat_session_payload(session)
+        return build_combat_session_payload(session, player["id"])
     now = utcnow()
     combat_tick_attack_energy(session, now)
     y_state = session.get("player_state") or {}
     e_state = session.get("enemy_state") or {}
     if int(y_state.get("hull") or 0) <= 0 or int(e_state.get("hull") or 0) <= 0:
-        return finalize_realtime_combat_battle(conn, player, session)
+        result = maybe_finalize_combat_after_action(conn, player, session)
+        if result:
+            return build_combat_session_payload(session, player["id"])
 
-    # Stream queued player salvos one action per 3-second combat beat.
+    # Stream queued salvos one action per combat beat for any human combatant.
+    pending_actor = list(session.get("pending_actor_actions") or [])
+    if pending_actor:
+        kept_pending = []
+        fired_pending = False
+        for queued in pending_actor:
+            actor_ref = str(queued.get("actorRef") or "")
+            if fired_pending or combat_ref_is_defeated(session, actor_ref):
+                kept_pending.append(queued)
+                continue
+            actor_ready, _actor_wait = combat_actor_action_ready(session, actor_ref, now)
+            if not actor_ready:
+                kept_pending.append(queued)
+                continue
+            apply_combatant_attack(conn, player, session, actor_ref, str(queued.get("targetRef") or ""), queued.get("weapon") or {}, now)
+            combat_actor_set_action_until(session, actor_ref, now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
+            fired_pending = True
+        session["pending_actor_actions"] = kept_pending
+        if fired_pending:
+            result = maybe_finalize_combat_after_action(conn, player, session)
+            if result:
+                return build_combat_session_payload(session, player["id"])
+            persist_combat_session(conn, session)
+            return build_combat_session_payload(session, player["id"])
+
+    # Stream legacy queued player salvos one action per 3-second combat beat.
     pending_player = list(session.get("pending_player_actions") or [])
     player_ready, _player_wait = combat_action_ready(session, "player", now)
     if pending_player and player_ready:
@@ -16513,13 +22331,17 @@ def advance_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, A
             session["enemy_action_until"] = iso(now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
         result = maybe_finalize_combat_after_action(conn, player, session)
         if result:
-            return result
+            return build_combat_session_payload(session, player["id"])
         persist_combat_session(conn, session)
-        return build_combat_session_payload(session)
+        return build_combat_session_payload(session, player["id"])
 
     # Real-time combat is now interactive: the player acts from the modal,
     # while the enemy spends its own attack energy when ready.
     try:
+        perform_combat_support_ai_if_ready(conn, player, session, now)
+        support_result = maybe_finalize_combat_after_action(conn, player, session)
+        if support_result:
+            return build_combat_session_payload(session, player["id"])
         perform_enemy_combat_ai_if_ready(conn, player, session, now)
     except HTTPException:
         pass
@@ -16527,73 +22349,94 @@ def advance_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, A
     y_state = session.get("player_state") or {}
     e_state = session.get("enemy_state") or {}
     if int(y_state.get("hull") or 0) <= 0 or int(e_state.get("hull") or 0) <= 0:
-        return finalize_realtime_combat_battle(conn, player, session)
+        result = maybe_finalize_combat_after_action(conn, player, session)
+        if result:
+            return build_combat_session_payload(session, player["id"])
 
-    session["summary"] = f"Battle active against {(session.get('target') or {}).get('name') or 'target'} — attack energy {combat_available_energy(session, 'player')}/{int(COMBAT_BALANCE.get('attack_energy_max', 12))}."
+    viewer_target = combat_default_target_for_actor(session, player_ref)
+    target_name = (combat_actor_profile(session, viewer_target) or {}).get("name") or (session.get("target") or {}).get("name") or "target"
+    session["summary"] = f"Battle active against {target_name} - attack energy {combat_actor_available_energy(session, player_ref)}/{int(COMBAT_BALANCE.get('attack_energy_max', 12))}."
     session["next_action_at"] = session.get("enemy_action_until")
     persist_combat_session(conn, session)
-    return build_combat_session_payload(session)
+    return build_combat_session_payload(session, player["id"])
 
 
-def perform_realtime_combat_action(conn: sqlite3.Connection, player: Dict[str, Any], battle_id: int, action_type: str, weapon_id: str = "", utility_id: str = "") -> Dict[str, Any]:
-    session = load_combat_session(conn, int(battle_id), int(player["id"]))
+def perform_realtime_combat_action(conn: sqlite3.Connection, player: Dict[str, Any], battle_id: int, action_type: str, weapon_id: str = "", utility_id: str = "", target_ref: str = "") -> Dict[str, Any]:
+    session = load_combat_session(conn, int(battle_id), None)
+    player_ref = f"player:{player['id']}"
+    actor_ref = player_ref
+    if int(session.get("player_id") or 0) != int(player["id"]):
+        if player_ref not in (session.get("actor_refs") or []):
+            raise HTTPException(403, "Battle does not belong to this pilot")
+        if not combat_participant_side(session, actor_ref):
+            raise HTTPException(403, "Your ship is no longer in this battle")
+    else:
+        actor_ref = combat_primary_ref(session, "player")
+    if not combat_participant_side(session, actor_ref):
+        raise HTTPException(403, "Battle does not belong to this pilot")
     if session.get("status") == "complete":
-        return {"message": "Battle is already complete.", "battle": build_combat_session_payload(session)}
+        return {"message": "Battle is already complete.", "battle": build_combat_session_payload(session, player["id"])}
     now = utcnow()
     combat_tick_attack_energy(session, now)
-    ready, wait = combat_action_ready(session, "player", now)
+    if combat_ref_is_defeated(session, actor_ref):
+        return {"message": "Your ship is disabled and cannot act.", "battle": build_combat_session_payload(session, player["id"]), "disabled": True}
+    ready, wait = combat_actor_action_ready(session, actor_ref, now)
     if not ready:
-        return {"message": f"Weapons are recovering. Next action in {wait}s.", "battle": build_combat_session_payload(session), "cooldownSeconds": wait}
+        return {"message": f"Weapons are recovering. Next action in {wait}s.", "battle": build_combat_session_payload(session, player["id"]), "cooldownSeconds": wait}
 
     action_type = str(action_type or "").lower().strip()
     if action_type in {"escape", "attempt_escape"}:
         return attempt_realtime_combat_escape(conn, player, int(battle_id))
 
-    action_count = 1
     message = "Action resolved."
-    available = combat_available_energy(session, "player")
+    available = combat_actor_available_energy(session, actor_ref)
+    selected_target_ref = combat_default_target_for_actor(session, actor_ref, target_ref)
+    if selected_target_ref:
+        combat_actor_set_target_ref(session, actor_ref, selected_target_ref)
 
     if action_type == "defend":
         cost = int(COMBAT_BALANCE.get("attack_energy_defend_cost", 1))
         if available < cost:
-            return {"message": f"Defend requires {cost} attack energy.", "battle": build_combat_session_payload(session), "missingEnergy": cost - available}
-        combat_spend_attack_energy(session, "player", cost)
-        apply_realtime_combat_defend(session, "player", now)
+            return {"message": f"Defend requires {cost} attack energy.", "battle": build_combat_session_payload(session, player["id"]), "missingEnergy": cost - available}
+        combat_actor_spend_energy(session, actor_ref, cost)
+        apply_combatant_defend(session, actor_ref, now)
         message = "Defensive posture active."
 
     elif action_type == "weapon":
-        weapon = combat_find_weapon(session, weapon_id)
+        weapon = combat_find_actor_weapon(session, actor_ref, weapon_id)
         if not weapon:
             raise HTTPException(404, "Weapon not found")
         cost = combat_weapon_energy_requirement(weapon)
         if available < cost:
-            return {"message": f"{weapon.get('name')} requires {cost} attack energy.", "battle": build_combat_session_payload(session), "missingEnergy": cost - available}
-        combat_spend_attack_energy(session, "player", cost)
-        apply_realtime_combat_attack(conn, player, session, "player", weapon, now)
+            return {"message": f"{weapon.get('name')} requires {cost} attack energy.", "battle": build_combat_session_payload(session, player["id"]), "missingEnergy": cost - available}
+        combat_actor_spend_energy(session, actor_ref, cost)
+        apply_combatant_attack(conn, player, session, actor_ref, selected_target_ref, weapon, now)
         message = f"Fired {weapon.get('name')}."
 
     elif action_type == "utility":
-        utility = combat_find_utility(session, utility_id)
+        utility = combat_find_actor_utility(session, actor_ref, utility_id)
         if not utility:
             raise HTTPException(404, "Utility module not found")
         cost = clamp_attack_energy_cost(utility.get("requiredEnergy") or utility.get("cost") or 2)
         if available < cost:
-            return {"message": f"{utility.get('name')} requires {cost} attack energy.", "battle": build_combat_session_payload(session), "missingEnergy": cost - available}
-        target_side = combat_utility_target_side("player", utility)
+            return {"message": f"{utility.get('name')} requires {cost} attack energy.", "battle": build_combat_session_payload(session, player["id"]), "missingEnergy": cost - available}
+        actor_side = combat_participant_side(session, actor_ref) or "player"
+        primary_side = combat_primary_side_for_ref(session, actor_ref)
+        target_side = combat_utility_target_side(primary_side or actor_ref, utility) if primary_side else (actor_ref if str(utility.get("target") or "self") == "self" else selected_target_ref)
         category = str(utility.get("category") or utility.get("key") or "utility")
         remaining = combat_active_effect_remaining(session, target_side, category, now)
         if remaining > 0:
-            return {"message": f"{utility.get('name')} is already active for {remaining}s.", "battle": build_combat_session_payload(session), "effectActive": True, "effectRemainingSeconds": remaining}
-        combat_spend_attack_energy(session, "player", cost)
-        apply_realtime_combat_utility(session, "player", utility, now)
+            return {"message": f"{utility.get('name')} is already active for {remaining}s.", "battle": build_combat_session_payload(session, player["id"]), "effectActive": True, "effectRemainingSeconds": remaining}
+        combat_actor_spend_energy(session, actor_ref, cost)
+        apply_combatant_utility(session, actor_ref, utility, now)
         message = f"Activated {utility.get('name')}."
 
     elif action_type == "use_all":
-        weapons = list(session.get("player_weapons") or (session.get("yourShip") or {}).get("weapons") or [])
+        weapons = list(combat_actor_weapons(session, actor_ref))
         weapons = [normalize_combat_weapon(w, i) for i, w in enumerate(weapons)]
         weapons.sort(key=lambda w: combat_weapon_energy_requirement(w), reverse=True)
         selected = []
-        energy_bank = combat_available_energy(session, "player")
+        energy_bank = combat_actor_available_energy(session, actor_ref)
         guard = 0
         while energy_bank > 0 and guard < 8:
             guard += 1
@@ -16603,12 +22446,12 @@ def perform_realtime_combat_action(conn: sqlite3.Connection, player: Dict[str, A
             energy_bank -= combat_weapon_energy_requirement(weapon)
             selected.append(weapon)
         if not selected:
-            return {"message": "No weapons can fire with current attack energy.", "battle": build_combat_session_payload(session)}
+            return {"message": "No weapons can fire with current attack energy.", "battle": build_combat_session_payload(session, player["id"])}
         total_cost = sum(combat_weapon_energy_requirement(w) for w in selected)
-        combat_spend_attack_energy(session, "player", total_cost)
+        combat_actor_spend_energy(session, actor_ref, total_cost)
         first, rest = selected[0], selected[1:]
-        apply_realtime_combat_attack(conn, player, session, "player", first, now)
-        session["pending_player_actions"] = list(session.get("pending_player_actions") or []) + rest
+        apply_combatant_attack(conn, player, session, actor_ref, selected_target_ref, first, now)
+        session["pending_actor_actions"] = list(session.get("pending_actor_actions") or []) + [{"actorRef": actor_ref, "targetRef": selected_target_ref, "weapon": w} for w in rest]
         message = f"Use All queued {len(selected)} weapon cycle(s): {', '.join((w.get('name') or 'Weapon') for w in selected[:5])}{'...' if len(selected) > 5 else ''}."
 
     else:
@@ -16617,34 +22460,70 @@ def perform_realtime_combat_action(conn: sqlite3.Connection, player: Dict[str, A
     # The enemy can still act if ready after the player's move, but never pre-resolve the fight.
     result = maybe_finalize_combat_after_action(conn, player, session)
     if result:
-        return {"message": message, "battle": result}
-    session["player_action_until"] = iso(now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
+        return {"message": message, "battle": build_combat_session_payload(session, player["id"])}
+    combat_actor_set_action_until(session, actor_ref, now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
     enemy_until = parse_dt(session.get("enemy_action_until"))
     if not enemy_until or enemy_until <= now:
         session["enemy_action_until"] = iso(now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
     result = maybe_finalize_combat_after_action(conn, player, session)
     if result:
-        return {"message": message, "battle": result}
+        return {"message": message, "battle": build_combat_session_payload(session, player["id"])}
     persist_combat_session(conn, session)
-    return {"message": message, "battle": build_combat_session_payload(session)}
+    return {"message": message, "battle": build_combat_session_payload(session, player["id"])}
 
-def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], target_ref: str, mode: str = "attack", god: bool = False) -> Dict[str, Any]:
+def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], target_ref: str, mode: str = "attack", god: bool = False, free_start: bool = False, initiator_label: str = "") -> Dict[str, Any]:
+    player_ref = f"player:{player['id']}"
     active_existing = rows(conn, "SELECT id FROM combat_battles WHERE player_id=? AND status='active' ORDER BY id DESC LIMIT 1", (player["id"],))
     if active_existing:
-        battle = advance_realtime_combat_battle(conn, player, int(active_existing[0]["id"]), force=False)
-        return {"message": "Existing real-time battle is still active.", "battleId": battle.get("id"), "battle": battle}
+        existing_session = load_combat_session(conn, int(active_existing[0]["id"]), None)
+        if not combat_ref_is_escaped(existing_session, player_ref):
+            battle = advance_realtime_combat_battle(conn, player, int(active_existing[0]["id"]), force=False)
+            return {"message": "Existing real-time battle is still active.", "battleId": battle.get("id"), "battle": battle}
     preview = combat_preview(conn, player, target_ref, mode)
     if preview.get("blockedReason") and not god:
         raise HTTPException(409, preview["blockedReason"])
     target = preview["target"]
-    for ref in combat_actor_refs_for_target(player, target_ref, target):
-        if combat_actor_active_battle(conn, ref):
-            raise HTTPException(409, "That ship is already locked in an active battle.")
     legal = preview["legal"]
     your = dict(preview["yourShip"])
     enemy = dict(preview["enemyShip"])
+
+    # If this target is already inside an active combat session, widen that
+    # battle instead of creating a duplicate isolated battle against the same ship.
+    active_target_lock = None
+    for lock_ref in combat_actor_refs_for_target(player, target_ref, target):
+        if lock_ref == player_ref:
+            continue
+        active_target_lock = combat_actor_active_battle(conn, lock_ref)
+        if active_target_lock:
+            break
+    if active_target_lock:
+        session = load_combat_session(conn, int(active_target_lock["id"]), None)
+        actor_refs = list(session.get("actor_refs") or [])
+        if player_ref not in actor_refs:
+            target_refs = combat_actor_refs_for_target(player, target_ref, target)
+            attacked_ref = next((str(r) for r in target_refs if combat_participant_side(session, str(r))), str(target_ref))
+            attacked_side = combat_participant_side(session, attacked_ref)
+            if not attacked_side:
+                session_target = session.get("target") or {}
+                enemy_refs = {str(session.get("target_ref") or ""), combat_primary_ref(session, "enemy")}
+                if session_target.get("kind") == "npc" and session_target.get("rawId"):
+                    enemy_refs.add(f"npc:{int(session_target['rawId'])}")
+                    enemy_refs.add(f"traveler:{int(session_target['rawId'])}:system")
+                if session_target.get("kind") == "player" and session_target.get("rawId"):
+                    enemy_refs.add(f"player:{int(session_target['rawId'])}")
+                attacked_side = "enemy" if any(str(r) in enemy_refs for r in target_refs) else "player"
+            join_side = "enemy" if attacked_side == "player" else "player"
+            joined = add_combat_support_participant(conn, session, join_side, player_ref, player.get("callsign") or "Player support", your, "player", target_ref=attacked_ref)
+            if joined:
+                combat_actor_set_target_ref(session, player_ref, attacked_ref)
+                attacked_name = (combat_actor_profile(session, attacked_ref) or {}).get("name") or target.get("name") or "target"
+                add_event(conn, int(session.get("player_id") or player["id"]), "combat", f"{player.get('callsign') or 'A player'} joined the {join_side} side of the battle targeting {attacked_name}.", {"battleId": int(active_target_lock["id"]), "playerId": int(player["id"]), "targetRef": attacked_ref})
+                persist_combat_session(conn, session)
+        return {"message": "Joined existing shared battle.", "battleId": int(active_target_lock["id"]), "battle": build_combat_session_payload(session, player["id"])}
+
     energy_cost = int(preview.get("energyCost") or combat_energy_cost(target, enemy))
-    spend(conn, player["id"], energy=energy_cost, god=god)
+    if not free_start:
+        spend(conn, player["id"], energy=energy_cost, god=god)
     skills = player_skill_totals(conn, player["id"])
     combat_bonus = min(0.22, int(skills.get("combat", 0)) * 0.0035 + int(skills.get("piloting", 0)) * 0.0018)
     your["weapons"] = normalize_combat_weapons(your.get("weapons") or [], int(your.get("combatRating") or 100), str(your.get("role") or "").lower() in {"combat", "siege", "fleet", "gunship", "interceptor"})
@@ -16665,8 +22544,11 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
     log: List[Dict[str, Any]] = []
     defense_result = maybe_apply_planetary_defense(conn, player, legal, enemy, log, rng)
     now = utcnow()
-    summary = f"Battle engaged against {target.get('name') or 'target'}. Attack energy is charging; choose weapons, utility, defend, or escape as energy becomes available."
-    rewards = {"credits": 0, "xp": 0, "items": [], "energySpent": energy_cost, "state": "active"}
+    if initiator_label:
+        summary = f"{initiator_label} engaged you near {target.get('name') or 'target'}. Attack energy is charging; choose weapons, utility, defend, or escape as energy becomes available."
+    else:
+        summary = f"Battle engaged against {target.get('name') or 'target'}. Attack energy is charging; choose weapons, utility, defend, or escape as energy becomes available."
+    rewards = {"credits": 0, "xp": 0, "items": [], "energySpent": 0 if free_start else energy_cost, "state": "active"}
     penalties = {"shipDamage": 0, "heat": 0, "jailed": False, "planetaryDefense": defense_result}
     conn.execute(
         """INSERT INTO combat_battles
@@ -16681,6 +22563,9 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
     session = {
         "battle_id": battle_id,
         "player_id": player["id"],
+        "planet_id": player["location_planet_id"],
+        "player_ref": player_ref,
+        "player_name": player.get("callsign") or player.get("username") or your.get("name") or "Pilot",
         "target_ref": target_ref,
         "target": target,
         "mode": mode,
@@ -16695,6 +22580,12 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
         "energy_cost": energy_cost,
         "combat_bonus": combat_bonus,
         "actor_refs": actor_refs,
+        "player_target_ref": combat_primary_ref({"player_id": player["id"], "target_ref": target_ref, "target": target}, "enemy"),
+        "enemy_target_ref": player_ref,
+        "escaped_refs": [],
+        "defeated_refs": [],
+        "pending_actor_actions": [],
+        "escape_cooldowns": {},
         "player_weapons": your.get("weapons") or [],
         "enemy_weapons": enemy.get("weapons") or [],
         "player_utilities": your.get("utilities") or [],
@@ -16725,43 +22616,79 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
     }
     persist_combat_session(conn, session)
     add_event(conn, player["id"], "combat", summary, {"battleId": battle_id, "target_ref": target_ref, "realTime": True})
-    return {"message": summary, "battleId": battle_id, "battle": build_combat_session_payload(session)}
+    return {"message": summary, "battleId": battle_id, "battle": build_combat_session_payload(session, player["id"])}
 
 
 def attempt_realtime_combat_escape(conn: sqlite3.Connection, player: Dict[str, Any], battle_id: int) -> Dict[str, Any]:
-    session = load_combat_session(conn, int(battle_id), int(player["id"]))
+    session = load_combat_session(conn, int(battle_id), None)
+    player_ref = f"player:{player['id']}"
+    if int(session.get("player_id") or 0) == int(player["id"]):
+        actor_ref = combat_primary_ref(session, "player")
+    else:
+        actor_ref = player_ref
+        if player_ref not in (session.get("actor_refs") or []):
+            raise HTTPException(403, "Battle does not belong to this pilot")
+        if not combat_participant_side(session, actor_ref):
+            raise HTTPException(403, "Your ship is no longer in this battle")
+    if combat_ref_is_escaped(session, actor_ref):
+        return {"message": "Your ship already escaped this battle.", "escaped": True, "battle": build_combat_session_payload(session, player["id"]), "immunitySeconds": 0}
+    if not combat_participant_side(session, actor_ref):
+        raise HTTPException(403, "Battle does not belong to this pilot")
     if session.get("status") == "complete":
-        return {"message": "Battle is already complete.", "escaped": session.get("outcome") == "escaped", "battle": build_combat_session_payload(session), "immunitySeconds": 0}
+        return {"message": "Battle is already complete.", "escaped": session.get("outcome") == "escaped", "battle": build_combat_session_payload(session, player["id"]), "immunitySeconds": 0}
     now = utcnow()
     combat_tick_attack_energy(session, now)
-    ready, wait_action = combat_action_ready(session, "player", now)
+    ready, wait_action = combat_actor_action_ready(session, actor_ref, now)
     if not ready:
-        return {"message": f"Ship is recovering. Escape controls available in {wait_action}s.", "escaped": False, "cooldownSeconds": wait_action, "battle": build_combat_session_payload(session)}
+        return {"message": f"Ship is recovering. Escape controls available in {wait_action}s.", "escaped": False, "cooldownSeconds": wait_action, "battle": build_combat_session_payload(session, player["id"])}
     escape_cost = int(COMBAT_BALANCE.get("attack_energy_escape_cost", 2))
-    available = combat_available_energy(session, "player")
+    available = combat_actor_available_energy(session, actor_ref)
     if available < escape_cost:
-        return {"message": f"Escape requires {escape_cost} attack energy.", "escaped": False, "missingEnergy": escape_cost - available, "battle": build_combat_session_payload(session)}
-    next_escape = parse_dt(session.get("next_escape_at"))
+        return {"message": f"Escape requires {escape_cost} attack energy.", "escaped": False, "missingEnergy": escape_cost - available, "battle": build_combat_session_payload(session, player["id"])}
+    escape_cooldowns = dict(session.get("escape_cooldowns") or {})
+    default_escape_at = session.get("next_escape_at") if actor_ref == combat_primary_ref(session, "player") else None
+    next_escape = parse_dt(escape_cooldowns.get(actor_ref) or default_escape_at)
     if next_escape and next_escape > now:
         wait = max(1, int((next_escape - now).total_seconds()))
-        return {"message": f"Escape systems are cycling. Try again in {wait}s.", "escaped": False, "cooldownSeconds": wait, "nextEscapeAt": iso(next_escape), "chance": round(float(session.get("escape_chance") or player_escape_chance(conn, player)), 3), "battle": build_combat_session_payload(session)}
-    combat_spend_attack_energy(session, "player", escape_cost)
+        return {"message": f"Escape systems are cycling. Try again in {wait}s.", "escaped": False, "cooldownSeconds": wait, "nextEscapeAt": iso(next_escape), "chance": round(float(session.get("escape_chance") or player_escape_chance(conn, player)), 3), "battle": build_combat_session_payload(session, player["id"])}
+    combat_actor_spend_energy(session, actor_ref, escape_cost)
     chance = player_escape_chance(conn, player)
     roll = random.random()
     escaped = roll <= chance
     session["escape_chance"] = chance
+    actor_profile = combat_actor_profile(session, actor_ref)
+    actor_name = actor_profile.get("name") or player.get("callsign") or "Pilot"
     if escaped:
+        if combat_has_extra_combatants(session):
+            combat_remove_actor_from_session(conn, session, actor_ref, escaped=True)
+            set_combat_actor_immunity(conn, actor_ref)
+            if actor_ref == player_ref:
+                reroll_npc_targets_after_player_escape(conn, player, session)
+            log = session.get("log") or []
+            log.append({"round": int(session.get("round_no") or 1), "actor": "system", "actorRef": actor_ref, "action": "Combatant Escaped", "weaponType": "escape", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{actor_name} escaped the battle. Their contact dropped from the board."})
+            session["log"] = log
+            session["summary"] = f"{actor_name} escaped the battle."
+            final_payload = maybe_finalize_combat_after_action(conn, player, session)
+            if not final_payload:
+                persist_combat_session(conn, session)
+            return {"message": "Escape succeeded.", "escaped": True, "chance": round(chance, 3), "roll": round(roll, 3), "immunitySeconds": combat_post_battle_immunity_seconds(), "battle": build_combat_session_payload(session, player["id"])}
         battle_payload = finalize_realtime_combat_battle(conn, player, session, outcome_override="escaped")
-        return {"message": "Escape succeeded.", "escaped": True, "chance": round(chance, 3), "roll": round(roll, 3), "immunitySeconds": int(COMBAT_BALANCE.get("post_battle_immunity_seconds", 5)), "battle": battle_payload}
-    session["next_escape_at"] = iso(now + timedelta(seconds=combat_escape_cooldown_seconds()))
-    session["player_action_until"] = iso(now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
-    session["summary"] = f"Escape failed against {(session.get('target') or {}).get('name') or 'target'}. Thrusters cycling for {combat_escape_cooldown_seconds()}s."
+        return {"message": "Escape succeeded.", "escaped": True, "chance": round(chance, 3), "roll": round(roll, 3), "immunitySeconds": combat_post_battle_immunity_seconds(), "battle": build_combat_session_payload(session, player["id"]) if battle_payload else None}
+    next_escape_at = iso(now + timedelta(seconds=combat_escape_cooldown_seconds()))
+    escape_cooldowns[actor_ref] = next_escape_at
+    session["escape_cooldowns"] = escape_cooldowns
+    if actor_ref == combat_primary_ref(session, "player"):
+        session["next_escape_at"] = next_escape_at
+    combat_actor_set_action_until(session, actor_ref, now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
+    target_ref = combat_default_target_for_actor(session, actor_ref)
+    target_name = (combat_actor_profile(session, target_ref) or {}).get("name") or (session.get("target") or {}).get("name") or "target"
+    session["summary"] = f"Escape failed against {target_name}. Thrusters cycling for {combat_escape_cooldown_seconds()}s."
     log = session.get("log") or []
-    log.append({"round": int(session.get("round_no") or 1), "actor": "player", "action": "Attempt Escape", "weaponType": "escape", "hit": False, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"Escape attempt failed. Roll {round(roll*100)} vs {round(chance*100)}%. Next attempt in {combat_escape_cooldown_seconds()}s."})
+    log.append({"round": int(session.get("round_no") or 1), "actor": combat_participant_side(session, actor_ref) or "player", "actorRef": actor_ref, "action": "Attempt Escape", "weaponType": "escape", "hit": False, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{actor_name} failed to escape. Roll {round(roll*100)} vs {round(chance*100)}%. Next attempt in {combat_escape_cooldown_seconds()}s."})
     session["log"] = log
     persist_combat_session(conn, session)
     add_event(conn, player["id"], "combat", f"Escape attempt failed at {round(chance*100)}% odds.", {"escaped": False, "chance": chance, "roll": roll, "battleId": battle_id})
-    return {"message": "Escape failed.", "escaped": False, "chance": round(chance, 3), "roll": round(roll, 3), "cooldownSeconds": combat_escape_cooldown_seconds(), "nextEscapeAt": session["next_escape_at"], "battle": build_combat_session_payload(session)}
+    return {"message": "Escape failed.", "escaped": False, "chance": round(chance, 3), "roll": round(roll, 3), "cooldownSeconds": combat_escape_cooldown_seconds(), "nextEscapeAt": next_escape_at, "battle": build_combat_session_payload(session, player["id"])}
 
 
 def build_combat_battle_payload(b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -16769,7 +22696,7 @@ def build_combat_battle_payload(b: Optional[Dict[str, Any]]) -> Optional[Dict[st
         return None
     rewards = decode_json(b.get("rewards_json"), {}) or {}
     penalties = decode_json(b.get("penalties_json"), {}) or {}
-    return {**b, "log": decode_json(b.get("log_json"), []) or [], "rewards": rewards, "penalties": penalties, "actionDelayMs": int(COMBAT_BALANCE.get("round_ms", 3000)), "escapeCooldownSeconds": combat_escape_cooldown_seconds(), "postBattleImmunitySeconds": int(COMBAT_BALANCE.get("post_battle_immunity_seconds", 5)), "balance": COMBAT_BALANCE}
+    return {**b, "log": decode_json(b.get("log_json"), []) or [], "rewards": rewards, "penalties": penalties, "actionDelayMs": int(COMBAT_BALANCE.get("round_ms", 3000)), "escapeCooldownSeconds": combat_escape_cooldown_seconds(), "postBattleImmunitySeconds": combat_post_battle_immunity_seconds(), "balance": COMBAT_BALANCE}
 
 
 def build_fight_state(conn: sqlite3.Connection, player: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
@@ -16781,6 +22708,651 @@ def build_fight_state(conn: sqlite3.Connection, player: Dict[str, Any], user: Di
         r["rewards"] = decode_json(r.pop("rewards_json", "{}"), {}) or {}; r["penalties"] = decode_json(r.pop("penalties_json", "{}"), {}) or {}
     planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],)) or {}
     return {"blockedReason": block, "cargoProtection": cargo_operation_status(conn, player["id"]), "locationRules": {"planetId": player["location_planet_id"], "security": planet.get("security_level"), "lawfulness": planet.get("lawfulness"), "summary": "Bounties, pirates, and hostile targets are legal. Civilian or unprovoked attacks can raise heat and cause jail."}, "activeShip": combat_ship_profile(conn, active_ship, "Your Ship"), "targets": targets, "latestBattle": build_combat_battle_payload(latest), "recentBattles": recent, "balance": COMBAT_BALANCE}
+
+
+def active_party_for_player(conn: sqlite3.Connection, player_id: int) -> Optional[Dict[str, Any]]:
+    return row(conn, """
+        SELECT p.*
+        FROM parties p
+        JOIN party_members pm ON pm.party_id=p.id
+        WHERE pm.player_id=?
+        LIMIT 1
+    """, (int(player_id),))
+
+
+def party_member_ids(conn: sqlite3.Connection, party_id: int) -> List[int]:
+    return [int(r["player_id"]) for r in rows(conn, "SELECT player_id FROM party_members WHERE party_id=? ORDER BY joined_at", (int(party_id),))]
+
+
+def players_in_same_party(conn: sqlite3.Connection, a_player_id: int, b_player_id: int) -> bool:
+    if int(a_player_id) == int(b_player_id):
+        return True
+    found = row(conn, """
+        SELECT 1 as ok
+        FROM party_members a
+        JOIN party_members b ON b.party_id=a.party_id
+        WHERE a.player_id=? AND b.player_id=?
+        LIMIT 1
+    """, (int(a_player_id), int(b_player_id)))
+    return bool(found)
+
+
+def ensure_party_for_player(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    existing = active_party_for_player(conn, player_id)
+    if existing:
+        return existing
+    now = iso()
+    cur = conn.execute("INSERT INTO parties (leader_player_id,created_at,updated_at) VALUES (?,?,?)", (int(player_id), now, now))
+    party_id = int(cur.lastrowid)
+    conn.execute("INSERT INTO party_members (party_id,player_id,joined_at) VALUES (?,?,?)", (party_id, int(player_id), now))
+    return row(conn, "SELECT * FROM parties WHERE id=?", (party_id,))
+
+
+def leave_current_party(conn: sqlite3.Connection, player_id: int) -> None:
+    party = active_party_for_player(conn, player_id)
+    if not party:
+        return
+    party_id = int(party["id"])
+    conn.execute("DELETE FROM party_members WHERE party_id=? AND player_id=?", (party_id, int(player_id)))
+    remaining = party_member_ids(conn, party_id)
+    now = iso()
+    if not remaining:
+        conn.execute("DELETE FROM party_invites WHERE party_id=?", (party_id,))
+        conn.execute("DELETE FROM parties WHERE id=?", (party_id,))
+        return
+    if int(party.get("leader_player_id") or 0) == int(player_id):
+        conn.execute("UPDATE parties SET leader_player_id=?, updated_at=? WHERE id=?", (remaining[0], now, party_id))
+    else:
+        conn.execute("UPDATE parties SET updated_at=? WHERE id=?", (now, party_id))
+
+
+def party_player_position(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    travel = build_travel_state(conn, player)
+    current = row(conn, "SELECT p.*, g.id as galaxy_id, g.name as galaxy_name FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player.get("location_planet_id"),)) or {}
+    galaxy_id = int(travel.get("destination_galaxy_id") or travel.get("origin_galaxy_id") or current.get("galaxy_id") or 0)
+    map_type = travel.get("map_type") or travel.get("open_space_map_type") or "system"
+    if travel.get("active") or travel.get("open_space"):
+        sys_pos = current_player_map_position(conn, player, "system")
+        gal_pos = current_player_map_position(conn, player, "galaxy")
+    else:
+        sys_pos = system_planet_map_point(conn, int(current.get("id") or player.get("location_planet_id") or 0)) if current else {"x_pct": 50, "y_pct": 50}
+        gal_pos = galaxy_map_point(conn, galaxy_id) if galaxy_id else {"x_pct": 50, "y_pct": 50}
+    return {
+        "galaxy_id": galaxy_id,
+        "planet_id": int(current.get("id") or player.get("location_planet_id") or 0),
+        "map_type": map_type,
+        "system_x_pct": float(sys_pos.get("x_pct") or 50),
+        "system_y_pct": float(sys_pos.get("y_pct") or 50),
+        "galaxy_x_pct": float(gal_pos.get("x_pct") or 50),
+        "galaxy_y_pct": float(gal_pos.get("y_pct") or 50),
+        "active_travel": bool(travel.get("active")),
+        "open_space": bool(travel.get("open_space")),
+        "docked": bool(travel.get("docked")),
+        "location_name": current.get("name"),
+        "galaxy_name": current.get("galaxy_name"),
+    }
+
+
+def party_member_payload(conn: sqlite3.Connection, member_player_id: int, leader_player_id: int) -> Dict[str, Any]:
+    member = row(conn, "SELECT p.*, u.username FROM players p JOIN users u ON u.id=p.user_id WHERE p.id=?", (int(member_player_id),)) or {}
+    if not member:
+        return {}
+    profile = row(conn, "SELECT * FROM user_profiles WHERE user_id=?", (member.get("user_id"),)) or {}
+    ship = row(conn, "SELECT s.*, t.name as template_name, t.class_name, t.role FROM ships s JOIN ship_templates t ON t.id=s.template_id WHERE s.id=?", (member.get("active_ship_id"),)) if member.get("active_ship_id") else None
+    faction_code = player_faction_code(conn, member)
+    avatar = avatar_payload(profile.get("avatar_id") or DEFAULT_AVATAR_ID, faction_code, member.get("username") or member.get("callsign") or "")
+    return {
+        "playerId": int(member["id"]),
+        "userId": int(member.get("user_id") or 0),
+        "username": member.get("username"),
+        "displayName": profile.get("display_name") or member.get("callsign") or member.get("username"),
+        "avatarId": clean_avatar_id(profile.get("avatar_id"), faction_code, member.get("username") or member.get("callsign") or ""),
+        "avatarUrl": avatar["url"],
+        "isLeader": int(member["id"]) == int(leader_player_id),
+        "level": int(member.get("level") or 1),
+        "faction": player_faction(conn, member),
+        "ship": {
+            "name": (ship or {}).get("name") or (ship or {}).get("template_name") or "Ship",
+            "hull": int((ship or {}).get("hull") or 0),
+            "maxHull": int((ship or {}).get("max_hull") or 1),
+            "shield": int((ship or {}).get("shield") or 0),
+            "maxShield": int((ship or {}).get("max_shield") or 1),
+            "imageUrl": ship_visual_payload((ship or {}).get("name") or (ship or {}).get("template_name"), (ship or {}).get("role") or (ship or {}).get("class_name")) if ship else "",
+        },
+        "position": party_player_position(conn, member),
+    }
+
+
+def build_party_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    party = active_party_for_player(conn, player["id"])
+    members: List[Dict[str, Any]] = []
+    if party:
+        members = [m for m in (party_member_payload(conn, mid, int(party["leader_player_id"])) for mid in party_member_ids(conn, int(party["id"]))) if m]
+    incoming = rows(conn, """
+        SELECT pi.*, u.username as inviter_username, p.callsign as inviter_callsign
+        FROM party_invites pi
+        JOIN players p ON p.id=pi.inviter_player_id
+        JOIN users u ON u.id=p.user_id
+        WHERE pi.invitee_player_id=? AND pi.status='pending'
+        ORDER BY pi.created_at DESC
+    """, (int(player["id"]),))
+    outgoing = rows(conn, """
+        SELECT pi.*, u.username as invitee_username, p.callsign as invitee_callsign
+        FROM party_invites pi
+        JOIN players p ON p.id=pi.invitee_player_id
+        JOIN users u ON u.id=p.user_id
+        WHERE pi.inviter_player_id=? AND pi.status='pending'
+        ORDER BY pi.created_at DESC
+    """, (int(player["id"]),))
+    return {
+        "active": bool(party),
+        "partyId": int(party["id"]) if party else None,
+        "leaderPlayerId": int(party["leader_player_id"]) if party else None,
+        "isLeader": bool(party and int(party["leader_player_id"]) == int(player["id"])),
+        "members": members,
+        "incomingInvites": incoming,
+        "outgoingInvites": outgoing,
+        "maxMembers": int(PARTY_BALANCE.get("max_members", 5)),
+        "sharedXpPct": int(float(PARTY_BALANCE.get("shared_xp_pct", 0.25)) * 100),
+    }
+
+
+def grant_party_shared_xp(conn: sqlite3.Connection, source_player_id: int, amount: int) -> None:
+    amount = int(amount or 0)
+    if amount <= 0:
+        return
+    party = active_party_for_player(conn, source_player_id)
+    if not party:
+        return
+    share = max(1, int(amount * float(PARTY_BALANCE.get("shared_xp_pct", 0.25))))
+    for member_id in party_member_ids(conn, int(party["id"])):
+        if int(member_id) == int(source_player_id):
+            continue
+        add_xp(conn, int(member_id), share, share_party=False)
+        add_event(conn, int(member_id), "party", f"Party shared XP: +{share:,} from a party member.", {"sourcePlayerId": int(source_player_id), "xp": share})
+
+
+def party_invite_player(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    target_player_id = int(target_player_id or 0)
+    if not target_player_id or target_player_id == int(player["id"]):
+        raise HTTPException(400, "Invalid party invite target")
+    target = row(conn, "SELECT * FROM players WHERE id=?", (target_player_id,))
+    if not target:
+        raise HTTPException(404, "Player not found")
+    if blocked_between(conn, player["id"], target_player_id):
+        raise HTTPException(403, "Party invite blocked")
+    if players_in_same_party(conn, player["id"], target_player_id):
+        return {"message": "That player is already in your party."}
+    party = ensure_party_for_player(conn, int(player["id"]))
+    member_count = int(scalar(conn, "SELECT COUNT(*) FROM party_members WHERE party_id=?", (party["id"],)) or 0)
+    if member_count >= int(PARTY_BALANCE.get("max_members", 5)):
+        raise HTTPException(409, "Party is already full")
+    now = iso()
+    conn.execute("UPDATE party_invites SET status='cancelled', responded_at=? WHERE party_id=? AND invitee_player_id=? AND status='pending'", (now, party["id"], target_player_id))
+    cur = conn.execute("INSERT INTO party_invites (party_id,inviter_player_id,invitee_player_id,status,created_at) VALUES (?,?,?,?,?)", (party["id"], int(player["id"]), target_player_id, "pending", now))
+    invite_id = int(cur.lastrowid)
+    add_event(conn, int(player["id"]), "party", f"Invited {target.get('callsign') or target_player_id} to party.", {"action": "party", "inviteId": invite_id, "targetPlayerId": target_player_id})
+    add_event(conn, target_player_id, "party", f"Party invite received from {player.get('callsign') or player['id']}.", {"action": "party", "inviteId": invite_id, "inviterPlayerId": int(player["id"])})
+    return {"message": "Party invite sent.", "party": build_party_state(conn, player)}
+
+
+def party_accept_invite(conn: sqlite3.Connection, player: Dict[str, Any], invite_id: int) -> Dict[str, Any]:
+    invite = row(conn, "SELECT * FROM party_invites WHERE id=? AND invitee_player_id=? AND status='pending'", (int(invite_id), int(player["id"])))
+    if not invite:
+        raise HTTPException(404, "Party invite not found")
+    member_count = int(scalar(conn, "SELECT COUNT(*) FROM party_members WHERE party_id=?", (invite["party_id"],)) or 0)
+    if member_count >= int(PARTY_BALANCE.get("max_members", 5)):
+        raise HTTPException(409, "That party is already full")
+    now = iso()
+    leave_current_party(conn, int(player["id"]))
+    conn.execute("UPDATE party_invites SET status='cancelled', responded_at=? WHERE invitee_player_id=? AND status='pending' AND id<>?", (now, int(player["id"]), int(invite_id)))
+    conn.execute("UPDATE party_invites SET status='accepted', responded_at=? WHERE id=?", (now, int(invite_id)))
+    conn.execute("INSERT OR REPLACE INTO party_members (party_id,player_id,joined_at) VALUES (?,?,?)", (int(invite["party_id"]), int(player["id"]), now))
+    conn.execute("UPDATE parties SET updated_at=? WHERE id=?", (now, int(invite["party_id"])))
+    add_event(conn, int(player["id"]), "party", "Joined a party.", {"partyId": int(invite["party_id"])})
+    return {"message": "Party invite accepted.", "party": build_party_state(conn, get_player(conn, int(player["id"]))) }
+
+
+def party_decline_invite(conn: sqlite3.Connection, player: Dict[str, Any], invite_id: int) -> Dict[str, Any]:
+    now = iso()
+    conn.execute("UPDATE party_invites SET status='declined', responded_at=? WHERE id=? AND invitee_player_id=? AND status='pending'", (now, int(invite_id), int(player["id"])))
+    return {"message": "Party invite declined.", "party": build_party_state(conn, player)}
+
+
+def party_remove_member(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    party = active_party_for_player(conn, int(player["id"]))
+    if not party:
+        raise HTTPException(404, "You are not in a party")
+    if int(party["leader_player_id"]) != int(player["id"]):
+        raise HTTPException(403, "Only the party leader can remove members")
+    if int(target_player_id) == int(player["id"]):
+        leave_current_party(conn, int(player["id"]))
+        return {"message": "Left party.", "party": build_party_state(conn, get_player(conn, int(player["id"]))) }
+    conn.execute("DELETE FROM party_members WHERE party_id=? AND player_id=?", (int(party["id"]), int(target_player_id)))
+    conn.execute("UPDATE parties SET updated_at=? WHERE id=?", (iso(), int(party["id"])))
+    add_event(conn, int(target_player_id), "party", "Removed from party.", {"partyId": int(party["id"])})
+    return {"message": "Party member removed.", "party": build_party_state(conn, player)}
+
+
+def party_transfer_leader(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    party = active_party_for_player(conn, int(player["id"]))
+    if not party:
+        raise HTTPException(404, "You are not in a party")
+    if int(party["leader_player_id"]) != int(player["id"]):
+        raise HTTPException(403, "Only the party leader can transfer leadership")
+    if int(target_player_id) not in party_member_ids(conn, int(party["id"])):
+        raise HTTPException(404, "Player is not in your party")
+    conn.execute("UPDATE parties SET leader_player_id=?, updated_at=? WHERE id=?", (int(target_player_id), iso(), int(party["id"])))
+    add_event(conn, int(target_player_id), "party", "You are now party leader.", {"partyId": int(party["id"])})
+    return {"message": "Party leader transferred.", "party": build_party_state(conn, player)}
+
+
+
+
+def player_display_payload(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    pl = row(conn, "SELECT p.*, u.username, u.last_login_at FROM players p JOIN users u ON u.id=p.user_id WHERE p.id=?", (int(player_id),)) or {}
+    if not pl:
+        return {}
+    prof = row(conn, "SELECT * FROM user_profiles WHERE user_id=?", (pl.get("user_id"),)) or {}
+    faction_code = player_faction_code(conn, pl)
+    av = avatar_payload(prof.get("avatar_id") or DEFAULT_AVATAR_ID, faction_code, pl.get("username") or pl.get("callsign") or "")
+    online = bool(row(conn, "SELECT 1 as ok FROM sessions WHERE user_id=? AND expires_at>? LIMIT 1", (pl.get("user_id"), iso())))
+    last_seen = pl.get("last_login_at") or scalar(conn, "SELECT MAX(created_at) FROM sessions WHERE user_id=?", (pl.get("user_id"),)) or pl.get("created_at")
+    return {
+        "playerId": int(pl.get("id") or 0),
+        "userId": int(pl.get("user_id") or 0),
+        "username": pl.get("username"),
+        "displayName": prof.get("display_name") or pl.get("callsign") or pl.get("username"),
+        "avatarId": clean_avatar_id(prof.get("avatar_id"), faction_code, pl.get("username") or pl.get("callsign") or ""),
+        "avatarUrl": av.get("url"),
+        "level": int(pl.get("level") or 1),
+        "online": online,
+        "lastSeenAt": last_seen,
+        "lastSeenLabel": friendly_last_seen(last_seen, online),
+    }
+
+
+def friendly_last_seen(value: Optional[str], online: bool = False) -> str:
+    if online:
+        return "Online now"
+    dt = parse_dt(value) if value else None
+    if not dt:
+        return "Unknown"
+    minutes = max(0, int((utcnow() - dt).total_seconds() // 60))
+    if minutes < 60:
+        return "Less than an hour ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = max(1, hours // 24)
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def blocked_between(conn: sqlite3.Connection, a_player_id: int, b_player_id: int) -> bool:
+    return bool(row(conn, "SELECT 1 as ok FROM player_blocks WHERE (player_id=? AND blocked_player_id=?) OR (player_id=? AND blocked_player_id=?) LIMIT 1", (int(a_player_id), int(b_player_id), int(b_player_id), int(a_player_id))))
+
+
+def are_friends(conn: sqlite3.Connection, a_player_id: int, b_player_id: int) -> bool:
+    return bool(row(conn, "SELECT 1 as ok FROM player_friends WHERE player_id=? AND friend_player_id=? LIMIT 1", (int(a_player_id), int(b_player_id))))
+
+
+def social_candidate_payload(conn: sqlite3.Connection, self_player_id: int, other_player_id: int) -> Dict[str, Any]:
+    data = player_display_payload(conn, other_player_id)
+    if not data:
+        return {}
+    incoming = row(conn, "SELECT * FROM player_friend_requests WHERE requester_player_id=? AND target_player_id=? AND status='pending' ORDER BY id DESC LIMIT 1", (int(other_player_id), int(self_player_id)))
+    outgoing = row(conn, "SELECT * FROM player_friend_requests WHERE requester_player_id=? AND target_player_id=? AND status='pending' ORDER BY id DESC LIMIT 1", (int(self_player_id), int(other_player_id)))
+    data.update({
+        "isFriend": are_friends(conn, self_player_id, other_player_id),
+        "isBlocked": bool(row(conn, "SELECT 1 as ok FROM player_blocks WHERE player_id=? AND blocked_player_id=?", (int(self_player_id), int(other_player_id)))),
+        "blockedYou": bool(row(conn, "SELECT 1 as ok FROM player_blocks WHERE player_id=? AND blocked_player_id=?", (int(other_player_id), int(self_player_id)))),
+        "incomingRequestId": int(incoming["id"]) if incoming else None,
+        "outgoingRequestId": int(outgoing["id"]) if outgoing else None,
+    })
+    return data
+
+
+def build_social_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    pid = int(player["id"])
+    friend_ids = [int(r["friend_player_id"]) for r in rows(conn, "SELECT friend_player_id FROM player_friends WHERE player_id=? ORDER BY created_at DESC", (pid,))]
+    blocked_ids = [int(r["blocked_player_id"]) for r in rows(conn, "SELECT blocked_player_id FROM player_blocks WHERE player_id=? ORDER BY created_at DESC", (pid,))]
+    incoming_raw = rows(conn, """
+        SELECT fr.*, p.callsign, u.username
+        FROM player_friend_requests fr
+        JOIN players p ON p.id=fr.requester_player_id
+        JOIN users u ON u.id=p.user_id
+        WHERE fr.target_player_id=? AND fr.status='pending'
+        ORDER BY fr.created_at DESC
+    """, (pid,))
+    outgoing_raw = rows(conn, """
+        SELECT fr.*, p.callsign, u.username
+        FROM player_friend_requests fr
+        JOIN players p ON p.id=fr.target_player_id
+        JOIN users u ON u.id=p.user_id
+        WHERE fr.requester_player_id=? AND fr.status='pending'
+        ORDER BY fr.created_at DESC
+    """, (pid,))
+    candidates = []
+    for r in rows(conn, "SELECT id FROM players WHERE id<>? ORDER BY callsign LIMIT 120", (pid,)):
+        c = social_candidate_payload(conn, pid, int(r["id"]))
+        if c:
+            candidates.append(c)
+    return {
+        "friends": [social_candidate_payload(conn, pid, fid) for fid in friend_ids],
+        "blocked": [social_candidate_payload(conn, pid, bid) for bid in blocked_ids],
+        "incomingFriendRequests": [{**dict(r), **player_display_payload(conn, int(r["requester_player_id"]))} for r in incoming_raw],
+        "outgoingFriendRequests": [{**dict(r), **player_display_payload(conn, int(r["target_player_id"]))} for r in outgoing_raw],
+        "candidates": candidates,
+    }
+
+
+def send_friend_request(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    pid = int(player["id"]); target_player_id = int(target_player_id or 0)
+    if not target_player_id or target_player_id == pid:
+        raise HTTPException(400, "Invalid friend request target")
+    target = row(conn, "SELECT * FROM players WHERE id=?", (target_player_id,))
+    if not target:
+        raise HTTPException(404, "Player not found")
+    if blocked_between(conn, pid, target_player_id):
+        raise HTTPException(403, "Friend request blocked")
+    if are_friends(conn, pid, target_player_id):
+        return {"message": "Already friends."}
+    existing = row(conn, "SELECT * FROM player_friend_requests WHERE requester_player_id=? AND target_player_id=? AND status='pending'", (pid, target_player_id))
+    if not existing:
+        conn.execute("INSERT INTO player_friend_requests (requester_player_id,target_player_id,status,created_at) VALUES (?,?,?,?)", (pid, target_player_id, "pending", iso()))
+    add_event(conn, target_player_id, "social", f"{player.get('callsign') or 'A pilot'} sent you a friend request.", {"action": "social", "actionType": "friend_request", "fromPlayerId": pid})
+    return {"message": "Friend request sent.", "social": build_social_state(conn, player)}
+
+
+def accept_friend_request(conn: sqlite3.Connection, player: Dict[str, Any], request_id: int) -> Dict[str, Any]:
+    pid = int(player["id"])
+    req = row(conn, "SELECT * FROM player_friend_requests WHERE id=? AND target_player_id=? AND status='pending'", (int(request_id), pid))
+    if not req:
+        raise HTTPException(404, "Friend request not found")
+    other = int(req["requester_player_id"])
+    if blocked_between(conn, pid, other):
+        raise HTTPException(403, "Friend request blocked")
+    now = iso()
+    conn.execute("UPDATE player_friend_requests SET status='accepted', responded_at=? WHERE id=?", (now, int(request_id)))
+    conn.execute("INSERT OR REPLACE INTO player_friends (player_id,friend_player_id,created_at) VALUES (?,?,?)", (pid, other, now))
+    conn.execute("INSERT OR REPLACE INTO player_friends (player_id,friend_player_id,created_at) VALUES (?,?,?)", (other, pid, now))
+    add_event(conn, other, "social", f"{player.get('callsign') or 'A pilot'} accepted your friend request.", {"action": "social"})
+    return {"message": "Friend request accepted.", "social": build_social_state(conn, player)}
+
+
+def decline_friend_request(conn: sqlite3.Connection, player: Dict[str, Any], request_id: int) -> Dict[str, Any]:
+    conn.execute("UPDATE player_friend_requests SET status='declined', responded_at=? WHERE id=? AND target_player_id=? AND status='pending'", (iso(), int(request_id), int(player["id"])))
+    return {"message": "Friend request denied.", "social": build_social_state(conn, player)}
+
+
+def remove_friend(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    pid = int(player["id"]); target_player_id = int(target_player_id or 0)
+    conn.execute("DELETE FROM player_friends WHERE (player_id=? AND friend_player_id=?) OR (player_id=? AND friend_player_id=?)", (pid, target_player_id, target_player_id, pid))
+    return {"message": "Friend removed.", "social": build_social_state(conn, player)}
+
+
+def block_player(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    pid = int(player["id"]); target_player_id = int(target_player_id or 0)
+    if not target_player_id or target_player_id == pid:
+        raise HTTPException(400, "Invalid block target")
+    now = iso()
+    conn.execute("INSERT OR REPLACE INTO player_blocks (player_id,blocked_player_id,created_at) VALUES (?,?,?)", (pid, target_player_id, now))
+    conn.execute("DELETE FROM player_friends WHERE (player_id=? AND friend_player_id=?) OR (player_id=? AND friend_player_id=?)", (pid, target_player_id, target_player_id, pid))
+    conn.execute("UPDATE player_friend_requests SET status='cancelled', responded_at=? WHERE status='pending' AND ((requester_player_id=? AND target_player_id=?) OR (requester_player_id=? AND target_player_id=?))", (now, pid, target_player_id, target_player_id, pid))
+    return {"message": "Player blocked.", "social": build_social_state(conn, player)}
+
+
+def unblock_player(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    conn.execute("DELETE FROM player_blocks WHERE player_id=? AND blocked_player_id=?", (int(player["id"]), int(target_player_id or 0)))
+    return {"message": "Player unblocked.", "social": build_social_state(conn, player)}
+
+
+def trade_side_key(trade: Dict[str, Any], player_id: int) -> str:
+    return "initiator" if int(trade.get("initiator_player_id") or 0) == int(player_id) else "target"
+
+
+def trade_other_player_id(trade: Dict[str, Any], player_id: int) -> int:
+    return int(trade.get("target_player_id") if trade_side_key(trade, player_id) == "initiator" else trade.get("initiator_player_id"))
+
+
+def trade_player_item_payload(item: Dict[str, Any]) -> Dict[str, Any]:
+    payload = decode_json(item.get("item_json"), {}) or {}
+    payload.update({"tradeItemId": int(item.get("id") or 0), "item_code": item.get("item_code"), "name": item.get("item_name"), "qty": int(item.get("qty") or 0)})
+    attach_tier_metadata(payload)
+    attach_item_visual(payload)
+    return payload
+
+
+def trade_payload(conn: sqlite3.Connection, trade: Dict[str, Any], viewer_player_id: int) -> Dict[str, Any]:
+    viewer_player_id = int(viewer_player_id)
+    my_side = trade_side_key(trade, viewer_player_id)
+    other_id = trade_other_player_id(trade, viewer_player_id)
+    rows_items = rows(conn, "SELECT * FROM player_trade_items WHERE trade_id=? ORDER BY id", (int(trade["id"]),))
+    by_player: Dict[int, List[Dict[str, Any]]] = {}
+    for it in rows_items:
+        by_player.setdefault(int(it["side_player_id"]), []).append(trade_player_item_payload(it))
+    initiator = int(trade["initiator_player_id"]); target = int(trade["target_player_id"])
+    def side(pid: int, key: str) -> Dict[str, Any]:
+        return {
+            "player": player_display_payload(conn, pid),
+            "playerId": pid,
+            "gold": int(trade.get(f"{key}_gold") or 0),
+            "locked": bool(trade.get(f"{key}_locked")),
+            "approved": bool(trade.get(f"{key}_approved")),
+            "items": by_player.get(pid, []),
+        }
+    left_key = my_side
+    right_key = "target" if my_side == "initiator" else "initiator"
+    left_id = viewer_player_id
+    right_id = other_id
+    return {
+        "id": int(trade["id"]),
+        "status": trade.get("status"),
+        "createdAt": trade.get("created_at"),
+        "updatedAt": trade.get("updated_at"),
+        "viewerSide": my_side,
+        "isIncomingPending": trade.get("status") == "pending" and viewer_player_id == target,
+        "isOutgoingPending": trade.get("status") == "pending" and viewer_player_id == initiator,
+        "left": side(left_id, left_key),
+        "right": side(right_id, right_key),
+    }
+
+
+def build_trade_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    pid = int(player["id"])
+    raw = rows(conn, """
+        SELECT * FROM player_trades
+        WHERE (initiator_player_id=? OR target_player_id=?)
+          AND status IN ('pending','active')
+        ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC, id DESC
+        LIMIT 20
+    """, (pid, pid))
+    payloads = [trade_payload(conn, t, pid) for t in raw]
+    return {
+        "trades": payloads,
+        "current": payloads[0] if payloads else None,
+        "incomingTrades": [t for t in payloads if t.get("isIncomingPending")],
+        "outgoingTrades": [t for t in payloads if t.get("isOutgoingPending")],
+        "inventory": build_inventory_summary(conn, pid),
+    }
+
+
+def release_trade_reservations(conn: sqlite3.Connection, trade_id: int) -> None:
+    for it in rows(conn, "SELECT * FROM player_trade_items WHERE trade_id=?", (int(trade_id),)):
+        release_reserved_inventory_quantity(conn, int(it["side_player_id"]), str(it["item_code"]), int(it["qty"] or 0))
+
+
+def reset_trade_approvals(conn: sqlite3.Connection, trade_id: int) -> None:
+    conn.execute("UPDATE player_trades SET initiator_approved=0,target_approved=0,updated_at=? WHERE id=?", (iso(), int(trade_id)))
+
+
+def trade_require_participant(trade: Optional[Dict[str, Any]], player_id: int) -> Dict[str, Any]:
+    if not trade or int(player_id) not in {int(trade.get("initiator_player_id") or 0), int(trade.get("target_player_id") or 0)}:
+        raise HTTPException(404, "Trade not found")
+    return trade
+
+
+def trade_invite_player(conn: sqlite3.Connection, player: Dict[str, Any], target_player_id: int) -> Dict[str, Any]:
+    pid = int(player["id"]); target_player_id = int(target_player_id or 0)
+    if not target_player_id or target_player_id == pid:
+        raise HTTPException(400, "Invalid trade target")
+    target = row(conn, "SELECT * FROM players WHERE id=?", (target_player_id,))
+    if not target:
+        raise HTTPException(404, "Player not found")
+    if blocked_between(conn, pid, target_player_id):
+        raise HTTPException(403, "Trade blocked")
+    existing = row(conn, """
+        SELECT * FROM player_trades
+        WHERE status IN ('pending','active')
+          AND ((initiator_player_id=? AND target_player_id=?) OR (initiator_player_id=? AND target_player_id=?))
+        ORDER BY id DESC LIMIT 1
+    """, (pid, target_player_id, target_player_id, pid))
+    if existing:
+        return {"message": "Trade already open.", "trade": trade_payload(conn, existing, pid), "openTradeId": int(existing["id"])}
+    now = iso()
+    cur = conn.execute("INSERT INTO player_trades (initiator_player_id,target_player_id,status,created_at,updated_at) VALUES (?,?,?,?,?)", (pid, target_player_id, "pending", now, now))
+    trade_id = int(cur.lastrowid)
+    add_event(conn, target_player_id, "trade", f"{player.get('callsign') or 'A pilot'} initiated a trade.", {"action": "trade", "tradeId": trade_id, "fromPlayerId": pid})
+    add_event(conn, pid, "trade", f"Trade request sent to {target.get('callsign') or 'pilot'}.", {"action": "trade", "tradeId": trade_id})
+    return {"message": "Trade invite sent.", "openTradeId": trade_id, "trade": trade_payload(conn, row(conn, "SELECT * FROM player_trades WHERE id=?", (trade_id,)), pid)}
+
+
+def trade_accept(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    if trade.get("status") != "pending" or int(trade.get("target_player_id")) != int(player["id"]):
+        raise HTTPException(409, "Trade cannot be accepted")
+    conn.execute("UPDATE player_trades SET status='active', responded_at=?, updated_at=? WHERE id=?", (iso(), iso(), int(trade_id)))
+    add_event(conn, int(trade["initiator_player_id"]), "trade", f"{player.get('callsign') or 'Pilot'} accepted your trade request.", {"action": "trade", "tradeId": int(trade_id)})
+    fresh = row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),))
+    return {"message": "Trade accepted.", "openTradeId": int(trade_id), "trade": trade_payload(conn, fresh, int(player["id"]))}
+
+
+def trade_cancel_or_decline(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int, decline: bool = False) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    release_trade_reservations(conn, int(trade_id))
+    status = "declined" if decline else "cancelled"
+    conn.execute("UPDATE player_trades SET status=?, responded_at=?, updated_at=? WHERE id=?", (status, iso(), iso(), int(trade_id)))
+    return {"message": "Trade declined." if decline else "Trade cancelled."}
+
+
+def trade_set_gold(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int, amount: int) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    if trade.get("status") != "active":
+        raise HTTPException(409, "Trade is not active")
+    side = trade_side_key(trade, int(player["id"]))
+    if int(trade.get(f"{side}_locked") or 0):
+        raise HTTPException(409, "Unlock your side before changing gold")
+    amount = max(0, int(amount or 0))
+    fresh = get_player(conn, int(player["id"]))
+    if amount > int(fresh.get("credits") or 0):
+        raise HTTPException(400, "Not enough credits")
+    conn.execute(f"UPDATE player_trades SET {side}_gold=?, initiator_approved=0,target_approved=0,updated_at=? WHERE id=?", (amount, iso(), int(trade_id)))
+    return {"message": "Trade gold updated.", "openTradeId": int(trade_id)}
+
+
+def trade_add_item(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int, item_code: str, qty: int) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    if trade.get("status") != "active":
+        raise HTTPException(409, "Trade is not active")
+    side = trade_side_key(trade, int(player["id"]))
+    if int(trade.get(f"{side}_locked") or 0):
+        raise HTTPException(409, "Unlock your side before changing items")
+    qty = max(1, int(qty or 1)); item_code = str(item_code or "").strip()
+    inv = validate_inventory_action(conn, int(player["id"]), item_code, qty, "trade").get("item")
+    if not inv:
+        raise HTTPException(400, "Inventory item not available")
+    reserve_inventory_quantity(conn, int(player["id"]), item_code, qty)
+    payload = dict(inv)
+    payload.pop("player_id", None)
+    now = iso()
+    conn.execute("""
+        INSERT INTO player_trade_items (trade_id,side_player_id,item_code,item_name,qty,item_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?)
+        ON CONFLICT(trade_id, side_player_id, item_code) DO UPDATE SET qty=qty+excluded.qty, item_json=excluded.item_json, updated_at=excluded.updated_at
+    """, (int(trade_id), int(player["id"]), item_code, inv.get("name") or item_code, qty, encode_json(payload), now, now))
+    reset_trade_approvals(conn, int(trade_id))
+    return {"message": "Item added to trade.", "openTradeId": int(trade_id)}
+
+
+def trade_remove_item(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int, trade_item_id: int, qty: int = 0) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    side = trade_side_key(trade, int(player["id"]))
+    if int(trade.get(f"{side}_locked") or 0):
+        raise HTTPException(409, "Unlock your side before changing items")
+    it = row(conn, "SELECT * FROM player_trade_items WHERE id=? AND trade_id=? AND side_player_id=?", (int(trade_item_id), int(trade_id), int(player["id"])))
+    if not it:
+        raise HTTPException(404, "Trade item not found")
+    take = int(qty or it.get("qty") or 0)
+    take = max(1, min(take, int(it.get("qty") or 0)))
+    release_reserved_inventory_quantity(conn, int(player["id"]), str(it["item_code"]), take)
+    if take >= int(it.get("qty") or 0):
+        conn.execute("DELETE FROM player_trade_items WHERE id=?", (int(trade_item_id),))
+    else:
+        conn.execute("UPDATE player_trade_items SET qty=qty-?, updated_at=? WHERE id=?", (take, iso(), int(trade_item_id)))
+    reset_trade_approvals(conn, int(trade_id))
+    return {"message": "Item removed from trade.", "openTradeId": int(trade_id)}
+
+
+def trade_set_lock(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int, locked: bool) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    if trade.get("status") != "active":
+        raise HTTPException(409, "Trade is not active")
+    side = trade_side_key(trade, int(player["id"]))
+    approve_col = f"{side}_approved"
+    conn.execute(f"UPDATE player_trades SET {side}_locked=?, {approve_col}=0, updated_at=? WHERE id=?", (1 if locked else 0, iso(), int(trade_id)))
+    return {"message": "Trade side locked." if locked else "Trade side unlocked.", "openTradeId": int(trade_id)}
+
+
+def consume_reserved_inventory_for_trade(conn: sqlite3.Connection, player_id: int, item_code: str, qty: int) -> None:
+    inv = row(conn, "SELECT * FROM inventory WHERE player_id=? AND item_code=?", (int(player_id), str(item_code)))
+    if not inv or int(inv.get("qty") or 0) < int(qty) or int(inv.get("reserved_qty") or 0) < int(qty):
+        raise HTTPException(409, "Trade inventory is no longer available")
+    conn.execute("UPDATE inventory SET qty=max(0,qty-?), reserved_qty=max(0,reserved_qty-?) WHERE player_id=? AND item_code=?", (int(qty), int(qty), int(player_id), str(item_code)))
+    conn.execute("DELETE FROM inventory WHERE player_id=? AND item_code=? AND qty<=0", (int(player_id), str(item_code)))
+
+
+def maybe_complete_trade(conn: sqlite3.Connection, trade_id: int) -> Optional[Dict[str, Any]]:
+    trade = row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),))
+    if not trade or trade.get("status") != "active":
+        return None
+    if not (int(trade.get("initiator_locked") or 0) and int(trade.get("target_locked") or 0) and int(trade.get("initiator_approved") or 0) and int(trade.get("target_approved") or 0)):
+        return None
+    a = get_player(conn, int(trade["initiator_player_id"])); b = get_player(conn, int(trade["target_player_id"]))
+    a_gold = int(trade.get("initiator_gold") or 0); b_gold = int(trade.get("target_gold") or 0)
+    if int(a.get("credits") or 0) < a_gold or int(b.get("credits") or 0) < b_gold:
+        raise HTTPException(409, "One side no longer has enough credits")
+    conn.execute("UPDATE players SET credits=credits-?+? WHERE id=?", (a_gold, b_gold, int(a["id"])))
+    conn.execute("UPDATE players SET credits=credits-?+? WHERE id=?", (b_gold, a_gold, int(b["id"])))
+    for it in rows(conn, "SELECT * FROM player_trade_items WHERE trade_id=? ORDER BY id", (int(trade_id),)):
+        owner = int(it["side_player_id"]); receiver = int(b["id"]) if owner == int(a["id"]) else int(a["id"])
+        qty = int(it.get("qty") or 0)
+        consume_reserved_inventory_for_trade(conn, owner, str(it["item_code"]), qty)
+        meta = decode_json(it.get("item_json"), {}) or {}
+        add_inventory_item(conn, receiver, str(it["item_code"]), str(it.get("item_name") or meta.get("name") or it["item_code"]), str(meta.get("item_type") or "goods"), qty,
+                           legal=int(meta.get("legal", 1)), base_value=int(meta.get("base_value") or 0), mass=float(meta.get("mass") or 1),
+                           description=str(meta.get("description") or "Traded item."), source="trade", category=meta.get("category"), rarity=meta.get("rarity"),
+                           subcategory=str(meta.get("subcategory") or ""), stack_size=int(meta.get("stack_size") or 9999), cargo_exempt=int(meta.get("cargo_exempt") or 0),
+                           usable=int(meta.get("usable") or 0), sellable=int(meta.get("sellable") if meta.get("sellable") is not None else 1),
+                           craftable_material=int(meta.get("craftable_material") or 0), equippable=int(meta.get("equippable") or 0), image_id=str(meta.get("image_id") or ""),
+                           tier=meta.get("current_tier") or meta.get("tier"), max_tier=meta.get("max_tier"), tier_locked=int(meta.get("tier_locked") or 0), tier_source="trade", item_stats=decode_json(meta.get("item_stats_json"), {}) if isinstance(meta.get("item_stats_json"), str) else (meta.get("item_stats") or {}), god=True)
+    conn.execute("UPDATE player_trades SET status='completed', completed_at=?, updated_at=? WHERE id=?", (iso(), iso(), int(trade_id)))
+    add_event(conn, int(a["id"]), "trade", "Trade completed.", {"action": "trade_history", "tradeId": int(trade_id)})
+    add_event(conn, int(b["id"]), "trade", "Trade completed.", {"action": "trade_history", "tradeId": int(trade_id)})
+    return {"message": "Trade completed."}
+
+
+def trade_approve(conn: sqlite3.Connection, player: Dict[str, Any], trade_id: int) -> Dict[str, Any]:
+    trade = trade_require_participant(row(conn, "SELECT * FROM player_trades WHERE id=?", (int(trade_id),)), int(player["id"]))
+    if trade.get("status") != "active":
+        raise HTTPException(409, "Trade is not active")
+    side = trade_side_key(trade, int(player["id"]))
+    if not int(trade.get(f"{side}_locked") or 0):
+        raise HTTPException(409, "Lock your side before approval")
+    conn.execute(f"UPDATE player_trades SET {side}_approved=1, updated_at=? WHERE id=?", (iso(), int(trade_id)))
+    complete = maybe_complete_trade(conn, int(trade_id))
+    if complete:
+        return complete
+    return {"message": "Trade approved.", "openTradeId": int(trade_id)}
 
 def npc_planet_summary(conn: sqlite3.Connection, planet_id: int) -> Dict[str, Any]:
     p = row(conn, "SELECT * FROM planets WHERE id=?", (planet_id,)) or {}
@@ -16802,43 +23374,490 @@ def npc_planet_summary(conn: sqlite3.Connection, planet_id: int) -> Dict[str, An
         "dispositions": dispositions,
     }
 
-def build_state(conn, user, player):
+
+
+def server_event_definition(event_type: str) -> Dict[str, Any]:
+    return next((dict(d) for d in SERVER_EVENT_DEFINITIONS if d.get("type") == event_type), {"type": event_type, "name": label_text(event_type), "cadence": "manual", "duration_seconds": 5400, "summary": ""})
+
+
+def stable_event_rng(*parts: Any) -> random.Random:
+    seed = hashlib.sha256(":".join(str(p) for p in parts).encode("utf-8")).hexdigest()
+    return random.Random(seed)
+
+
+def server_event_start_for_date(defn: Dict[str, Any], day: date) -> datetime:
+    rng = stable_event_rng("server-event", defn.get("type"), day.isoformat())
+    if defn.get("type") == "alien_raid":
+        hour = rng.randint(0, 23)
+    elif defn.get("type") == "wormhole_control":
+        hour = 19
+    elif defn.get("type") == "blackout_market_surge":
+        hour = 22
+    else:
+        hour = rng.choice([13, 16, 20, 23])
+    minute = rng.choice([0, 10, 20, 30, 40, 50])
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=timezone.utc)
+
+
+def should_schedule_event_on_day(defn: Dict[str, Any], day: date) -> bool:
+    cadence = str(defn.get("cadence") or "")
+    ordinal = day.toordinal()
+    if cadence == "daily":
+        return True
+    if cadence == "weekly":
+        return day.weekday() == 5
+    if cadence == "weekly_alt":
+        return day.weekday() == 3
+    if cadence == "twice_weekly":
+        return day.weekday() in {2, 6}
+    if cadence == "rotating":
+        return (ordinal + abs(hash(str(defn.get("type")))) % 2) % 3 == 0
+    return False
+
+
+def choose_event_target_galaxy(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    g = row(conn, "SELECT * FROM galaxies WHERE COALESCE(capturable,1)=1 ORDER BY ((COALESCE(x_pct,50)-50)*(COALESCE(x_pct,50)-50) + (COALESCE(y_pct,50)-50)*(COALESCE(y_pct,50)-50)) ASC LIMIT 1")
+    return g or row(conn, "SELECT * FROM galaxies ORDER BY id LIMIT 1")
+
+
+def event_target_planet_for_galaxy(conn: sqlite3.Connection, galaxy_id: int) -> Optional[Dict[str, Any]]:
+    return row(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY CASE WHEN lower(type) LIKE '%gate%' THEN 0 WHEN lower(type) LIKE '%station%' THEN 1 ELSE 2 END, security_level DESC, id LIMIT 1", (int(galaxy_id),))
+
+
+def ensure_server_event_schedule(conn: sqlite3.Connection) -> None:
+    now = utcnow()
+    today = now.date()
+    target_galaxy = choose_event_target_galaxy(conn)
+    target_gid = int((target_galaxy or {}).get("id") or 0)
+    target_planet = event_target_planet_for_galaxy(conn, target_gid) if target_gid else None
+    for defn in SERVER_EVENT_DEFINITIONS:
+        for offset in range(-2, 18):
+            day = today + timedelta(days=offset)
+            if not should_schedule_event_on_day(defn, day):
+                continue
+            start = server_event_start_for_date(defn, day)
+            if start < now - timedelta(days=2):
+                continue
+            duration = int(defn.get("duration_seconds") or 5400)
+            warning = start - timedelta(seconds=int(SERVER_EVENT_BALANCE.get("warning_seconds", 7200)))
+            end = start + timedelta(seconds=duration)
+            event_type = str(defn.get("type"))
+            key = f"{event_type}:{start.strftime('%Y%m%d%H%M')}"
+            meta = {"summary": defn.get("summary") or "", "definition": defn, "durationSeconds": duration}
+            conn.execute(
+                """INSERT INTO server_events
+                   (event_key,event_type,name,cadence,status,starts_at,warning_at,ends_at,target_galaxy_id,target_planet_id,metadata_json,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(event_key, starts_at) DO UPDATE SET
+                     event_type=excluded.event_type,
+                     name=excluded.name,
+                     cadence=excluded.cadence,
+                     warning_at=excluded.warning_at,
+                     ends_at=excluded.ends_at,
+                     target_galaxy_id=excluded.target_galaxy_id,
+                     target_planet_id=excluded.target_planet_id,
+                     metadata_json=CASE
+                       WHEN server_events.status IN ('scheduled','warning') THEN excluded.metadata_json
+                       ELSE server_events.metadata_json
+                     END,
+                     updated_at=excluded.updated_at""",
+                (key, event_type, defn.get("name") or label(event_type), defn.get("cadence") or "", "scheduled", iso(start), iso(warning), iso(end), target_gid or None, int((target_planet or {}).get("id") or 0) or None, encode_json(meta), iso(now), iso(now)),
+            )
+
+
+def server_event_site_visual(event_type: str) -> str:
+    name = {
+        "alien_raid": "Alien Wormhole",
+        "wormhole_control": "Control Wormhole",
+        "reward_wormhole": "Faction Wormhole",
+        "solar_storm_harvest": "Solar Storm",
+        "derelict_convoy_break": "Derelict Convoy",
+        "relic_comet": "Relic Comet",
+        "blackout_market_surge": "Blackout Surge",
+    }.get(event_type, "Server Event")
+    return item_visual_payload(name, "event", "rare_artifacts", 1, event_type).get("image_url")
+
+
+def upsert_server_event_object(conn: sqlite3.Connection, ev: Dict[str, Any], *, map_type: str, galaxy_id: int, planet_id: Optional[int], event_type: str, name: str, x_pct: float, y_pct: float, tier: int = 1, code: Optional[str] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+    now = iso()
+    key = f"server_event:{ev['id']}:{event_type}:g{int(galaxy_id or 0)}:p{int(planet_id or 0)}"
+    meta = {
+        "eventId": int(ev["id"]),
+        "eventType": event_type,
+        "eventName": ev.get("name") or name,
+        "label": name,
+        "canParticipate": True,
+        "selectedSummary": decode_json(ev.get("metadata_json"), {}).get("summary") or "",
+        "statusText": str(ev.get("status") or "active").title(),
+        "image_url": server_event_site_visual(event_type),
+        "rewardHint": "Server event",
+    }
+    if extra:
+        meta.update(extra)
+    conn.execute(
+        """INSERT INTO map_objects
+           (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,expires_at,metadata_json,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(object_key) DO UPDATE SET
+             state=excluded.state, expires_at=excluded.expires_at, metadata_json=excluded.metadata_json, updated_at=excluded.updated_at""",
+        (key, map_type, int(galaxy_id or 0), planet_id, "server_event", code or event_type, name, clamp_pct(float(x_pct), 2, 98), clamp_pct(float(y_pct), 2, 98), int(tier or 1), 1, "available", ev.get("ends_at"), encode_json(meta), now, now),
+    )
+
+
+def safe_zone_planets_for_alien_raid(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    safe = rows(conn, "SELECT p.*, g.id as galaxy_id FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE COALESCE(p.security_level,50)>=65 ORDER BY p.security_level DESC, p.id LIMIT 16")
+    if safe:
+        return safe
+    return rows(conn, "SELECT p.*, g.id as galaxy_id FROM planets p JOIN galaxies g ON g.id=p.galaxy_id ORDER BY p.security_level DESC, p.id LIMIT 8")
+
+
+def spawn_alien_raid_content(conn: sqlite3.Connection, ev: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
+    if meta.get("spawned"):
+        return meta
+    rng = stable_event_rng("alien-raid", ev.get("id"), ev.get("starts_at"))
+    planets = safe_zone_planets_for_alien_raid(conn)
+    for p in planets:
+        gx = clamp_pct(50 + rng.uniform(-18, 18), 5, 95)
+        gy = clamp_pct(50 + rng.uniform(-18, 18), 5, 95)
+        tier = clamp_tier(max(1, int((p.get("security_level") or 50) / 18)))
+        upsert_server_event_object(conn, ev, map_type="system", galaxy_id=int(p["galaxy_id"]), planet_id=int(p["id"]), event_type="alien_raid", name="Alien Raid Wormhole", x_pct=gx, y_pct=gy, tier=tier, extra={"dangerHint":"Alien ships emerge for two hours. Last hit rolls rare actual equipment; all participants get double XP.", "rangeLabel":"Event site"})
+        existing = int(scalar(conn, "SELECT COUNT(*) FROM npc_agents WHERE planet_id=? AND career_code='alien_invader' AND alive=1", (int(p["id"]),)) or 0)
+        for i in range(max(0, 3 - existing)):
+            level = max(3, tier * 6 + rng.randint(0, 5))
+            power = 380 + level * 95
+            name = f"Alien Harvester {ev['id']}-{p['id']}-{i+1}"
+            conn.execute(
+                """INSERT INTO npc_agents
+                   (planet_id,role,name,power,disposition,career_code,level,xp,credits,ship_class,activity_rate,aggression,friendliness,job_rank,market_bias,last_action_at,simulated,skills_json,alive)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
+                (int(p["id"]), "alien", name, power, "hostile", "alien_invader", level, level * 220, 0, "Alien Bio-Ship", 80, 98, 1, max(1, tier), "none", iso(), 1, encode_json({"combat": level * 2, "warfare": level, "alien": 1})),
+            )
+            npc_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            sx = clamp_pct(gx + rng.uniform(-4, 4), 2, 98)
+            sy = clamp_pct(gy + rng.uniform(-4, 4), 2, 98)
+            conn.execute(
+                """INSERT OR REPLACE INTO npc_map_state
+                   (npc_id,map_type,galaxy_id,planet_id,role,objective,target_object_key,x_pct,y_pct,origin_x_pct,origin_y_pct,destination_x_pct,destination_y_pct,started_at,arrival_at,action_state,cargo_json,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (npc_id, "system", int(p["galaxy_id"]), int(p["id"]), "alien", "raid", f"server_event:{ev['id']}:alien_raid:g{int(p['galaxy_id'])}:p{int(p['id'])}", sx, sy, sx, sy, sx, sy, iso(), iso(), "working", encode_json({"objectiveLabel":"Alien raid wave", "eventId": int(ev["id"])}), iso()),
+            )
+    meta["spawned"] = True
+    meta["safeZoneCount"] = len(planets)
+    return meta
+
+
+def spawn_generic_event_content(conn: sqlite3.Connection, ev: Dict[str, Any], meta: Dict[str, Any]) -> Dict[str, Any]:
+    if meta.get("spawned"):
+        return meta
+    g = row(conn, "SELECT * FROM galaxies WHERE id=?", (int(ev.get("target_galaxy_id") or 0),)) or choose_event_target_galaxy(conn)
+    if not g:
+        return meta
+    p = event_target_planet_for_galaxy(conn, int(g["id"]))
+    rng = stable_event_rng("generic-event", ev.get("id"), ev.get("event_type"))
+    event_type = str(ev.get("event_type") or "")
+    if event_type == "wormhole_control":
+        upsert_server_event_object(conn, ev, map_type="galaxy", galaxy_id=int(g["id"]), planet_id=None, event_type="wormhole_control", name="Wormhole Control Ring", x_pct=float(g.get("x_pct") or 50), y_pct=float(g.get("y_pct") or 50), tier=5, extra={"radius_pct":10.5, "captureSecondsRequired": int(SERVER_EVENT_BALANCE["capture_seconds_required"]), "dangerHint":"Faction event: hold control for 20 minutes total to unlock a faction pocket wormhole for 2 days."})
+        border = rows(conn, "SELECT * FROM galaxies WHERE id<>? ORDER BY ABS(COALESCE(home_depth,3)-COALESCE((SELECT home_depth FROM galaxies WHERE id=?),3)), id LIMIT 6", (int(g["id"]), int(g["id"])))
+        for bg in border:
+            upsert_server_event_object(conn, ev, map_type="galaxy", galaxy_id=int(bg["id"]), planet_id=None, event_type="wormhole_control", name=f"Control Gate to {g.get('name') or 'Wormhole'}", x_pct=float(bg.get("x_pct") or 50), y_pct=float(bg.get("y_pct") or 50), tier=4, extra={"targetGalaxyId": int(g["id"]), "rangeLabel":"Gate to event"})
+    elif p:
+        names = {
+            "solar_storm_harvest":"Solar Storm Harvest Field",
+            "derelict_convoy_break":"Derelict Convoy Break",
+            "relic_comet":"Relic Comet Trail",
+            "blackout_market_surge":"Blackout Market Surge",
+        }
+        upsert_server_event_object(conn, ev, map_type="system", galaxy_id=int(g["id"]), planet_id=int(p["id"]), event_type=event_type, name=names.get(event_type, ev.get("name") or "Server Event"), x_pct=clamp_pct(50 + rng.uniform(-20, 20), 5, 95), y_pct=clamp_pct(50 + rng.uniform(-20, 20), 5, 95), tier=clamp_tier(int((p.get("security_level") or 50)/16)), extra={"rangeLabel":"Event site", "dangerHint": server_event_definition(event_type).get("summary") or ""})
+    meta["spawned"] = True
+    return meta
+
+
+def spawn_reward_wormhole_for_faction(conn: sqlite3.Connection, ev: Dict[str, Any], faction_id: int) -> None:
+    g = row(conn, "SELECT * FROM galaxies WHERE faction_id=? ORDER BY COALESCE(home_depth,9), id LIMIT 1", (int(faction_id),)) or row(conn, "SELECT * FROM galaxies ORDER BY COALESCE(home_depth,9), id LIMIT 1")
+    if not g:
+        return
+    p = event_target_planet_for_galaxy(conn, int(g["id"]))
+    if not p:
+        return
+    reward_ev = dict(ev)
+    reward_ev["ends_at"] = iso(utcnow() + timedelta(seconds=int(SERVER_EVENT_BALANCE["reward_wormhole_seconds"])))
+    upsert_server_event_object(conn, reward_ev, map_type="system", galaxy_id=int(g["id"]), planet_id=int(p["id"]), event_type="reward_wormhole", name="Faction Pocket Wormhole", x_pct=56, y_pct=44, tier=6, code="reward_wormhole", extra={"canEnterWormhole": True, "winningFactionId": int(faction_id), "selectedSummary":"Two-day faction reward pocket. No NPCs. Artifact and mining spawn/yield bonuses are admin-controlled by SERVER_EVENT_BALANCE.", "rewardHint":"2-day mining/artifact pocket"})
+
+
+def process_server_events(conn: sqlite3.Connection) -> None:
+    ensure_server_event_schedule(conn)
+    now = utcnow()
+    for ev in rows(conn, "SELECT * FROM server_events WHERE status IN ('scheduled','warning','active') ORDER BY starts_at LIMIT 80"):
+        meta = decode_json(ev.get("metadata_json"), {}) or {}
+        status = str(ev.get("status") or "scheduled")
+        start = parse_dt(ev.get("starts_at")) or now
+        warning = parse_dt(ev.get("warning_at")) or start
+        end = parse_dt(ev.get("ends_at")) or start
+        new_status = status
+        if now >= end:
+            new_status = "completed"
+        elif now >= start:
+            new_status = "active"
+        elif now >= warning:
+            new_status = "warning"
+        if new_status in {"warning", "active"} and not meta.get(f"{new_status}_message_sent"):
+            msg = f"{ev.get('name')} {'starts soon' if new_status == 'warning' else 'is active'}."
+            add_event(conn, None, "server_event", msg, {"eventId": ev["id"], "eventType": ev.get("event_type"), "status": new_status})
+            meta[f"{new_status}_message_sent"] = True
+        if new_status == "active":
+            if ev.get("event_type") == "alien_raid":
+                meta = spawn_alien_raid_content(conn, {**ev, "status": new_status}, meta)
+            else:
+                meta = spawn_generic_event_content(conn, {**ev, "status": new_status}, meta)
+        if new_status == "completed" and status != "completed":
+            add_event(conn, None, "server_event", f"{ev.get('name')} ended.", {"eventId": ev["id"], "eventType": ev.get("event_type")})
+        conn.execute("UPDATE server_events SET status=?, metadata_json=?, updated_at=? WHERE id=?", (new_status, encode_json(meta), iso(now), int(ev["id"])))
+
+
+def build_server_event_map_sites(conn: sqlite3.Connection, player: Dict[str, Any], nodes: List[Dict[str, Any]], map_type: str, galaxy_id: int, planet_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    now_s = iso()
+    params: List[Any] = [map_type, int(galaxy_id or 0), now_s]
+    planet_clause = ""
+    if map_type == "system" and planet_id:
+        planet_clause = "AND (planet_id IS NULL OR planet_id=?)"
+        params.append(int(planet_id))
+    objs = rows(conn, f"""SELECT * FROM map_objects
+        WHERE kind='server_event' AND state NOT IN ('depleted','expired','deleted')
+          AND map_type=? AND galaxy_id=?
+          AND (expires_at IS NULL OR expires_at>?)
+          {planet_clause}
+        ORDER BY tier DESC, name""", tuple(params))
+    out = []
+    for obj in objs:
+        payload = map_object_to_payload(obj, player)
+        payload["attackable"] = False
+        payload["inActionRange"] = True
+        payload["selectedSummary"] = payload.get("selectedSummary") or payload.get("dangerHint") or "Server event site."
+        out.append(payload)
+    return out
+
+
+def build_server_event_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    # process_server_events is already invoked by build_state before this is called.
+    now = utcnow()
+    horizon = iso(now + timedelta(days=14))
+    items = rows(conn, "SELECT * FROM server_events WHERE ends_at>=? AND starts_at<=? ORDER BY starts_at LIMIT 60", (iso(now - timedelta(hours=3)), horizon))
+    upcoming = []
+    active = []
+    toasts = []
+    for ev in items:
+        meta = decode_json(ev.get("metadata_json"), {}) or {}
+        payload = {
+            "id": int(ev["id"]),
+            "eventType": ev.get("event_type"),
+            "name": ev.get("name"),
+            "cadence": ev.get("cadence"),
+            "status": ev.get("status"),
+            "startsAt": ev.get("starts_at"),
+            "warningAt": ev.get("warning_at"),
+            "endsAt": ev.get("ends_at"),
+            "summary": meta.get("summary") or server_event_definition(ev.get("event_type")).get("summary") or "",
+            "targetGalaxyId": ev.get("target_galaxy_id"),
+            "targetPlanetId": ev.get("target_planet_id"),
+            "winningFactionId": ev.get("winning_faction_id"),
+            "metadata": meta,
+        }
+        if ev.get("status") == "active":
+            active.append(payload)
+        if ev.get("status") in {"scheduled", "warning", "active"}:
+            upcoming.append(payload)
+        if ev.get("status") in {"warning", "active"}:
+            toasts.append({
+                "key": f"server-event:{ev['id']}:{ev.get('status')}",
+                "type": "event",
+                "message": f"{ev.get('name')} {'starts in ' + str(max(0, int(((parse_dt(ev.get('starts_at')) or now)-now).total_seconds()//60))) + ' min' if ev.get('status') == 'warning' else 'is active now'}.",
+                "actionLabel": "Open Calendar",
+                "page": "Calendar",
+            })
+    return {
+        "definitions": SERVER_EVENT_DEFINITIONS,
+        "upcoming": upcoming,
+        "active": active,
+        "toasts": toasts,
+        "rules": {
+            "alienRaid": "Daily random time. Toast/message 2 hours before. Two-hour safe-zone wormholes. Last hit rolls rare actual equipment; participants get double XP.",
+            "wormholeControl": "Weekly. Capture the control ring for 20 minutes total to open a two-day faction pocket wormhole.",
+            "extraEvents": "Solar Storm Harvest, Derelict Convoy Break, Relic Comet, and Blackout Market Surge are scheduled for review.",
+        },
+        "storageRules": {
+            "globalOnly": "Credits/gold only.",
+            "planetScoped": "Materials, items, modules, ships, cargo, equipment, and storage rows are planet-scoped. Remote storage is visible but cannot be modified unless docked on that planet.",
+        },
+        "balance": {
+            "captureSecondsRequired": int(SERVER_EVENT_BALANCE["capture_seconds_required"]),
+            "rewardWormholeSeconds": int(SERVER_EVENT_BALANCE["reward_wormhole_seconds"]),
+            "pocketMiningYieldMult": float(SERVER_EVENT_BALANCE["pocket_mining_yield_mult"]),
+            "pocketArtifactSpawnMult": float(SERVER_EVENT_BALANCE["pocket_artifact_spawn_mult"]),
+        },
+    }
+
+
+def participate_server_event_action(conn: sqlite3.Connection, player: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    event_id = int(payload.get("eventId") or payload.get("event_id") or 0)
+    ev = row(conn, "SELECT * FROM server_events WHERE id=?", (event_id,))
+    if not ev:
+        raise HTTPException(404, "Server event not found")
+    if ev.get("status") not in {"warning", "active"}:
+        raise HTTPException(409, "Event is not open yet")
+    pf = player_faction(conn, player)
+    faction_id = int((pf or {}).get("id") or player.get("faction_id") or 0) or None
+    now = iso()
+    conn.execute("""INSERT INTO server_event_participants
+        (event_id,player_id,faction_id,capture_seconds,damage_score,last_hit_count,reward_json,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?, ?, ?)
+        ON CONFLICT(event_id,player_id) DO UPDATE SET faction_id=excluded.faction_id, updated_at=excluded.updated_at""",
+        (event_id, int(player["id"]), faction_id, 0, 0, 0, "{}", now, now))
+    msg = f"Joined {ev.get('name')}."
+    if ev.get("event_type") == "wormhole_control" and ev.get("status") == "active":
+        add = int(SERVER_EVENT_BALANCE["capture_tick_seconds"])
+        conn.execute("UPDATE server_event_participants SET capture_seconds=capture_seconds+?, updated_at=? WHERE event_id=? AND player_id=?", (add, now, event_id, int(player["id"])))
+        total = int(scalar(conn, "SELECT COALESCE(SUM(capture_seconds),0) FROM server_event_participants WHERE event_id=? AND faction_id=?", (event_id, faction_id or 0)) or 0)
+        need = int(SERVER_EVENT_BALANCE["capture_seconds_required"])
+        msg = f"Control progress added: {min(total, need)} / {need} seconds for your faction."
+        if faction_id and total >= need and not ev.get("winning_faction_id"):
+            conn.execute("UPDATE server_events SET status='completed', resolved_at=?, winning_faction_id=?, updated_at=? WHERE id=?", (now, faction_id, now, event_id))
+            spawn_reward_wormhole_for_faction(conn, ev, faction_id)
+            add_event(conn, player["id"], "server_event", f"Your faction won Wormhole Control. A two-day pocket wormhole opened in home space.", {"eventId": event_id, "factionId": faction_id})
+            msg = "Wormhole Control captured. Your faction pocket wormhole is now open for 2 days."
+    else:
+        add_event(conn, player["id"], "server_event", msg, {"eventId": event_id, "eventType": ev.get("event_type")})
+    return {"message": msg, "openPage": "Calendar"}
+
+
+def enter_event_wormhole_action(conn: sqlite3.Connection, player: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    key = str(payload.get("objectKey") or payload.get("object_key") or "")
+    obj = row(conn, "SELECT * FROM map_objects WHERE object_key=? AND kind='server_event' AND code='reward_wormhole' AND state='available'", (key,))
+    if not obj:
+        raise HTTPException(404, "Reward wormhole is not available")
+    current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
+    if not current:
+        raise HTTPException(409, "No current planet")
+    meta = decode_json(obj.get("metadata_json"), {}) or {}
+    rng = stable_event_rng("reward-pocket", key, player["id"])
+    created = 0
+    for i in range(5):
+        site_key = f"{key}:pocket_ore:{player['id']}:{i}"
+        ore_meta = {"eventPocket": True, "energyCost": 6, "massEach": 1.0, "unitValue": 240, "label": "Pocket-rich ore", "rewardHint": f"{SERVER_EVENT_BALANCE['pocket_mining_yield_mult']}x yield", "image_url": item_visual_payload("Pocket Ore", "ore", "raw_materials", 1, "pocket_ore").get("image_url")}
+        conn.execute("""INSERT OR IGNORE INTO map_objects
+            (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,expires_at,metadata_json,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (site_key, "system", int(current["galaxy_id"]), int(current["id"]), "ore", "pocket_ore", "Pocket-Rich Ore Vein", clamp_pct(48+rng.uniform(-18,18),5,95), clamp_pct(50+rng.uniform(-18,18),5,95), 6, 12, "available", obj.get("expires_at"), encode_json(ore_meta), iso(), iso()))
+        created += 1
+    for i in range(3):
+        site_key = f"{key}:pocket_artifact:{player['id']}:{i}"
+        exp_meta = {"eventPocket": True, "signalState": "decoded", "signalQuality": 82, "rewardTier": 6, "rewardHint": f"{SERVER_EVENT_BALANCE['pocket_artifact_spawn_mult']}x artifact density", "riskLevel": 12, "riskBand": "Low", "scanEnergy": 4, "investigateEnergy": 8, "realName": "Pocket Artifact Cache", "image_url": item_visual_payload("Pocket Artifact", "artifact", "rare_artifacts", 1, "pocket_artifact").get("image_url")}
+        conn.execute("""INSERT OR IGNORE INTO map_objects
+            (object_key,map_type,galaxy_id,planet_id,kind,code,name,x_pct,y_pct,tier,qty_remaining,state,expires_at,metadata_json,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (site_key, "system", int(current["galaxy_id"]), int(current["id"]), "exploration", "pocket_artifact", "Pocket Artifact Cache", clamp_pct(52+rng.uniform(-18,18),5,95), clamp_pct(50+rng.uniform(-18,18),5,95), 6, 1, "available", obj.get("expires_at"), encode_json(exp_meta), iso(), iso()))
+        created += 1
+    add_event(conn, player["id"], "server_event", "Entered faction pocket wormhole. Bonus ore and artifact sites seeded locally.", {"objectKey": key, "created": created, **meta})
+    return {"message": f"Faction pocket entered. {created} bonus ore/artifact signatures seeded on this map.", "openPage": "Map"}
+
+
+def is_alien_combat_target(target: Dict[str, Any], enemy: Dict[str, Any]) -> bool:
+    joined = " ".join(str(x or "").lower() for x in [target.get("role"), target.get("career_code"), target.get("name"), target.get("eventType"), enemy.get("role"), enemy.get("name"), enemy.get("class")])
+    return "alien" in joined or "bio-ship" in joined
+
+
+def grant_alien_unique_equipment_drop(conn: sqlite3.Connection, player_id: int, target: Dict[str, Any], enemy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
+    level = max(1, int(target.get("level") or enemy.get("level") or 1))
+    ultra_roll = rng.random() < float(SERVER_EVENT_BALANCE["alien_ultra_multi_projectile_drop_chance"])
+    if not ultra_roll and rng.random() >= float(SERVER_EVENT_BALANCE["alien_unique_drop_chance"]):
+        return None
+    if level >= 30:
+        pool = ALIEN_UNIQUE_MODULE_CODES
+    elif level >= 20:
+        pool = ALIEN_UNIQUE_MODULE_CODES[:4]
+    elif level >= 12:
+        pool = ALIEN_UNIQUE_MODULE_CODES[:3]
+    else:
+        pool = ALIEN_UNIQUE_MODULE_CODES[:2]
+    code = rng.choice(pool)
+    if ultra_roll:
+        code = rng.choice(ALIEN_UNIQUE_MODULE_CODES[-2:])
+    mt = row(conn, "SELECT * FROM module_templates WHERE code=?", (code,))
+    if not mt:
+        return None
+    tier = clamp_tier(max(2, min(7, 1 + level // 6 + (1 if ultra_roll else 0))))
+    try:
+        conn.execute("""INSERT INTO ship_modules
+            (player_id,ship_id,module_template_id,slot_type,equipped,durability,current_tier,max_tier,tier_source)
+            VALUES (?,?,?,?,0,100,?,?,?)""", (player_id, None, int(mt["id"]), mt.get("slot_type") or "weapon", tier, 7, "alien_raid_unique_drop"))
+    except Exception:
+        conn.execute("INSERT INTO ship_modules (player_id,ship_id,module_template_id,slot_type,equipped,durability) VALUES (?,?,?,?,0,100)", (player_id, None, int(mt["id"]), mt.get("slot_type") or "weapon"))
+    active_events = rows(conn, "SELECT id FROM server_events WHERE event_type='alien_raid' AND status='active' ORDER BY starts_at DESC LIMIT 2")
+    for ev in active_events:
+        conn.execute("""INSERT INTO server_event_participants
+            (event_id,player_id,faction_id,capture_seconds,damage_score,last_hit_count,reward_json,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(event_id,player_id) DO UPDATE SET last_hit_count=last_hit_count+1, updated_at=excluded.updated_at""",
+            (int(ev["id"]), player_id, None, 0, 0, 1, encode_json({"lastDrop": code}), iso(), iso()))
+    add_event(conn, player_id, "server_event", f"Alien equipment recovered: {mt.get('name')} T{tier}.", {"moduleCode": code, "tier": tier, "alienDrop": True})
+    return {"code": code, "name": mt.get("name"), "qty": 1, "tier": tier, "rarity": "ultra" if ultra_roll else mt.get("rarity") or "rare", "source": "alien_raid_actual_equipment"}
+
+
+
+def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
+    # Central full-state builder restored for /api/state and action refresh responses.
+    # NOVA_AUTO_BATTLE_MAP_PATCH_CALL_V1
+    nova_patch_redistribute_planets_once(conn)
     apply_runtime_game_settings(conn)
+    ensure_fuel_market_world_patch(conn, int(player["id"]), force=False)
     resolve_completed_crafting_jobs(conn, player["id"], bool(user.get("god_mode")))
     resolve_completed_cargo_operations(conn, player["id"])
     resolve_completed_planet_missions(conn, player["id"])
     resolve_player_legal_state(conn, player["id"])
-    resolve_market_restock(conn, force=False)
-    simulate_npc_market_arbitrage(conn, force=False)
+    simulate_galaxy_background_market(conn, player, force=False)
     regenerate_energy(conn, player["id"])
     if user.get("god_mode"):
         conn.execute("UPDATE players SET energy=max(energy,999999999), max_energy=max(max_energy,999999999), energy_updated_at=? WHERE id=?", (iso(), player["id"]))
     player = get_player(conn, player["id"])
     ensure_galaxy_faction_content(conn)
     ensure_server_world_control(conn, force=False)
+    process_server_events(conn)
     process_planet_faction_wars(conn, player)
     process_guild_planet_xp_bonus(conn)
     player = get_player(conn, player["id"])
     ensure_ship_parts(conn)
+    sync_player_fuel_capacity(conn, int(player["id"]))
+    player = get_player(conn, player["id"])
     ensure_radar_content(conn)
+    try:
+        nova_security_defense_tick(conn, player)
+    except Exception:
+        pass
     planet = row(conn, "SELECT p.*, g.name as galaxy_name, g.code as galaxy_code FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player["location_planet_id"],))
+    if planet:
+        cleanup_object_scan_rows(conn, player, int(planet.get("galaxy_id") or 0))
     active_ship = row(conn, "SELECT s.*, t.name as template_name, t.class_name, t.role, t.slots_json, t.ship_tier, t.upkeep_cost, t.size_class as template_size_class, t.mass as template_mass FROM ships s JOIN ship_templates t ON t.id=s.template_id WHERE s.id=?", (player["active_ship_id"],))
     if active_ship:
         active_ship["speed_profile"] = ship_speed_profile(conn, active_ship)
     ship_modules = rows(conn, "SELECT sm.*, mt.name, mt.slot_type, mt.rarity, mt.stats_json, mt.tier as template_tier, mt.max_tier as template_max_tier, mt.price FROM ship_modules sm JOIN module_templates mt ON mt.id=sm.module_template_id WHERE sm.player_id=?", (player["id"],))
     cargo = rows(conn, "SELECT ch.*, c.code, c.name, c.legal, c.category, c.base_price, c.mass, c.tier, c.max_tier, c.tier_locked FROM cargo_hold ch JOIN commodities c ON c.id=ch.commodity_id WHERE ch.player_id=? AND ch.qty>0", (player["id"],))
-    market = rows(conn, "SELECT mp.*, c.code, c.name, c.legal, c.category, c.base_price, c.mass, c.description, c.tier, c.max_tier, c.tier_locked FROM market_prices mp JOIN commodities c ON c.id=mp.commodity_id WHERE mp.planet_id=? ORDER BY c.legal DESC, c.category, c.name", (player["location_planet_id"],))
+    market = rows(conn, "SELECT mp.*, c.code, c.name, c.legal, c.category, c.base_price, c.mass, c.description, c.tier, c.max_tier, c.tier_locked FROM market_prices mp JOIN commodities c ON c.id=mp.commodity_id WHERE mp.planet_id=? AND c.legal=1 AND c.category LIKE 'trade_%' ORDER BY c.category, c.name", (player["location_planet_id"],))
+    for mrow in market:
+        attach_trade_good_category_payload(mrow)
     for item in cargo:
         item["item_code"] = item.get("code")
         item["item_type"] = item.get("category")
-        item["category"] = "illicit_goods" if not int(item.get("legal", 1)) else "goods"
+        item["category"] = item.get("category") if is_trade_good_category(item.get("category")) else ("illicit_goods" if not int(item.get("legal", 1)) else "goods")
+        item["trade_only"] = bool(is_trade_good_category(item.get("item_type")))
+        item["category_icon"] = TRADE_GOOD_CATEGORY_ICONS.get(item.get("item_type"), item.get("item_type") or "goods")
         attach_tier_metadata(item)
         attach_item_visual(item)
     for item in market:
         item["item_code"] = item.get("code")
         item["item_type"] = item.get("category")
-        item["visual_category"] = "illicit_goods" if not int(item.get("legal", 1)) else "goods"
-        item["category_label"] = INVENTORY_CATEGORY_LABELS.get(item["visual_category"], label_for_api(item["visual_category"]))
+        item["trade_only"] = bool(is_trade_good_category(item.get("category")))
+        item["visual_category"] = item.get("category") if item["trade_only"] else ("illicit_goods" if not int(item.get("legal", 1)) else "goods")
+        item["category_icon"] = TRADE_GOOD_CATEGORY_ICONS.get(item.get("category"), item["visual_category"])
+        item["category_label"] = label_for_api(item.get("category") if item["trade_only"] else item["visual_category"])
         attach_tier_metadata(item)
         attach_item_visual(item, item_type_key="item_type", category_key="visual_category", legal_key="legal")
         enrich_market_item(conn, item, planet)
@@ -16901,22 +23920,26 @@ def build_state(conn, user, player):
     for pl in all_planets:
         pl["image_url"] = planet_visual_payload(pl)
     prune_admin_action_logs(conn)
-    activity_rows = rows(conn, "SELECT nal.*, p.name as planet_name, p.galaxy_id FROM npc_action_log nal LEFT JOIN planets p ON p.id=nal.planet_id ORDER BY nal.id DESC LIMIT 100")
-    for ev in activity_rows:
-        enrich_activity_event(ev)
+    activity_rows = []
     ensure_achievement_rows(conn, player["id"])
     profile = profile_payload(conn, user, player)
     achievements = build_achievements_state(conn, player["id"])
     chat_messages = build_chat_messages(conn, user["id"])
     active_pirate_station = pirate_station_payload(conn, player["id"])
+    party_state = build_party_state(conn, player)
+    social_state = build_social_state(conn, player)
+    trade_state = build_trade_state(conn, player)
     return {
         "user": {"id": user["id"], "username": user["username"], "role": user["role"], "god_mode": bool(user["god_mode"]), "dev_mode": DEV_MODE},
         "profile": profile,
         "achievements": achievements,
         "public_profiles": [public_profile_payload(conn, int(u["id"])) for u in rows(conn, "SELECT id FROM users ORDER BY id LIMIT 80")],
-        "avatar_options": PROFILE_AVATAR_OPTIONS,
+        "avatar_options": avatar_options_for_faction_code(player_faction_code(conn, player)),
         "chat_messages": chat_messages,
         "active_pirate_station": active_pirate_station,
+        "party": party_state,
+        "social": social_state,
+        "trade": trade_state,
         "player": player,
         "player_faction": player_faction(conn, player),
         "factions": rows(conn, "SELECT * FROM factions ORDER BY id"),
@@ -16951,8 +23974,15 @@ def build_state(conn, user, player):
         "tier_balance": TIER_BALANCE,
         "heat_jail": jail_heat_status(conn, player["id"]),
         "fight": build_fight_state(conn, player, user),
+        "security_state": nova_security_snapshot(conn, player_id=player["id"]),
         "combat_balance": COMBAT_BALANCE,
         "market_law_balance": MARKET_LAW_BALANCE,
+        "fuel_status": fuel_status_payload(player),
+        "fuel_tank": active_fuel_tank_payload(conn, player),
+        "fuel_shop": {"available": planet_has_refuel_shop(planet), "unit_price": fuel_shop_unit_price(conn, player), "planet": planet.get("name") if planet else None},
+        "fuel_world_settings": fuel_world_settings(conn),
+        "trade_good_category_icons": TRADE_GOOD_CATEGORY_ICONS,
+        "market_rules": {"illicitGoodsRemoved": True, "tradeGoodsAreMarketOnly": True, "playerMarketScope": "same_galaxy_only", "sameGalaxyArbitrageFlattened": True},
         "market": market,
         "jobs": build_jobs_state(conn, player["id"]),
         "career_tasks": active_career_tasks(conn, player["id"]),
@@ -16977,13 +24007,13 @@ def build_state(conn, user, player):
         "game_tuning": build_game_tuning_state(conn, user),
         "ecosystem_balance": ecosystem_balance_summary(conn) if bool(user.get("god_mode")) else {},
         "admin_console": {"actors": admin_actor_rows(conn), "actions": admin_game_action_rows(conn)} if bool(user.get("god_mode")) else {"actors": [], "actions": []},
-        "market_history": rows(conn, "SELECT mh.*, c.name as commodity_name, p.name as planet_name FROM market_history mh JOIN commodities c ON c.id=mh.commodity_id JOIN planets p ON p.id=mh.planet_id ORDER BY mh.id DESC LIMIT 50"),
-        "market_transactions": rows(conn, "SELECT mt.*, p.name as planet_name, COALESCE(c.name, mt.item_name) as commodity_name FROM market_transactions mt LEFT JOIN commodities c ON c.id=mt.commodity_id LEFT JOIN planets p ON p.id=mt.planet_id WHERE mt.player_id=? OR mt.player_id IS NULL ORDER BY mt.id DESC LIMIT 60", (player["id"],)),
+        "market_history": rows(conn, "SELECT mh.*, c.name as commodity_name, p.name as planet_name FROM market_history mh JOIN commodities c ON c.id=mh.commodity_id JOIN planets p ON p.id=mh.planet_id ORDER BY mh.id DESC LIMIT 20"),
+        "market_transactions": rows(conn, "SELECT mt.*, p.name as planet_name, COALESCE(c.name, mt.item_name) as commodity_name FROM market_transactions mt LEFT JOIN commodities c ON c.id=mt.commodity_id LEFT JOIN planets p ON p.id=mt.planet_id WHERE mt.player_id=? OR mt.player_id IS NULL ORDER BY mt.id DESC LIMIT 20", (player["id"],)),
         "player_market": build_player_market_state(conn, player["id"]),
         "player_storage": build_player_storage_state(conn, player),
         "crafting_recipes": build_crafting_state(conn, player["id"], planet, bool(user["god_mode"])),
         "crafting_queue": crafting_queue_payload(conn, player["id"]),
-        "crafting_history": rows(conn, "SELECT * FROM crafting_history WHERE player_id=? ORDER BY id DESC LIMIT 40", (player["id"],)),
+        "crafting_history": rows(conn, "SELECT * FROM crafting_history WHERE player_id=? ORDER BY id DESC LIMIT 15", (player["id"],)),
         "crafting_balance": CRAFTING_BALANCE,
         "guild": guild,
         "guild_skills": rows(conn, "SELECT * FROM guild_skills WHERE guild_id=?", (player["guild_id"],)) if player.get("guild_id") else [],
@@ -16993,6 +24023,7 @@ def build_state(conn, user, player):
         "resolved_planet_wars": resolved_planet_faction_wars(conn),
         "galaxy_wars": active_or_upcoming_planet_wars(conn),
         "resolved_galaxy_wars": resolved_planet_faction_wars(conn),
+        "server_events": build_server_event_state(conn, player),
         "events": rows(conn, "SELECT * FROM events WHERE player_id IS NULL OR player_id=? ORDER BY id DESC LIMIT 30", (player["id"],)),
         "money_sinks": rows(conn, "SELECT * FROM money_sinks WHERE player_id=? ORDER BY id DESC LIMIT 25", (player["id"],)),
         "server_time": iso(),
@@ -17005,18 +24036,35 @@ def action(req: ActionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depend
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        player = resolve_completed_travel(conn, get_player(conn, player["id"]))
-        player = resolve_intercept_if_close(conn, get_player(conn, player["id"]))
-        resolve_completed_cargo_operations(conn, player["id"])
-        resolve_completed_planet_missions(conn, player["id"])
-        advance_pirate_station_run(conn, player["id"])
-        player = get_player(conn, player["id"])
+        lightweight_combat_action = req.type in {"advance_combat_battle", "combat_action"}
+        if lightweight_combat_action:
+            # Combat auto-ticks happen frequently. Do not run the full world/state maintenance
+            # pipeline for each tick or the browser can create a SQLite write-lock queue.
+            player = get_player(conn, player["id"])
+        else:
+            player = resolve_completed_travel(conn, get_player(conn, player["id"]))
+            player = resolve_intercept_if_close(conn, get_player(conn, player["id"]))
+            resolve_completed_cargo_operations(conn, player["id"])
+            resolve_completed_planet_missions(conn, player["id"])
+            advance_pirate_station_run(conn, player["id"])
+            process_server_events(conn)
+            player = get_player(conn, player["id"])
         ensure_action_allowed(conn, user, player, req)
         result = handle_action(conn, user, player, req)
         conn.commit()
-        fresh = get_player(conn, player["id"])
-        fresh_user = row(conn, "SELECT * FROM users WHERE id=?", (user["id"],)) or user
-        return {"ok": True, "result": result, "state": build_state(conn, fresh_user, fresh)}
+        if lightweight_combat_action:
+            return {"ok": True, "result": result, "refresh": False}
+        if PERF_RETURN_STATE_ON_ACTION or req.type in {"get_state", "admin_spawn_map_objects"}:
+            fresh = get_player(conn, player["id"])
+            if fresh and player.get("_session_token"):
+                fresh["_session_token"] = player.get("_session_token")
+            fresh_user = row(conn, "SELECT * FROM users WHERE id=?", (user["id"],)) or user
+            if fresh_user and user.get("_session_token"):
+                fresh_user["_session_token"] = user.get("_session_token")
+            next_state = build_state(conn, fresh_user, fresh)
+            conn.commit()
+            return {"ok": True, "result": result, "state": next_state}
+        return {"ok": True, "result": result, "refresh": True}
     except HTTPException:
         conn.rollback()
         raise
@@ -17039,9 +24087,12 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
     god = bool(user["god_mode"])
     pid = player["id"]
     payload = req.payload or {}
+    session_token = player.get("_session_token")
     apply_runtime_game_settings(conn)
     resolve_completed_crafting_jobs(conn, pid, bool(user.get("god_mode")))
     player = get_player(conn, pid)
+    if player and session_token:
+        player["_session_token"] = session_token
 
     docked_only_actions = {
         "buy_commodity", "sell_commodity", "buy_ship", "buy_module", "buy_property",
@@ -17059,11 +24110,18 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if (t_until and t_until > utcnow()) or player_is_in_open_space(conn, pid):
             raise HTTPException(409, "You are in open space. Dock at a planet or station before using market, crafting, repairs, hangar, planet services, or local combat.")
 
+    if t == "participate_server_event":
+        return participate_server_event_action(conn, player, payload)
+
+    if t == "enter_event_wormhole":
+        return enter_event_wormhole_action(conn, player, payload)
+
     if t == "update_profile":
         current_username = user["username"]
         new_username = normalize_username(str(payload.get("username") or current_username))
         display_name = normalize_display_name(str(payload.get("displayName") or payload.get("display_name") or player.get("callsign") or current_username))
-        avatar_id = clean_avatar_id(str(payload.get("avatarId") or payload.get("avatar_id") or DEFAULT_AVATAR_ID))
+        faction_code = player_faction_code(conn, player)
+        avatar_id = clean_avatar_id(str(payload.get("avatarId") or payload.get("avatar_id") or DEFAULT_AVATAR_ID), faction_code, display_name or current_username)
         selected_badge_code = str(payload.get("selectedBadgeCode") or payload.get("selected_badge_code") or "").strip()
         if selected_badge_code and not selected_badge_is_unlocked(conn, pid, selected_badge_code):
             raise HTTPException(400, "Selected achievement badge is not unlocked")
@@ -17081,6 +24139,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         conn.execute("UPDATE players SET callsign=? WHERE id=?", (display_name, pid))
         add_event(conn, pid, "profile", "Profile updated.")
         grant_achievement_progress(conn, pid, "social", 1)
+        _invalidate_public_profile_cache(int(user["id"]))
         return {"message":"Profile saved.", "username":new_username, "displayName":display_name, "avatarId":avatar_id, "selectedBadgeCode":selected_badge_code}
 
     if t == "set_achievement_badge":
@@ -17090,6 +24149,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         ensure_user_profile(conn, user, player)
         conn.execute("UPDATE user_profiles SET selected_badge_code=?, updated_at=? WHERE user_id=?", (badge_code, iso(), user["id"]))
         add_event(conn, pid, "profile", f"Selected profile badge {badge_code or 'none'}.")
+        _invalidate_public_profile_cache(int(user["id"]))
         return {"message":"Profile achievement badge updated.", "selectedBadgeCode":badge_code}
 
     if t == "view_public_profile":
@@ -17112,7 +24172,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             raise HTTPException(400, f"Chat message must be {PROFILE_LIMITS['chat_max']} characters or less")
         profile = row(conn, "SELECT * FROM user_profiles WHERE user_id=?", (user["id"],)) or {}
         sender = profile.get("display_name") or player.get("callsign") or user.get("username")
-        avatar_id = clean_avatar_id(profile.get("avatar_id"))
+        avatar_id = clean_avatar_id(profile.get("avatar_id"), player_faction_code(conn, player), sender)
         conn.execute(
             "INSERT INTO chat_messages (user_id,player_id,sender_type,sender_name,avatar_id,message,created_at) VALUES (?,?,?,?,?,?,?)",
             (user["id"], pid, "player", sender, avatar_id, text, iso()),
@@ -17120,13 +24180,87 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         conn.execute("DELETE FROM chat_messages WHERE id NOT IN (SELECT id FROM chat_messages ORDER BY id DESC LIMIT 160)")
         return {"message":"Chat message sent."}
 
+    if t == "party_invite":
+        target_player_id = int(payload.get("playerId") or payload.get("player_id") or 0)
+        return party_invite_player(conn, player, target_player_id)
+
+    if t == "party_accept_invite":
+        invite_id = int(payload.get("inviteId") or payload.get("invite_id") or 0)
+        return party_accept_invite(conn, player, invite_id)
+
+    if t == "party_decline_invite":
+        invite_id = int(payload.get("inviteId") or payload.get("invite_id") or 0)
+        return party_decline_invite(conn, player, invite_id)
+
+    if t == "party_leave":
+        leave_current_party(conn, int(player["id"]))
+        return {"message": "Left party.", "party": build_party_state(conn, get_player(conn, int(player["id"]))) }
+
+    if t == "party_remove_member":
+        target_player_id = int(payload.get("playerId") or payload.get("player_id") or 0)
+        return party_remove_member(conn, player, target_player_id)
+
+    if t == "party_transfer_leader":
+        target_player_id = int(payload.get("playerId") or payload.get("player_id") or 0)
+        return party_transfer_leader(conn, player, target_player_id)
+
+    if t == "social_friend_request":
+        return send_friend_request(conn, player, int(payload.get("playerId") or payload.get("player_id") or 0))
+
+    if t == "social_accept_friend":
+        return accept_friend_request(conn, player, int(payload.get("requestId") or payload.get("request_id") or 0))
+
+    if t == "social_decline_friend":
+        return decline_friend_request(conn, player, int(payload.get("requestId") or payload.get("request_id") or 0))
+
+    if t == "social_remove_friend":
+        return remove_friend(conn, player, int(payload.get("playerId") or payload.get("player_id") or 0))
+
+    if t == "social_block_player":
+        return block_player(conn, player, int(payload.get("playerId") or payload.get("player_id") or 0))
+
+    if t == "social_unblock_player":
+        return unblock_player(conn, player, int(payload.get("playerId") or payload.get("player_id") or 0))
+
+    if t == "trade_invite":
+        return trade_invite_player(conn, player, int(payload.get("playerId") or payload.get("player_id") or 0))
+
+    if t == "trade_accept":
+        return trade_accept(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0))
+
+    if t == "trade_decline":
+        return trade_cancel_or_decline(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), decline=True)
+
+    if t == "trade_cancel":
+        return trade_cancel_or_decline(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), decline=False)
+
+    if t == "trade_set_gold":
+        return trade_set_gold(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), int(payload.get("amount") or 0))
+
+    if t == "trade_add_item":
+        return trade_add_item(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), str(payload.get("itemCode") or payload.get("item_code") or ""), int(payload.get("qty") or 1))
+
+    if t == "trade_remove_item":
+        return trade_remove_item(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), int(payload.get("tradeItemId") or payload.get("trade_item_id") or 0), int(payload.get("qty") or 0))
+
+    if t == "trade_lock":
+        return trade_set_lock(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), True)
+
+    if t == "trade_unlock":
+        return trade_set_lock(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0), False)
+
+    if t == "trade_approve":
+        return trade_approve(conn, player, int(payload.get("tradeId") or payload.get("trade_id") or 0))
+
 
     if t == "enter_pirate_station":
         station_id = int(payload.get("station_id") or payload.get("stationId") or 0)
         station = row(conn, "SELECT * FROM pirate_stations WHERE id=?", (station_id,))
         if not station:
             raise HTTPException(404, "Pirate station not found")
-        require_player_action_range(conn, player, station, "system", "enter pirate station", god)
+        range_status = action_range_status(conn, player, station, "system")
+        if not god and not range_status["inRange"]:
+            return start_pirate_station_approach(conn, player, station, god)
         return begin_pirate_station_run(conn, player, station_id)
 
     if t == "pirate_station_move":
@@ -17147,8 +24281,46 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
     if t == "pirate_station_close_battle":
         return close_pirate_station_battle(conn, player)
 
+    if t in {"admin_update_settings", "admin_update_world_spacing"}:
+        if not user.get("god_mode"):
+            raise HTTPException(403, "Admin only")
+        settings = save_fuel_world_settings(conn, {
+            "planet_gap_multiplier": payload.get("planet_gap_multiplier", payload.get("planetGapMultiplier")),
+            "planet_min_gap": payload.get("planet_min_gap", payload.get("planetMinGap")),
+            "galaxy_gap_multiplier": payload.get("galaxy_gap_multiplier", payload.get("galaxyGapMultiplier")),
+            "galaxy_min_gap": payload.get("galaxy_min_gap", payload.get("galaxyMinGap")),
+            "fuel_price_per_unit": payload.get("fuel_price_per_unit", payload.get("fuelPricePerUnit")),
+        })
+        result = rewrite_world_geometry(conn, settings)
+        rebalance_trade_goods_market(conn)
+        app_state_put_json(conn, FUEL_WORLD_PATCH_KEY, {"applied": True, "version": 4, "updated_at": iso(), "adminRewrite": True})
+        add_event(conn, None, "admin", f"World spacing and market baselines rewritten by {user.get('username') or 'admin'}.", {"settings": settings, "result": result})
+        return {"message": "World spacing settings saved and galaxy/planet positions regenerated.", "settings": settings, "result": result}
+
+    if t in {"admin_regenerate_world", "admin_regenerate_world_spacing"}:
+        if not user.get("god_mode"):
+            raise HTTPException(403, "Admin only")
+        ensure_fuel_market_world_patch(conn, int(player["id"]), force=True)
+        result = rewrite_world_geometry(conn, fuel_world_settings(conn))
+        rebalance_trade_goods_market(conn)
+        add_event(conn, None, "admin", f"World geometry and trade markets regenerated by {user.get('username') or 'admin'}.", {"result": result})
+        return {"message": "World geometry and trade market baselines regenerated.", "settings": fuel_world_settings(conn), "result": result}
+
+    if t == "admin_simulate_npc_events":
+        if not user.get("god_mode"):
+            raise HTTPException(403, "Admin only")
+        market_updates = simulate_galaxy_background_market(conn, player, force=True)
+        npc_updates = simulate_active_galaxy_npc_activity(conn, player, force=True)
+        add_event(conn, None, "admin", f"NPC/market simulation pulse completed in current galaxy: {npc_updates} NPC actions, {market_updates} market updates.", {"npcActions": npc_updates, "marketUpdates": market_updates})
+        return {"message": f"Simulation pulse complete: {npc_updates} NPC actions, {market_updates} market updates.", "npcActions": npc_updates, "marketUpdates": market_updates}
+
+    if t == "admin_spawn_map_objects":
+        return admin_spawn_map_objects(conn, user, player, payload)
+
     if t == "go_here":
         map_type = str(payload.get("map_type") or "system").lower()
+        if map_type == "galaxy":
+            raise HTTPException(400, "Galaxy map travel is gate-only. Select a destination galaxy instead.")
         x_pct = max(1.0, min(99.0, float(payload.get("x_pct") or 50)))
         y_pct = max(1.0, min(99.0, float(payload.get("y_pct") or 50)))
         t_until = parse_dt(player.get("travel_until"))
@@ -17169,8 +24341,8 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             origin_node = next((n for n in nodes if str(n.get("id")) == str(origin_key)), nodes[0])
         distance = ((float(origin_node.get("x_pct") or 50) - x_pct) ** 2 + (float(origin_node.get("y_pct") or 50) - y_pct) ** 2) ** 0.5
         ship = row(conn, "SELECT * FROM ships WHERE id=?", (player["active_ship_id"],)) if player.get("active_ship_id") else None
-        seconds = map_route_seconds_for_distance(conn, ship or {}, distance, god)
-        fuel_cost = 0 if god else max(1, int(distance / 14))
+        seconds = fuel_adjusted_route_seconds(conn, player, ship or {}, distance, god)
+        fuel_cost = fuel_adjusted_travel_cost(conn, player, max(1, int(distance / 14)), god)
         spend(conn, pid, fuel=fuel_cost, god=god)
         now = utcnow()
         arrival = now + timedelta(seconds=seconds)
@@ -17202,7 +24374,10 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         travel_state = build_travel_state(conn, player)
         if not travel_state.get("active"):
             return {"message": "No active travel route to cancel."}
-        map_type = str(travel_state.get("map_type") or ("galaxy" if travel_state.get("mode") in {"galaxy", "galaxy_route"} else "system")).lower()
+        mode = str(travel_state.get("mode") or "").lower()
+        map_type = str(travel_state.get("map_type") or ("galaxy" if mode in {"galaxy", "galaxy_route"} else "system")).lower()
+        if map_type == "galaxy" or mode in {"galaxy", "galaxy_route"}:
+            raise HTTPException(409, "Gate jumps are already initiated and cannot be cancelled into galaxy open space.")
         point = current_player_map_position(conn, player, map_type)
         clear_player_waypoint(conn, pid)
         clear_player_intercept(conn, pid)
@@ -17227,13 +24402,55 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         add_event(conn, pid, "travel", f"Travel cancelled at {point.get('x_pct'):.1f} / {point.get('y_pct'):.1f}.", {"map_type": map_type, "x_pct": point.get("x_pct"), "y_pct": point.get("y_pct")})
         return {"message": "Travel cancelled. Ship is holding in open space.", "open_space": True, "x_pct": point.get("x_pct"), "y_pct": point.get("y_pct"), "map_type": map_type}
 
+    if t == "scan_object":
+        map_type = str(payload.get("map_type") or payload.get("mapType") or "system").lower()
+        map_type = "galaxy" if map_type == "galaxy" else "system"
+        nodes, target, gid, scan_planet_id = resolve_object_scan_target(conn, player, map_type, payload)
+        target_key = object_scan_target_key(target)
+        if target_key in object_scan_known_targets(conn, player, gid, map_type):
+            unlocked = {**target, "scanUnlocked": True, "scanResult": {"success": True, "alreadyKnown": True}}
+            return {"message": f"Scan already resolved: {target.get('realName') or target.get('name') or target.get('label') or 'target'}.", "scan": {"success": True, "alreadyKnown": True, "successChance": 100}, "target": unlocked}
+        spend(conn, pid, energy=int(SCAN_OBJECT_BALANCE["energy"]), god=god)
+        scan_result = object_scan_roll(conn, player, target, god)
+        target_name = target.get("realName") or target.get("name") or target.get("label") or target.get("ship_name") or "target"
+        if scan_result.get("success"):
+            store_object_scan_success(conn, player, target, map_type, gid, scan_result)
+            unlocked = {**target, "scanUnlocked": True, "scanResult": scan_result, "scanLabel": "Scanned"}
+            add_event(conn, pid, "exploration", f"Scan resolved {target_name}.", {"map_type": map_type, "target_key": target_key, **scan_result})
+            grant_action_progression(conn, pid, "exploration", max(1.0, float(scan_result.get("successChance") or 20) / 28.0), True)
+            return {"message": f"Scan resolved: {target_name}. Inspect is now available.", "scan": scan_result, "target": unlocked, "forceStateRefresh": True}
+        add_event(conn, pid, "exploration", f"Scan failed against {target_name}.", {"map_type": map_type, "target_key": target_key, **scan_result})
+        grant_action_progression(conn, pid, "exploration", 0.6, True)
+        return {"message": f"Scan failed: {target_name} resisted or stayed noisy. Chance {scan_result['successChance']}%, roll {scan_result['roll']}.", "scan": scan_result, "forceStateRefresh": False}
+
     if t == "scan_area":
         map_type = str(payload.get("map_type") or "system").lower()
+        map_type = "galaxy" if map_type == "galaxy" else "system"
+        profile = scan_area_profile_for_player(conn, player, map_type)
+        if profile.get("cooldown_active") and not god:
+            raise HTTPException(409, f"Area scan cooling down for {int(profile.get('remaining_seconds') or 0)} seconds.")
+        x_pct = clamp_pct(float(payload.get("x_pct") if payload.get("x_pct") is not None else 50), 1, 99)
+        y_pct = clamp_pct(float(payload.get("y_pct") if payload.get("y_pct") is not None else 50), 1, 99)
         spend(conn, pid, energy=OPEN_WORLD_BALANCE["scan_area_energy"], god=god)
+        nodes, candidates = scan_area_candidate_objects(conn, player, map_type)
+        revealed = create_scan_area_ping_and_blips(
+            conn,
+            player,
+            map_type,
+            x_pct,
+            y_pct,
+            float(profile["radius_pct"]),
+            int(profile["duration_seconds"]),
+            candidates,
+            nodes,
+        )
+        if not god:
+            cooldown_until = utcnow() + timedelta(seconds=int(profile["cooldown_seconds"]))
+            conn.execute("UPDATE players SET scan_area_cooldown_until=? WHERE id=?", (iso(cooldown_until), pid))
         scan_quality = clamp_int(45 + int(player_skill_totals(conn, pid).get("scanning", 0) or 0) * 2 + random.randint(-8, 18), 5, 99)
-        add_event(conn, pid, "exploration", f"Area scan complete. Signal quality {scan_quality}%.", {"map_type": map_type, "scan_quality": scan_quality})
-        grant_action_progression(conn, pid, "exploration", max(1.0, scan_quality / 30), True)
-        return {"message": f"Area scan complete. Signal quality {scan_quality}%. Check ore and ancient-site contacts on the map.", "scan_quality": scan_quality}
+        add_event(conn, pid, "exploration", f"Area scan pinged {revealed} class contacts. Signal quality {scan_quality}%.", {"map_type": map_type, "scan_quality": scan_quality, "revealed": revealed, "radius_pct": profile["radius_pct"], "duration_seconds": profile["duration_seconds"], "cooldown_seconds": profile["cooldown_seconds"]})
+        grant_action_progression(conn, pid, "exploration", max(1.0, (scan_quality / 35) + revealed * 0.15), True)
+        return {"message": f"Area scan pinged {revealed} class contacts for {int(profile['duration_seconds'])} seconds. Radius {profile['radius_pct']}%, cooldown {int(profile['cooldown_seconds'])}s.", "scan_quality": scan_quality, "revealed": revealed, "scan_area": profile, "forceStateRefresh": True}
 
     if t == "scan_exploration_site":
         site_id = str(payload.get("site_id") or payload.get("siteId") or "")
@@ -17444,6 +24661,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             str(payload.get("action") or payload.get("actionType") or ""),
             str(payload.get("weapon_id") or payload.get("weaponId") or ""),
             str(payload.get("utility_id") or payload.get("utilityId") or ""),
+            str(payload.get("target_ref") or payload.get("targetRef") or ""),
         )
         result["battleId"] = battle_id
         return result
@@ -17540,15 +24758,15 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if not user["god_mode"] or not DEV_MODE:
             raise HTTPException(403, "God mode endpoint is dev/admin only")
         ship = row(conn, "SELECT * FROM ships WHERE id=?", (player["active_ship_id"],))
-        conn.execute("UPDATE players SET level=99,xp=0,skill_points=99999,credits=999999999,fuel=999999,max_fuel=999999,energy=999999,max_energy=999999,max_cargo=999999,scrap=999999,loyalty=999999,health=max_health,hospital_until=NULL,travel_until=NULL,travel_destination_id=NULL,cargo_operation_until=NULL,cargo_operation_started_at=NULL,cargo_operation_type=NULL,cargo_operation_summary=NULL,heat=0,heat_updated_at=NULL,jailed_until=NULL,jail_reason=NULL,jail_severity=NULL,jail_location=NULL,illegal_action_cooldown_until=NULL,breakout_cooldown_until=NULL,breakout_failures=0 WHERE id=?", (pid,))
-        conn.execute("UPDATE pending_cargo_operations SET status='cancelled', completed_at=? WHERE player_id=? AND status='active'", (iso(), pid))
+        clear_player_runtime_state(conn, pid, clear_battle=True)
+        conn.execute("UPDATE players SET level=99,xp=0,skill_points=99999,credits=999999999,fuel=999999,max_fuel=999999,energy=999999,max_energy=999999,max_cargo=999999,scrap=999999,loyalty=999999,health=max_health,hospital_until=NULL,cargo_operation_until=NULL,cargo_operation_started_at=NULL,cargo_operation_type=NULL,cargo_operation_summary=NULL,heat=0,heat_updated_at=NULL,jailed_until=NULL,jail_reason=NULL,jail_severity=NULL,jail_location=NULL,illegal_action_cooldown_until=NULL,breakout_cooldown_until=NULL,breakout_failures=0 WHERE id=?", (pid,))
         if ship:
             conn.execute("UPDATE ships SET destroyed=0,hull=max_hull,shield=max_shield,insured=1,insurance_tier='premium' WHERE player_id=?", (pid,))
             ensure_ship_parts(conn)
             conn.execute("UPDATE ship_parts SET hp=max_hp WHERE ship_id IN (SELECT id FROM ships WHERE player_id=?)", (pid,))
             conn.execute("UPDATE ship_modules SET durability=100 WHERE player_id=?", (pid,))
-        add_event(conn, pid, "admin", "God mode refreshed: unlimited resources and cleared penalties. Travel still uses ship speed.")
-        return {"message":"God mode refreshed."}
+        add_event(conn, pid, "admin", "God mode refreshed: unlimited resources and stale travel/combat/map operation state cleared.")
+        return {"message":"God mode refreshed and stale travel/combat state cleared."}
 
     if t == "complete_travel":
         dest = player.get("travel_destination_id")
@@ -17583,12 +24801,12 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             if local_gate and int(current["id"]) != int(local_gate["id"]):
                 raise HTTPException(400, f"Galaxy jumps require docking at the local Jump Gate first. Travel to {local_gate['name']} on the System Map.")
 
-        total_distance = sum(float(s.get("distance") or 0) for s in segments)
         route_danger = int(sum(planet_control_effects(row(conn, "SELECT * FROM planets WHERE id=?", (int(s["to_planet_id"]),)) or {}).get("travel_danger", 20) for s in segments) / max(1, len(segments)))
-        efficiency = travel_efficiency_bonus(conn, ship["id"])
-        effective_speed = effective_ship_map_speed(conn, ship)
-        total_minutes = sum(max(TRAVEL_BALANCE["minimum_galaxy_minutes"], int((float(s["distance"]) * TRAVEL_BALANCE["galaxy_distance_minutes"] / max(effective_speed, 0.1)) * (1.0 + route_danger * TRAVEL_BALANCE["danger_time_pressure"]) * (1.0 - efficiency))) for s in segments)
-        fuel_cost = 0 if god else max(3, int((total_distance * TRAVEL_BALANCE["galaxy_fuel_mult"] / max(effective_speed, 0.1)) * (1.0 + route_danger * TRAVEL_BALANCE["danger_fuel_pressure"]) * (1.0 - efficiency)))
+        route_seconds = len(segments) * (AUTO_GATE_JUMP_INIT_SECONDS if len(segments) > 1 else GATE_JUMP_INIT_SECONDS)
+        total_minutes = max(1, int(math.ceil(route_seconds / 60)))
+        if not god and int(player.get("fuel") or 0) <= 0:
+            raise HTTPException(409, "Jump gates are locked on emergency power. Refuel before jumping.")
+        fuel_cost = 0
         spend(conn, pid, fuel=fuel_cost, god=god)
         start_galaxy_route_segment(conn, player, segments, 0, ship, False)
         route_name_parts = []
@@ -17597,8 +24815,8 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             route_name_parts.append(str(g_row.get("name") if g_row else gid))
         route_names = " -> ".join(route_name_parts)
         grant_action_progression(conn, pid, "travel", max(1.0, total_minutes / 8), True)
-        add_event(conn, pid, "travel", f"Multi-galaxy course plotted to {target_galaxy['name']} through {len(segments)} gate segments.", {"path": path, "segments": segments, "fuel_cost": fuel_cost})
-        return {"message": f"Course plotted to {target_galaxy['name']}: {route_names}.", "minutes": total_minutes, "fuel_cost": fuel_cost, "route_danger": route_danger, "segments": segments, "path": path}
+        add_event(conn, pid, "travel", f"Gate jump initiated to {target_galaxy['name']} through {len(segments)} gate segment(s).", {"path": path, "segments": segments, "fuel_cost": fuel_cost, "seconds": route_seconds, "auto_path": len(segments) > 1})
+        return {"message": f"Gate jump initiated to {target_galaxy['name']}: {route_names}.", "seconds": route_seconds, "minutes": total_minutes, "fuel_cost": fuel_cost, "route_danger": route_danger, "segments": segments, "path": path, "auto_path": len(segments) > 1}
 
     if t == "travel":
         dest = int(payload.get("planet_id"))
@@ -17626,11 +24844,12 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         route_danger = int((planet_control_effects(current).get("travel_danger", 20) + planet_control_effects(target).get("travel_danger", 20)) / 2)
         efficiency = travel_efficiency_bonus(conn, ship["id"])
         effective_speed = effective_ship_map_speed(conn, ship)
-        fuel_cost = 0 if god else max(1, int((dist * TRAVEL_BALANCE["local_fuel_mult"] / max(effective_speed, 0.1)) * (1.0 + route_danger * TRAVEL_BALANCE["danger_fuel_pressure"]) * (1.0 - efficiency)))
+        base_fuel_cost = max(1, int((dist * TRAVEL_BALANCE["local_fuel_mult"] / max(effective_speed, 0.1)) * (1.0 + route_danger * TRAVEL_BALANCE["danger_fuel_pressure"]) * (1.0 - efficiency)))
+        fuel_cost = fuel_adjusted_travel_cost(conn, player, base_fuel_cost, god)
         origin_point_for_speed = current_player_map_position(conn, player, "system")
         target_point_for_speed = system_planet_map_point(conn, int(target["id"]))
         map_distance = pct_distance(origin_point_for_speed, target_point_for_speed)
-        seconds = map_route_seconds_for_distance(conn, ship, map_distance, god)
+        seconds = fuel_adjusted_route_seconds(conn, player, ship, map_distance, god)
         minutes = max(1, int(math.ceil(seconds / 60)))
         spend(conn, pid, fuel=fuel_cost, god=god)
         route_meta = {}
@@ -18062,7 +25281,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if target_node:
             target_point = {"x_pct": float(target_node.get("x_pct") or target_point.get("x_pct") or 50), "y_pct": float(target_node.get("y_pct") or target_point.get("y_pct") or 50)}
         map_distance = pct_distance(origin_point, target_point)
-        seconds = map_route_seconds_for_distance(conn, ship, map_distance, god)
+        seconds = fuel_adjusted_route_seconds(conn, player, ship, map_distance, god)
         route_danger = int((planet_control_effects(current).get("travel_danger", 20) + planet_control_effects(target).get("travel_danger", 20)) / 2)
         fuel_cost = 0 if god else max(1, int(map_distance / 14))
         spend(conn, pid, fuel=fuel_cost, god=god)
@@ -18504,35 +25723,67 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message":"Starter ship launched. It is permanent and always available."}
 
     if t == "insure_ship":
-        ship = row(conn,"SELECT * FROM ships WHERE id=? AND player_id=?", (int(payload["ship_id"]),pid))
+        ship = row(conn,"""
+            SELECT s.*, t.code as template_code, t.name as template_name, t.class_name, t.role, t.price,
+                   t.slots_json, t.ship_tier, t.upkeep_cost, t.starter as template_starter
+            FROM ships s JOIN ship_templates t ON t.id=s.template_id
+            WHERE s.id=? AND s.player_id=?
+        """, (int(payload["ship_id"]),pid))
         if not ship: raise HTTPException(404,"Ship not found")
-        tier = payload.get("tier","standard")
-        rate = {"basic":0.03,"standard":0.06,"premium":0.10}.get(tier,0.06)
-        cost = int(ship["max_hull"] * 18 * rate)
+        if int(ship.get("destroyed") or 0):
+            raise HTTPException(400, "Destroyed ships cannot buy new insurance")
+        if int(ship.get("starter") or ship.get("template_starter") or 0):
+            raise HTTPException(400, "Starter ships are permanent and do not need insurance")
+        tier = str(payload.get("tier","standard") or "standard").lower()
+        cfg = insurance_tier_cfg(tier)
+        if not cfg.get("buyable"):
+            raise HTTPException(400, "That insurance tier cannot be purchased")
+        insurance = ship_insurance_payload(conn, ship)
+        option = next((o for o in insurance.get("options", []) if o.get("key") == tier), None)
+        if not option:
+            raise HTTPException(400, "Insurance tier not available")
+        if option.get("active"):
+            return {"message": f"Ship already has {option.get('label')} insurance.", "insurance": insurance}
+        cost = max(0, int(option.get("cost") or 0))
         spend(conn,pid,credits=cost,god=god)
-        if not god: log_money_sink(conn, pid, "ship_insurance", cost, f"Insurance premium: {tier}")
+        if not god and cost:
+            log_money_sink(conn, pid, "ship_insurance", cost, f"Insurance premium: {tier}")
         conn.execute("UPDATE ships SET insured=1, insurance_tier=? WHERE id=?", (tier,ship["id"]))
-        return {"message":f"Ship insured: {tier}. Cost {cost:,}."}
+        updated = row(conn,"""
+            SELECT s.*, t.code as template_code, t.name as template_name, t.class_name, t.role, t.price,
+                   t.slots_json, t.ship_tier, t.upkeep_cost, t.starter as template_starter
+            FROM ships s JOIN ship_templates t ON t.id=s.template_id
+            WHERE s.id=? AND s.player_id=?
+        """, (ship["id"], pid))
+        add_event(conn, pid, "hangar", f"Purchased {cfg.get('label') or tier} insurance for {ship['name']} at {cost:,} credits.", {"shipId": ship["id"], "tier": tier, "cost": cost})
+        return {"message":f"Ship insured: {cfg.get('label') or tier}. Cost {cost:,} credits.", "insurance": ship_insurance_payload(conn, updated)}
 
     if t == "repair_refuel":
+        current_planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
+        if not god and not planet_has_refuel_shop(current_planet):
+            raise HTTPException(400, "Refueling and full service are only available at inhabitable planets or stations with a fuel shop.")
         ship = row(conn,"SELECT * FROM ships WHERE id=?", (player["active_ship_id"],))
         if not ship:
             raise HTTPException(400, "No active ship to service")
         ensure_ship_parts(conn)
+        sync_player_fuel_capacity(conn, pid)
+        player_now = get_player(conn, pid)
         part_missing = sum(r["max_hp"] - r["hp"] for r in rows(conn, "SELECT * FROM ship_parts WHERE ship_id=?", (ship["id"],)))
         module_missing = sum(100 - r["durability"] for r in rows(conn, "SELECT * FROM ship_modules WHERE ship_id=?", (ship["id"],)))
-        fuel_missing = max(0, player["max_fuel"] - player["fuel"])
-        cost = max(0, (ship["max_hull"]-ship["hull"])*2 + (ship["max_shield"]-ship["shield"]) + part_missing*4 + module_missing*75 + fuel_missing*10)
+        fuel_missing = max(0, int(player_now["max_fuel"]) - int(player_now["fuel"]))
+        fuel_unit = fuel_shop_unit_price(conn, player_now)
+        cost = max(0, (ship["max_hull"]-ship["hull"])*2 + (ship["max_shield"]-ship["shield"]) + part_missing*4 + module_missing*75 + fuel_missing*fuel_unit)
         spend(conn,pid,credits=cost,god=god)
-        if not god: log_money_sink(conn, pid, "ship_repair_refuel", cost, "Ship hull, shields, part HP, modules, and fuel restored")
+        if not god: log_money_sink(conn, pid, "ship_repair_refuel", cost, "Ship hull, shields, part HP, modules, and fuel restored at a refuel shop")
         conn.execute("UPDATE ships SET hull=max_hull, shield=max_shield WHERE id=?", (ship["id"],))
         conn.execute("UPDATE ship_parts SET hp=max_hp WHERE ship_id=?", (ship["id"],))
         conn.execute("UPDATE ship_modules SET durability=100 WHERE ship_id=?", (ship["id"],))
         conn.execute("UPDATE players SET fuel=max_fuel WHERE id=?", (pid,))
+        app_state_put_json(conn, fuel_warning_key(pid), {"state": "normal", "updated_at": iso()})
         active = row(conn,"SELECT * FROM player_jobs WHERE player_id=? AND active=1", (pid,))
         if active and active["job_code"] == "engineer":
             increment_job_metrics(conn,pid,"engineer",{"repairs":1,"repair_value":cost})
-        return {"message":f"Ship fully repaired, modules restored, parts rebuilt, and fuel topped off. Cost {cost:,}."}
+        return {"message":f"Ship fully repaired, modules restored, parts rebuilt, and fuel topped off at {current_planet.get('name') if current_planet else 'the fuel shop'}. Fuel unit cost {fuel_unit:,}. Total cost {cost:,}.", "fuel_unit_cost": fuel_unit}
 
     if t == "buy_module":
         mt = row(conn,"SELECT * FROM module_templates WHERE code=?", (payload.get("code"),))
@@ -18707,11 +25958,11 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             prev = row(conn, "SELECT * FROM player_skills WHERE player_id=? AND skill_key=?", (pid, prev_key))
             if not prev or int(prev.get("level") or 0) <= 0:
                 raise HTTPException(400, "Previous skill node required")
-        cost = node["cost_base"] * (lvl+1)
+        cost = skill_point_cost_for_next_level(lvl)
         if player["skill_points"] < cost and not god: raise HTTPException(400,"Not enough skill points")
         if not god: conn.execute("UPDATE players SET skill_points=skill_points-? WHERE id=?", (cost,pid))
         conn.execute("INSERT INTO player_skills (player_id,skill_key,level) VALUES (?,?,1) ON CONFLICT(player_id,skill_key) DO UPDATE SET level=level+1", (pid,key))
-        return {"message":f"Unlocked {node['name']} level {lvl+1}."}
+        return {"message":f"Unlocked {node['name']} level {lvl+1} for {cost} skill point(s)."}
 
     if t == "place_player_base":
         if row(conn, "SELECT id FROM player_bases WHERE player_id=? AND status='active'", (pid,)):
@@ -18978,3 +26229,2968 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message":f"Simulated {simulated} NPC human-like market/combat/trade/customs actions."}
 
     raise HTTPException(400, f"Unknown action: {t}")
+
+# NOVA_FLOATING_CHAT_MESSAGES_PATCH_V1
+# Floating chat + direct messages. Isolated from build_state so closed chat adds no state-poll cost.
+import time as _nova_chat_time
+import json as _nova_chat_json
+import sqlite3 as _nova_chat_sqlite3
+from pathlib import Path as _NovaChatPath
+from datetime import datetime as _NovaChatDatetime, timezone as _NovaChatTimezone
+try:
+    from fastapi import HTTPException as _NovaChatHTTPException
+except Exception:  # pragma: no cover
+    _NovaChatHTTPException = Exception
+try:
+    from pydantic import BaseModel as _NovaChatBaseModel
+except Exception:  # pragma: no cover
+    _NovaChatBaseModel = object
+
+
+class NovaChatPostRequest(_NovaChatBaseModel):
+    channel: str = 'global'
+    message: str
+    player_id: int | None = None
+    username: str | None = None
+    faction_id: int | str | None = None
+    faction: str | None = None
+    guild_id: int | str | None = None
+    guild: str | None = None
+
+
+class NovaDirectMessageRequest(_NovaChatBaseModel):
+    player_id: int | None = None
+    recipient_id: int | None = None
+    recipient_name: str | None = None
+    body: str
+
+
+def _nova_chat_now_iso() -> str:
+    return _NovaChatDatetime.now(_NovaChatTimezone.utc).isoformat()
+
+
+def _nova_chat_json_dumps(value) -> str:
+    return _nova_chat_json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+
+
+def _nova_chat_raise(status_code: int, detail: str):
+    try:
+        raise _NovaChatHTTPException(status_code=status_code, detail=detail)
+    except TypeError:
+        raise _NovaChatHTTPException(detail)
+
+
+def _nova_chat_candidate_db_paths() -> list[_NovaChatPath]:
+    found: list[_NovaChatPath] = []
+    for name in ('DB_PATH', 'DATABASE_PATH', 'DATABASE', 'SQLITE_PATH'):
+        value = globals().get(name)
+        if value:
+            try:
+                p = _NovaChatPath(str(value))
+                if p.exists() or p.suffix == '.db':
+                    found.append(p)
+            except Exception:
+                pass
+    roots = []
+    try:
+        roots.append(_NovaChatPath(__file__).resolve().parent)
+        roots.extend(_NovaChatPath(__file__).resolve().parents)
+    except Exception:
+        roots.append(_NovaChatPath.cwd())
+    names = ('nova_frontiers.db', 'nova.db', 'game.db', 'database.db', 'app.db', 'db.sqlite3')
+    for root in roots:
+        for candidate in names:
+            p = root / candidate
+            if p.exists():
+                found.append(p)
+        try:
+            for p in root.glob('*.db'):
+                found.append(p)
+        except Exception:
+            pass
+    out: list[_NovaChatPath] = []
+    seen = set()
+    for p in found:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _nova_chat_open_conn():
+    for fn_name in ('get_conn', 'get_connection', 'connect_db', 'db_connect', 'open_db'):
+        fn = globals().get(fn_name)
+        if callable(fn):
+            try:
+                conn = fn()
+                if hasattr(conn, 'execute'):
+                    try:
+                        conn.row_factory = _nova_chat_sqlite3.Row
+                    except Exception:
+                        pass
+                    return conn
+            except TypeError:
+                pass
+            except Exception:
+                pass
+    for p in _nova_chat_candidate_db_paths():
+        try:
+            conn = _nova_chat_sqlite3.connect(str(p), check_same_thread=False)
+            conn.row_factory = _nova_chat_sqlite3.Row
+            return conn
+        except Exception:
+            continue
+    _nova_chat_raise(500, 'Chat database connection could not be resolved')
+
+
+def _nova_chat_rows(conn, sql: str, params: tuple = ()) -> list[dict]:
+    cur = conn.execute(sql, params)
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _nova_chat_row(conn, sql: str, params: tuple = ()) -> dict | None:
+    cur = conn.execute(sql, params)
+    r = cur.fetchone()
+    return dict(r) if r else None
+
+
+def _nova_chat_table_cols(conn, table: str) -> set[str]:
+    try:
+        return {str(r['name']) for r in _nova_chat_rows(conn, f'PRAGMA table_info({table})')}
+    except Exception:
+        return set()
+
+
+def _nova_chat_first_col(cols: set[str], options: tuple[str, ...]) -> str | None:
+    for c in options:
+        if c in cols:
+            return c
+    return None
+
+
+def _nova_chat_ensure(conn) -> None:
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel TEXT NOT NULL,
+            faction_key TEXT,
+            guild_key TEXT,
+            user_id INTEGER,
+            username TEXT NOT NULL,
+            message TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            created_ts REAL NOT NULL
+        )
+    ''')
+    chat_cols = _nova_chat_table_cols(conn, 'chat_messages')
+    for col, ddl in {
+        'channel': "TEXT NOT NULL DEFAULT 'global'",
+        'faction_key': 'TEXT',
+        'guild_key': 'TEXT',
+        'username': "TEXT NOT NULL DEFAULT 'Unknown Pilot'",
+        'created_ts': 'REAL NOT NULL DEFAULT 0',
+    }.items():
+        if col not in chat_cols:
+            conn.execute(f'ALTER TABLE chat_messages ADD COLUMN {col} {ddl}')
+            chat_cols.add(col)
+    if {'channel', 'username', 'created_ts'}.issubset(chat_cols):
+        conn.execute("UPDATE chat_messages SET channel='global' WHERE channel IS NULL OR channel=''")
+        if 'sender_name' in chat_cols:
+            conn.execute("UPDATE chat_messages SET username=COALESCE(NULLIF(username, ''), NULLIF(sender_name, ''), 'Unknown Pilot')")
+        conn.execute("UPDATE chat_messages SET created_ts=COALESCE(NULLIF(created_ts, 0), strftime('%s', created_at), 0)")
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_messages_scope ON chat_messages(channel, faction_key, guild_key, id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_chat_messages_user_time ON chat_messages(user_id, created_ts)')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS chat_rate_limits (
+            user_id INTEGER PRIMARY KEY,
+            cooldown_until REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS direct_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL,
+            sender_name TEXT NOT NULL,
+            recipient_id INTEGER NOT NULL,
+            recipient_name TEXT NOT NULL,
+            body TEXT NOT NULL,
+            read_at TEXT,
+            created_at TEXT NOT NULL,
+            created_ts REAL NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_direct_messages_pair ON direct_messages(sender_id, recipient_id, id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_direct_messages_recipient ON direct_messages(recipient_id, read_at, id)')
+    conn.commit()
+
+
+def _nova_chat_player_context(conn, player_id=None, fallback: dict | None = None) -> dict:
+    fallback = dict(fallback or {})
+    ctx = {
+        'id': player_id or fallback.get('player_id') or fallback.get('id'),
+        'username': fallback.get('username') or fallback.get('name') or 'Unknown Pilot',
+        'faction_key': fallback.get('faction_id') or fallback.get('faction') or '',
+        'guild_key': fallback.get('guild_id') or fallback.get('guild') or '',
+    }
+    pid = ctx.get('id')
+    if not pid:
+        return ctx
+    cols = _nova_chat_table_cols(conn, 'players')
+    if not cols:
+        return ctx
+    name_col = _nova_chat_first_col(cols, ('username', 'name', 'display_name', 'captain_name', 'pilot_name'))
+    faction_col = _nova_chat_first_col(cols, ('faction_id', 'faction', 'faction_code', 'faction_name'))
+    guild_col = _nova_chat_first_col(cols, ('guild_id', 'guild', 'guild_name', 'corporation_id', 'corp_id'))
+    select_parts = ['id']
+    if name_col:
+        select_parts.append(f'{name_col} AS username')
+    if faction_col:
+        select_parts.append(f'{faction_col} AS faction_key')
+    if guild_col:
+        select_parts.append(f'{guild_col} AS guild_key')
+    try:
+        row_data = _nova_chat_row(conn, f"SELECT {', '.join(select_parts)} FROM players WHERE id=?", (pid,))
+    except Exception:
+        row_data = None
+    if row_data:
+        ctx.update({k: row_data.get(k) for k in ('id', 'username', 'faction_key', 'guild_key') if row_data.get(k) is not None})
+    return ctx
+
+
+def _nova_chat_scope(channel: str, ctx: dict) -> tuple[str, str, str]:
+    ch = str(channel or 'global').strip().lower()
+    if ch not in {'global', 'faction', 'guild'}:
+        _nova_chat_raise(400, 'Invalid chat channel')
+    faction_key = ''
+    guild_key = ''
+    if ch == 'faction':
+        faction_key = str(ctx.get('faction_key') or '')
+        if not faction_key:
+            _nova_chat_raise(400, 'Faction chat requires a faction')
+    if ch == 'guild':
+        guild_key = str(ctx.get('guild_key') or '')
+        if not guild_key:
+            _nova_chat_raise(400, 'Guild chat requires a guild')
+    return ch, faction_key, guild_key
+
+
+def _nova_chat_public_message(row_data: dict) -> dict:
+    return {
+        'id': row_data.get('id'),
+        'channel': row_data.get('channel'),
+        'user_id': row_data.get('user_id'),
+        'username': row_data.get('username'),
+        'message': row_data.get('message'),
+        'created_at': row_data.get('created_at'),
+    }
+
+
+@app.get('/api/chat/messages')
+def nova_chat_messages(channel: str = 'global', player_id: int | None = None, after_id: int | None = None, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_chat_open_conn()
+    try:
+        _nova_chat_ensure(conn)
+        ctx = _nova_chat_player_context(conn, player_id)
+        ch, faction_key, guild_key = _nova_chat_scope(channel, ctx)
+        params: list = [ch, faction_key, guild_key]
+        where = 'channel=? AND COALESCE(faction_key, \'\')=? AND COALESCE(guild_key, \'\')=?'
+        if after_id:
+            where += ' AND id>?'
+            params.append(after_id)
+        items = _nova_chat_rows(
+            conn,
+            f'''SELECT id, channel, user_id, username, message, created_at
+                FROM chat_messages
+                WHERE {where}
+                ORDER BY id DESC
+                LIMIT 100''',
+            tuple(params),
+        )
+        items = list(reversed(items))
+        return {'messages': [_nova_chat_public_message(r) for r in items], 'server_time': _nova_chat_now_iso()}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.post('/api/chat/messages')
+def nova_chat_send(req: NovaChatPostRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    message = str(req.message or '').strip()
+    if not message:
+        _nova_chat_raise(400, 'Message required')
+    if len(message) > 500:
+        message = message[:500]
+    now_ts = _nova_chat_time.time()
+    conn = _nova_chat_open_conn()
+    try:
+        _nova_chat_ensure(conn)
+        ctx = _nova_chat_player_context(conn, req.player_id, req.dict() if hasattr(req, 'dict') else req.__dict__)
+        user_id = ctx.get('id')
+        if not user_id:
+            _nova_chat_raise(401, 'Player required')
+        ch, faction_key, guild_key = _nova_chat_scope(req.channel, ctx)
+        limit = _nova_chat_row(conn, 'SELECT cooldown_until FROM chat_rate_limits WHERE user_id=?', (user_id,))
+        if limit and float(limit.get('cooldown_until') or 0) > now_ts:
+            remaining = int(float(limit.get('cooldown_until')) - now_ts) + 1
+            _nova_chat_raise(429, f'Chat cooldown active for {remaining}s')
+        last_msg = _nova_chat_row(conn, 'SELECT created_ts FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 1', (user_id,))
+        if last_msg and now_ts - float(last_msg.get('created_ts') or 0) < 3:
+            _nova_chat_raise(429, 'Chat is limited to 1 message every 3 seconds')
+        recent_count = _nova_chat_row(conn, 'SELECT COUNT(*) AS n FROM chat_messages WHERE user_id=? AND created_ts>=?', (user_id, now_ts - 20))
+        if int((recent_count or {}).get('n') or 0) >= 5:
+            conn.execute(
+                'INSERT OR REPLACE INTO chat_rate_limits(user_id,cooldown_until,updated_at) VALUES(?,?,?)',
+                (user_id, now_ts + 60, _nova_chat_now_iso()),
+            )
+            conn.commit()
+            _nova_chat_raise(429, 'Too many messages. Chat cooldown active for 60s')
+        created_at = _nova_chat_now_iso()
+        username = str(ctx.get('username') or req.username or 'Unknown Pilot')[:80]
+        chat_cols = _nova_chat_table_cols(conn, 'chat_messages')
+        insert_values = {
+            'channel': ch,
+            'faction_key': faction_key,
+            'guild_key': guild_key,
+            'user_id': user_id,
+            'player_id': user_id,
+            'sender_type': 'player',
+            'sender_name': username,
+            'avatar_id': 'default',
+            'username': username,
+            'message': message,
+            'created_at': created_at,
+            'created_ts': now_ts,
+        }
+        insert_cols = [c for c in insert_values if c in chat_cols]
+        cur = conn.execute(
+            f"INSERT INTO chat_messages({','.join(insert_cols)}) VALUES({','.join(['?'] * len(insert_cols))})",
+            tuple(insert_values[c] for c in insert_cols),
+        )
+        conn.execute(
+            '''DELETE FROM chat_messages
+               WHERE channel=? AND COALESCE(faction_key, '')=? AND COALESCE(guild_key, '')=?
+                 AND id NOT IN (
+                    SELECT id FROM chat_messages
+                    WHERE channel=? AND COALESCE(faction_key, '')=? AND COALESCE(guild_key, '')=?
+                    ORDER BY id DESC LIMIT 100
+                 )''',
+            (ch, faction_key, guild_key, ch, faction_key, guild_key),
+        )
+        conn.commit()
+        return {'ok': True, 'message': {'id': cur.lastrowid, 'channel': ch, 'user_id': user_id, 'username': username, 'message': message, 'created_at': created_at}}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get('/api/messages/threads')
+def nova_direct_message_threads(player_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_chat_open_conn()
+    try:
+        _nova_chat_ensure(conn)
+        ctx = _nova_chat_player_context(conn, player_id)
+        user_id = ctx.get('id')
+        if not user_id:
+            _nova_chat_raise(401, 'Player required')
+        rows_data = _nova_chat_rows(conn, '''
+            SELECT dm.*,
+                   CASE WHEN sender_id=? THEN recipient_id ELSE sender_id END AS other_id,
+                   CASE WHEN sender_id=? THEN recipient_name ELSE sender_name END AS other_name
+            FROM direct_messages dm
+            JOIN (
+                SELECT CASE WHEN sender_id=? THEN recipient_id ELSE sender_id END AS other_id, MAX(id) AS max_id
+                FROM direct_messages
+                WHERE sender_id=? OR recipient_id=?
+                GROUP BY CASE WHEN sender_id=? THEN recipient_id ELSE sender_id END
+            ) latest ON latest.max_id = dm.id
+            ORDER BY dm.id DESC
+        ''', (user_id, user_id, user_id, user_id, user_id, user_id))
+        unread = _nova_chat_rows(conn, '''
+            SELECT sender_id AS other_id, COUNT(*) AS unread
+            FROM direct_messages
+            WHERE recipient_id=? AND read_at IS NULL
+            GROUP BY sender_id
+        ''', (user_id,))
+        unread_map = {str(r['other_id']): int(r['unread']) for r in unread}
+        return {'threads': [{
+            'other_id': r.get('other_id'),
+            'other_name': r.get('other_name'),
+            'last_body': r.get('body'),
+            'last_at': r.get('created_at'),
+            'unread': unread_map.get(str(r.get('other_id')), 0),
+        } for r in rows_data]}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.get('/api/messages/thread')
+def nova_direct_message_thread(player_id: int, other_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_chat_open_conn()
+    try:
+        _nova_chat_ensure(conn)
+        ctx = _nova_chat_player_context(conn, player_id)
+        user_id = ctx.get('id')
+        if not user_id:
+            _nova_chat_raise(401, 'Player required')
+        items = _nova_chat_rows(conn, '''
+            SELECT id, sender_id, sender_name, recipient_id, recipient_name, body, read_at, created_at
+            FROM direct_messages
+            WHERE (sender_id=? AND recipient_id=?) OR (sender_id=? AND recipient_id=?)
+            ORDER BY id ASC
+            LIMIT 200
+        ''', (user_id, other_id, other_id, user_id))
+        conn.execute('UPDATE direct_messages SET read_at=COALESCE(read_at, ?) WHERE sender_id=? AND recipient_id=?', (_nova_chat_now_iso(), other_id, user_id))
+        conn.commit()
+        return {'messages': items}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.post('/api/messages/send')
+def nova_direct_message_send(req: NovaDirectMessageRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    body = str(req.body or '').strip()
+    if not body:
+        _nova_chat_raise(400, 'Message required')
+    if len(body) > 2000:
+        body = body[:2000]
+    if not req.recipient_id and not req.recipient_name:
+        _nova_chat_raise(400, 'Recipient required')
+    conn = _nova_chat_open_conn()
+    try:
+        _nova_chat_ensure(conn)
+        sender = _nova_chat_player_context(conn, req.player_id)
+        sender_id = sender.get('id')
+        if not sender_id:
+            _nova_chat_raise(401, 'Player required')
+        recipient = None
+        if req.recipient_id:
+            recipient = _nova_chat_player_context(conn, req.recipient_id)
+        elif req.recipient_name:
+            cols = _nova_chat_table_cols(conn, 'players')
+            name_col = _nova_chat_first_col(cols, ('username', 'name', 'display_name', 'captain_name', 'pilot_name'))
+            if name_col:
+                try:
+                    r = _nova_chat_row(conn, f'SELECT id, {name_col} AS username FROM players WHERE lower({name_col})=lower(?) LIMIT 1', (req.recipient_name,))
+                    if r:
+                        recipient = {'id': r.get('id'), 'username': r.get('username')}
+                except Exception:
+                    recipient = None
+        if not recipient or not recipient.get('id'):
+            _nova_chat_raise(404, 'Recipient not found')
+        created_at = _nova_chat_now_iso()
+        cur = conn.execute(
+            '''INSERT INTO direct_messages(sender_id,sender_name,recipient_id,recipient_name,body,created_at,created_ts)
+               VALUES(?,?,?,?,?,?,?)''',
+            (sender_id, str(sender.get('username') or 'Unknown Pilot'), recipient.get('id'), str(recipient.get('username') or req.recipient_name or 'Pilot'), body, created_at, _nova_chat_time.time()),
+        )
+        conn.commit()
+        return {'ok': True, 'id': cur.lastrowid, 'created_at': created_at}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+# NOVA_GUILD_SYSTEM_REWRITE_V1
+# Guild system rewrite foundation.
+# This block is intentionally isolated from /api/state. Guild state is loaded only from dedicated /api/guild/* endpoints.
+# Core loop: activity/contribution -> guild XP -> level/research -> armory/treasury -> war/planet influence.
+import json as _nova_guild_json
+import sqlite3 as _nova_guild_sqlite3
+import time as _nova_guild_time
+from pathlib import Path as _NovaGuildPath
+from datetime import datetime as _NovaGuildDatetime, timezone as _NovaGuildTimezone
+try:
+    from fastapi import HTTPException as _NovaGuildHTTPException
+except Exception:  # pragma: no cover
+    _NovaGuildHTTPException = Exception
+try:
+    from pydantic import BaseModel as _NovaGuildBaseModel
+except Exception:  # pragma: no cover
+    _NovaGuildBaseModel = object
+
+
+class NovaGuildCreateRequest(_NovaGuildBaseModel):
+    player_id: int
+    name: str
+    tag: str
+    description: str = ''
+    status: str = 'public'
+
+
+class NovaGuildApplyRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    message: str = ''
+
+
+class NovaGuildInviteRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    recipient_id: int = None
+    recipient_name: str = None
+    message: str = ''
+
+
+class NovaGuildInviteRespondRequest(_NovaGuildBaseModel):
+    player_id: int
+    invite_id: int
+    accept: bool
+
+
+class NovaGuildLeaveRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+
+
+class NovaGuildKickRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    target_player_id: int
+
+
+class NovaGuildRankUpdateRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    target_player_id: int
+    rank_id: int
+
+
+class NovaGuildContributionRequest(_NovaGuildBaseModel):
+    player_id: int
+    contribution_type: str = 'activity'
+    xp: int = 0
+    quantity: int = 1
+    source: str = 'manual'
+    metadata: dict = {}
+
+
+class NovaGuildResearchUnlockRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    research_key: str
+
+
+class NovaGuildArmoryMoveRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    planet_id: int = None
+    item_type: str = 'material'
+    item_key: str
+    item_name: str = ''
+    quantity: int = 1
+    tier: str = ''
+    quality: str = ''
+
+
+class NovaGuildTreasuryDepositRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    amount: int
+
+
+class NovaGuildWarDeclareRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    target_type: str = 'guild'
+    target_guild_id: int = None
+    target_planet_id: int = None
+    reason: str = ''
+
+
+class NovaGuildWarSurrenderRequest(_NovaGuildBaseModel):
+    player_id: int
+    guild_id: int
+    war_id: int
+
+
+class NovaGuildSettingsRequest(_NovaGuildBaseModel):
+    player_id: int = None
+    settings: dict = {}
+
+
+def _nova_guild_now_iso() -> str:
+    return _NovaGuildDatetime.now(_NovaGuildTimezone.utc).isoformat()
+
+
+def _nova_guild_json_dumps(value) -> str:
+    return _nova_guild_json.dumps(value if value is not None else {}, ensure_ascii=False, separators=(',', ':'))
+
+
+def _nova_guild_req_dict(req) -> dict:
+    if hasattr(req, 'model_dump'):
+        try:
+            return req.model_dump()
+        except Exception:
+            pass
+    if hasattr(req, 'dict'):
+        try:
+            return req.dict()
+        except Exception:
+            pass
+    return getattr(req, '__dict__', {}) or {}
+
+
+def _nova_guild_raise(status_code: int, detail: str):
+    try:
+        raise _NovaGuildHTTPException(status_code=status_code, detail=detail)
+    except TypeError:
+        raise _NovaGuildHTTPException(detail)
+
+
+def _nova_guild_candidate_db_paths() -> list:
+    found = []
+    for name in ('DB_PATH', 'DATABASE_PATH', 'DATABASE', 'SQLITE_PATH'):
+        value = globals().get(name)
+        if value:
+            try:
+                p = _NovaGuildPath(str(value))
+                if p.exists() or p.suffix == '.db':
+                    found.append(p)
+            except Exception:
+                pass
+    roots = []
+    try:
+        roots.append(_NovaGuildPath(__file__).resolve().parent)
+        roots.extend(_NovaGuildPath(__file__).resolve().parents)
+    except Exception:
+        roots.append(_NovaGuildPath.cwd())
+    names = ('nova_frontiers.db', 'nova.db', 'game.db', 'database.db', 'app.db', 'db.sqlite3')
+    for root in roots:
+        for candidate in names:
+            p = root / candidate
+            if p.exists():
+                found.append(p)
+        try:
+            for p in root.glob('*.db'):
+                found.append(p)
+        except Exception:
+            pass
+    out = []
+    seen = set()
+    for p in found:
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+
+def _nova_guild_open_conn():
+    for fn_name in ('get_conn', 'get_connection', 'connect_db', 'db_connect', 'open_db'):
+        fn = globals().get(fn_name)
+        if callable(fn):
+            try:
+                conn = fn()
+                if hasattr(conn, 'execute'):
+                    try:
+                        conn.row_factory = _nova_guild_sqlite3.Row
+                    except Exception:
+                        pass
+                    return conn
+            except TypeError:
+                pass
+            except Exception:
+                pass
+    for p in _nova_guild_candidate_db_paths():
+        try:
+            conn = _nova_guild_sqlite3.connect(str(p), timeout=30, check_same_thread=False)
+            conn.row_factory = _nova_guild_sqlite3.Row
+            try:
+                conn.execute('PRAGMA foreign_keys=ON')
+                conn.execute('PRAGMA journal_mode=WAL')
+                conn.execute('PRAGMA busy_timeout=30000')
+            except Exception:
+                pass
+            return conn
+        except Exception:
+            continue
+    _nova_guild_raise(500, 'Guild database connection could not be resolved')
+
+
+def _nova_guild_rows(conn, sql: str, params: tuple = ()) -> list:
+    cur = conn.execute(sql, params)
+    out = []
+    for r in cur.fetchall():
+        try:
+            out.append(dict(r))
+        except Exception:
+            cols = [d[0] for d in cur.description or []]
+            out.append({cols[i]: r[i] for i in range(min(len(cols), len(r)))})
+    return out
+
+
+def _nova_guild_row(conn, sql: str, params: tuple = ()):
+    rows = _nova_guild_rows(conn, sql, params)
+    return rows[0] if rows else None
+
+
+def _nova_guild_table_exists(conn, table: str) -> bool:
+    try:
+        return bool(_nova_guild_row(conn, 'SELECT 1 FROM sqlite_master WHERE type="table" AND name=? LIMIT 1', (table,)))
+    except Exception:
+        return False
+
+
+def _nova_guild_cols(conn, table: str) -> set:
+    try:
+        return {str(r.get('name')) for r in _nova_guild_rows(conn, f'PRAGMA table_info({table})')}
+    except Exception:
+        return set()
+
+
+def _nova_guild_first_col(cols: set, choices: tuple):
+    for c in choices:
+        if c in cols:
+            return c
+    return None
+
+
+def _nova_guild_int(v, default=0) -> int:
+    try:
+        if v is None or v == '':
+            return int(default)
+        return int(float(v))
+    except Exception:
+        return int(default)
+
+
+def _nova_guild_float(v, default=0.0) -> float:
+    try:
+        if v is None or v == '':
+            return float(default)
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _nova_guild_clamp_text(v, max_len: int) -> str:
+    return str(v or '').strip()[:max_len]
+
+
+def _nova_guild_setting(conn, key: str, default: str = '') -> str:
+    nova_guild_ensure_tables(conn)
+    row = _nova_guild_row(conn, 'SELECT value FROM guild_settings WHERE key=?', (key,))
+    return str((row or {}).get('value') or default)
+
+
+def _nova_guild_settings(conn) -> dict:
+    nova_guild_ensure_tables(conn)
+    return {r['key']: r['value'] for r in _nova_guild_rows(conn, 'SELECT key, value FROM guild_settings')}
+
+
+def _nova_guild_xp_required(level: int) -> int:
+    # Capped first pass; easy to swap to settings table later.
+    return {1: 0, 2: 2500, 3: 8000, 4: 18000, 5: 36000}.get(int(level), 36000 + (int(level) - 5) * 25000)
+
+
+def _nova_guild_member_cap(level: int) -> int:
+    return max(10, min(50, int(level) * 10))
+
+
+def nova_guild_ensure_tables(conn) -> None:
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )''')
+    defaults = {
+        'guild_creation_cost': '25000',
+        'guild_max_level': '5',
+        'daily_contribution_soft_cap': '2500',
+        'daily_contribution_overcap_multiplier': '0.20',
+        'new_member_armory_lock_seconds': '86400',
+        'guild_tax_max_percent': '10',
+        'guild_war_prep_seconds': '1800',
+        'guild_war_duration_seconds': '86400',
+        'guild_war_cooldown_seconds': '172800',
+        'guild_war_base_cost': '50000',
+        'planet_war_base_cost': '150000',
+        'planet_war_duration_seconds': '172800',
+        'planet_war_min_security': '0.0'
+    }
+    now = _nova_guild_now_iso()
+    for k, v in defaults.items():
+        conn.execute('INSERT OR IGNORE INTO guild_settings(key,value,updated_at) VALUES(?,?,?)', (k, v, now))
+
+    conn.execute('''CREATE TABLE IF NOT EXISTS guilds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        tag TEXT NOT NULL UNIQUE,
+        description TEXT DEFAULT '',
+        faction_id TEXT,
+        founder_player_id INTEGER NOT NULL,
+        leader_player_id INTEGER NOT NULL,
+        home_planet_id INTEGER,
+        level INTEGER NOT NULL DEFAULT 1,
+        xp INTEGER NOT NULL DEFAULT 0,
+        research_points INTEGER NOT NULL DEFAULT 0,
+        treasury INTEGER NOT NULL DEFAULT 0,
+        max_members INTEGER NOT NULL DEFAULT 10,
+        status TEXT NOT NULL DEFAULT 'public',
+        emblem TEXT DEFAULT '',
+        motd TEXT DEFAULT '',
+        tax_percent REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_ranks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        sort_order INTEGER NOT NULL,
+        can_invite INTEGER NOT NULL DEFAULT 0,
+        can_accept_applications INTEGER NOT NULL DEFAULT 0,
+        can_kick INTEGER NOT NULL DEFAULT 0,
+        can_promote INTEGER NOT NULL DEFAULT 0,
+        can_demote INTEGER NOT NULL DEFAULT 0,
+        can_manage_ranks INTEGER NOT NULL DEFAULT 0,
+        can_declare_war INTEGER NOT NULL DEFAULT 0,
+        can_manage_war INTEGER NOT NULL DEFAULT 0,
+        can_manage_treasury INTEGER NOT NULL DEFAULT 0,
+        can_start_research INTEGER NOT NULL DEFAULT 0,
+        can_cancel_research INTEGER NOT NULL DEFAULT 0,
+        can_manage_armory INTEGER NOT NULL DEFAULT 0,
+        can_withdraw_armory INTEGER NOT NULL DEFAULT 0,
+        can_deposit_armory INTEGER NOT NULL DEFAULT 1,
+        can_edit_motd INTEGER NOT NULL DEFAULT 0,
+        can_disband INTEGER NOT NULL DEFAULT 0,
+        is_default INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(guild_id, name)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_members (
+        guild_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        rank_id INTEGER NOT NULL,
+        joined_at TEXT NOT NULL,
+        contribution_total INTEGER NOT NULL DEFAULT 0,
+        last_left_at TEXT,
+        PRIMARY KEY(guild_id, player_id)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        message TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        UNIQUE(guild_id, player_id, status)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        sender_player_id INTEGER NOT NULL,
+        recipient_player_id INTEGER NOT NULL,
+        message TEXT DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        resolved_at TEXT
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_contributions_daily (
+        guild_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        day TEXT NOT NULL,
+        material_xp INTEGER NOT NULL DEFAULT 0,
+        money_xp INTEGER NOT NULL DEFAULT 0,
+        combat_xp INTEGER NOT NULL DEFAULT 0,
+        crafting_xp INTEGER NOT NULL DEFAULT 0,
+        mission_xp INTEGER NOT NULL DEFAULT 0,
+        war_xp INTEGER NOT NULL DEFAULT 0,
+        other_xp INTEGER NOT NULL DEFAULT 0,
+        raw_xp INTEGER NOT NULL DEFAULT 0,
+        effective_xp INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(guild_id, player_id, day)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_contribution_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        contribution_type TEXT NOT NULL,
+        raw_xp INTEGER NOT NULL,
+        effective_xp INTEGER NOT NULL,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        source TEXT NOT NULL DEFAULT 'activity',
+        metadata_json TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_research_definitions (
+        research_key TEXT PRIMARY KEY,
+        category TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        max_rank INTEGER NOT NULL DEFAULT 5,
+        points_per_rank INTEGER NOT NULL DEFAULT 1,
+        required_guild_level INTEGER NOT NULL DEFAULT 1,
+        bonus_type TEXT NOT NULL,
+        bonus_per_rank REAL NOT NULL DEFAULT 1.0,
+        bonus_cap REAL NOT NULL DEFAULT 5.0,
+        sort_order INTEGER NOT NULL DEFAULT 0
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_research (
+        guild_id INTEGER NOT NULL,
+        research_key TEXT NOT NULL,
+        rank INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(guild_id, research_key)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_armory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        planet_id INTEGER NOT NULL,
+        item_type TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        item_name TEXT DEFAULT '',
+        quantity INTEGER NOT NULL DEFAULT 0,
+        tier TEXT DEFAULT '',
+        quality TEXT DEFAULT '',
+        locked INTEGER NOT NULL DEFAULT 0,
+        deposited_by INTEGER,
+        last_withdrawn_by INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(guild_id, planet_id, item_type, item_key, tier, quality)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_treasury_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        player_id INTEGER,
+        amount INTEGER NOT NULL,
+        balance_after INTEGER NOT NULL,
+        reason TEXT NOT NULL,
+        metadata_json TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_wars (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        attacker_guild_id INTEGER NOT NULL,
+        defender_guild_id INTEGER,
+        target_planet_id INTEGER,
+        target_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        declaration_cost INTEGER NOT NULL,
+        reason TEXT DEFAULT '',
+        declared_by INTEGER NOT NULL,
+        declared_at TEXT NOT NULL,
+        prep_ends_at TEXT,
+        starts_at TEXT,
+        ends_at TEXT,
+        resolved_at TEXT,
+        winner_guild_id INTEGER,
+        metadata_json TEXT DEFAULT '{}'
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_war_scores (
+        war_id INTEGER NOT NULL,
+        guild_id INTEGER NOT NULL,
+        pvp_kills INTEGER NOT NULL DEFAULT 0,
+        npc_kills INTEGER NOT NULL DEFAULT 0,
+        objectives INTEGER NOT NULL DEFAULT 0,
+        cargo_score INTEGER NOT NULL DEFAULT 0,
+        influence_score INTEGER NOT NULL DEFAULT 0,
+        total_score INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(war_id, guild_id)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_planet_influence (
+        planet_id INTEGER NOT NULL,
+        guild_id INTEGER NOT NULL,
+        influence INTEGER NOT NULL DEFAULT 0,
+        war_id INTEGER,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(planet_id, guild_id)
+    )''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS guild_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        actor_player_id INTEGER,
+        action TEXT NOT NULL,
+        target_player_id INTEGER,
+        metadata_json TEXT DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )''')
+    indexes = [
+        'CREATE INDEX IF NOT EXISTS idx_guild_members_player ON guild_members(player_id)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_members_guild ON guild_members(guild_id)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_apps_guild_status ON guild_applications(guild_id,status)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_invites_recipient_status ON guild_invites(recipient_player_id,status)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_contrib_daily_guild_day ON guild_contributions_daily(guild_id,day)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_contrib_events_guild_created ON guild_contribution_events(guild_id,created_at)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_armory_guild_planet ON guild_armory(guild_id,planet_id)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_wars_attacker_status ON guild_wars(attacker_guild_id,status)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_wars_defender_status ON guild_wars(defender_guild_id,status)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_wars_planet_status ON guild_wars(target_planet_id,status)',
+        'CREATE INDEX IF NOT EXISTS idx_guild_logs_guild_created ON guild_logs(guild_id,created_at)',
+    ]
+    for sql in indexes:
+        conn.execute(sql)
+    nova_guild_seed_research(conn)
+    conn.commit()
+
+
+def nova_guild_seed_research(conn) -> None:
+    rows = [
+        ('industry_crafting_speed','Industry','Efficient Fabrication','+1% crafting speed per rank.',5,1,1,'crafting_speed_pct',1,5,10),
+        ('industry_material_efficiency','Industry','Material Discipline','+1% material efficiency per rank.',5,1,2,'material_efficiency_pct',1,5,20),
+        ('mining_yield','Mining','Coordinated Mining','+1% mining yield per rank.',5,1,1,'mining_yield_pct',1,5,30),
+        ('mining_rare_chance','Mining','Deep Survey Methods','+1% rare material chance per rank.',5,1,2,'rare_material_chance_pct',1,5,40),
+        ('processing_output','Refining','Cleaner Refining','+1% processing output per rank.',5,1,1,'processing_output_pct',1,5,50),
+        ('combat_npc_damage','Combat','Fleet Fire Control','+1% damage against NPCs per rank.',5,1,1,'npc_damage_pct',1,5,60),
+        ('combat_shield_recovery','Combat','Shield Discipline','+1% shield recovery per rank.',5,1,2,'shield_recovery_pct',1,5,70),
+        ('defense_turret_durability','Defense','Hardened Emplacements','+1% turret durability on controlled planets per rank.',5,1,3,'turret_durability_pct',1,5,80),
+        ('logistics_fuel_efficiency','Logistics','Route Optimization','+1% travel fuel efficiency per rank.',5,1,1,'fuel_efficiency_pct',1,5,90),
+        ('economy_mission_payout','Economy','Contract Office','+1% mission payout bonus per rank.',5,1,1,'mission_payout_pct',1,5,100),
+        ('exploration_scan_range','Exploration','Signal Cartography','+1% scan range per rank.',5,1,1,'scan_range_pct',1,5,110),
+        ('war_declaration_discount','War','Casus Belli Logistics','-1% war declaration cost per rank.',5,1,3,'war_cost_reduction_pct',1,5,120),
+        ('war_capture_progress','War','Occupation Doctrine','+1% planet capture progress per rank.',5,1,4,'capture_progress_pct',1,5,130),
+    ]
+    for r in rows:
+        conn.execute('''INSERT OR IGNORE INTO guild_research_definitions
+            (research_key,category,name,description,max_rank,points_per_rank,required_guild_level,bonus_type,bonus_per_rank,bonus_cap,sort_order)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)''', r)
+
+
+def _nova_guild_player(conn, player_id: int):
+    if not _nova_guild_table_exists(conn, 'players'):
+        return {'id': player_id, 'username': f'Player {player_id}', 'gold': 0, 'planet_id': None, 'faction_id': None}
+    cols = _nova_guild_cols(conn, 'players')
+    id_col = _nova_guild_first_col(cols, ('id','player_id')) or 'id'
+    name_col = _nova_guild_first_col(cols, ('username','name','display_name','captain_name','pilot_name'))
+    gold_col = _nova_guild_first_col(cols, ('gold','credits','money','balance'))
+    planet_col = _nova_guild_first_col(cols, ('planet_id','current_planet_id','docked_planet_id','location_planet_id'))
+    faction_col = _nova_guild_first_col(cols, ('faction_id','faction','faction_key'))
+    fields = [f'{id_col} AS id']
+    if name_col: fields.append(f'{name_col} AS username')
+    if gold_col: fields.append(f'{gold_col} AS gold')
+    if planet_col: fields.append(f'{planet_col} AS planet_id')
+    if faction_col: fields.append(f'{faction_col} AS faction_id')
+    row = _nova_guild_row(conn, f'SELECT {", ".join(fields)} FROM players WHERE {id_col}=? LIMIT 1', (player_id,))
+    if not row:
+        return None
+    row.setdefault('username', f'Player {player_id}')
+    row.setdefault('gold', 0)
+    row.setdefault('planet_id', None)
+    row.setdefault('faction_id', None)
+    return row
+
+
+def _nova_guild_player_by_name(conn, name: str):
+    if not _nova_guild_table_exists(conn, 'players'):
+        return None
+    cols = _nova_guild_cols(conn, 'players')
+    id_col = _nova_guild_first_col(cols, ('id','player_id')) or 'id'
+    name_col = _nova_guild_first_col(cols, ('username','name','display_name','captain_name','pilot_name'))
+    if not name_col:
+        return None
+    return _nova_guild_row(conn, f'SELECT {id_col} AS id, {name_col} AS username FROM players WHERE lower({name_col})=lower(?) LIMIT 1', (name,))
+
+
+def _nova_guild_update_player_money(conn, player_id: int, delta: int) -> None:
+    if not _nova_guild_table_exists(conn, 'players'):
+        if delta < 0:
+            _nova_guild_raise(500, 'Player money adapter unavailable')
+        return
+    cols = _nova_guild_cols(conn, 'players')
+    id_col = _nova_guild_first_col(cols, ('id','player_id')) or 'id'
+    gold_col = _nova_guild_first_col(cols, ('gold','credits','money','balance'))
+    if not gold_col:
+        if delta < 0:
+            _nova_guild_raise(500, 'Player money column not found')
+        return
+    row = _nova_guild_row(conn, f'SELECT {gold_col} AS gold FROM players WHERE {id_col}=? LIMIT 1', (player_id,))
+    if not row:
+        _nova_guild_raise(404, 'Player not found')
+    current = _nova_guild_int(row.get('gold'), 0)
+    if current + int(delta) < 0:
+        _nova_guild_raise(400, 'Not enough money')
+    conn.execute(f'UPDATE players SET {gold_col}=? WHERE {id_col}=?', (current + int(delta), player_id))
+
+
+def _nova_guild_membership(conn, player_id: int):
+    return _nova_guild_row(conn, '''SELECT gm.*, g.name AS guild_name, g.tag AS guild_tag, gr.name AS rank_name,
+                                           gr.sort_order AS rank_order,
+                                           gr.can_invite, gr.can_accept_applications, gr.can_kick, gr.can_promote,
+                                           gr.can_demote, gr.can_manage_ranks, gr.can_declare_war, gr.can_manage_war,
+                                           gr.can_manage_treasury, gr.can_start_research, gr.can_cancel_research,
+                                           gr.can_manage_armory, gr.can_withdraw_armory, gr.can_deposit_armory,
+                                           gr.can_edit_motd, gr.can_disband
+                                    FROM guild_members gm
+                                    JOIN guilds g ON g.id=gm.guild_id AND g.deleted_at IS NULL
+                                    JOIN guild_ranks gr ON gr.id=gm.rank_id
+                                    WHERE gm.player_id=? LIMIT 1''', (player_id,))
+
+
+def _nova_guild_require_membership(conn, player_id: int, guild_id: int):
+    row = _nova_guild_row(conn, '''SELECT gm.*, gr.name AS rank_name, gr.sort_order AS rank_order,
+                                          gr.can_invite, gr.can_accept_applications, gr.can_kick, gr.can_promote,
+                                          gr.can_demote, gr.can_manage_ranks, gr.can_declare_war, gr.can_manage_war,
+                                          gr.can_manage_treasury, gr.can_start_research, gr.can_cancel_research,
+                                          gr.can_manage_armory, gr.can_withdraw_armory, gr.can_deposit_armory,
+                                          gr.can_edit_motd, gr.can_disband
+                                   FROM guild_members gm JOIN guild_ranks gr ON gr.id=gm.rank_id
+                                   WHERE gm.player_id=? AND gm.guild_id=? LIMIT 1''', (player_id, guild_id))
+    if not row:
+        _nova_guild_raise(403, 'Guild membership required')
+    return row
+
+
+def _nova_guild_has_perm(member: dict, permission: str) -> bool:
+    return bool(_nova_guild_int(member.get(permission), 0))
+
+
+def _nova_guild_rank_by_name(conn, guild_id: int, name: str):
+    return _nova_guild_row(conn, 'SELECT * FROM guild_ranks WHERE guild_id=? AND name=? LIMIT 1', (guild_id, name))
+
+
+def _nova_guild_default_rank(conn, guild_id: int):
+    return _nova_guild_row(conn, 'SELECT * FROM guild_ranks WHERE guild_id=? AND is_default=1 LIMIT 1', (guild_id,)) or _nova_guild_rank_by_name(conn, guild_id, 'Recruit')
+
+
+def _nova_guild_create_default_ranks(conn, guild_id: int) -> None:
+    now = _nova_guild_now_iso()
+    rank_defs = [
+        ('Leader', 100, dict(can_invite=1,can_accept_applications=1,can_kick=1,can_promote=1,can_demote=1,can_manage_ranks=1,can_declare_war=1,can_manage_war=1,can_manage_treasury=1,can_start_research=1,can_cancel_research=1,can_manage_armory=1,can_withdraw_armory=1,can_deposit_armory=1,can_edit_motd=1,can_disband=1,is_default=0)),
+        ('Officer', 80, dict(can_invite=1,can_accept_applications=1,can_kick=1,can_promote=0,can_demote=0,can_manage_ranks=0,can_declare_war=1,can_manage_war=1,can_manage_treasury=1,can_start_research=1,can_cancel_research=0,can_manage_armory=1,can_withdraw_armory=1,can_deposit_armory=1,can_edit_motd=1,can_disband=0,is_default=0)),
+        ('Veteran', 60, dict(can_invite=1,can_accept_applications=0,can_kick=0,can_promote=0,can_demote=0,can_manage_ranks=0,can_declare_war=0,can_manage_war=0,can_manage_treasury=0,can_start_research=0,can_cancel_research=0,can_manage_armory=0,can_withdraw_armory=1,can_deposit_armory=1,can_edit_motd=0,can_disband=0,is_default=0)),
+        ('Member', 40, dict(can_invite=0,can_accept_applications=0,can_kick=0,can_promote=0,can_demote=0,can_manage_ranks=0,can_declare_war=0,can_manage_war=0,can_manage_treasury=0,can_start_research=0,can_cancel_research=0,can_manage_armory=0,can_withdraw_armory=0,can_deposit_armory=1,can_edit_motd=0,can_disband=0,is_default=0)),
+        ('Recruit', 20, dict(can_invite=0,can_accept_applications=0,can_kick=0,can_promote=0,can_demote=0,can_manage_ranks=0,can_declare_war=0,can_manage_war=0,can_manage_treasury=0,can_start_research=0,can_cancel_research=0,can_manage_armory=0,can_withdraw_armory=0,can_deposit_armory=1,can_edit_motd=0,can_disband=0,is_default=1)),
+    ]
+    cols = ['guild_id','name','sort_order','can_invite','can_accept_applications','can_kick','can_promote','can_demote','can_manage_ranks','can_declare_war','can_manage_war','can_manage_treasury','can_start_research','can_cancel_research','can_manage_armory','can_withdraw_armory','can_deposit_armory','can_edit_motd','can_disband','is_default','created_at']
+    for name, sort_order, perms in rank_defs:
+        vals = [guild_id, name, sort_order] + [int(perms.get(c, 0)) for c in cols[3:-1]] + [now]
+        conn.execute(f'INSERT OR IGNORE INTO guild_ranks({",".join(cols)}) VALUES({",".join(["?"]*len(cols))})', tuple(vals))
+
+
+def _nova_guild_log(conn, guild_id: int, actor_player_id, action: str, target_player_id=None, metadata=None) -> None:
+    conn.execute('''INSERT INTO guild_logs(guild_id,actor_player_id,action,target_player_id,metadata_json,created_at)
+                   VALUES(?,?,?,?,?,?)''', (guild_id, actor_player_id, action, target_player_id, _nova_guild_json_dumps(metadata or {}), _nova_guild_now_iso()))
+
+
+def _nova_guild_level_apply(conn, guild_id: int) -> None:
+    g = _nova_guild_row(conn, 'SELECT * FROM guilds WHERE id=?', (guild_id,))
+    if not g:
+        return
+    max_level = _nova_guild_int(_nova_guild_setting(conn, 'guild_max_level', '5'), 5)
+    level = _nova_guild_int(g.get('level'), 1)
+    xp = _nova_guild_int(g.get('xp'), 0)
+    points_add = 0
+    while level < max_level and xp >= _nova_guild_xp_required(level + 1):
+        level += 1
+        points_add += level
+    if level != _nova_guild_int(g.get('level'), 1):
+        conn.execute('UPDATE guilds SET level=?, max_members=?, research_points=research_points+?, updated_at=? WHERE id=?', (level, _nova_guild_member_cap(level), points_add, _nova_guild_now_iso(), guild_id))
+        _nova_guild_log(conn, guild_id, None, 'guild_level_up', None, {'level': level, 'research_points_added': points_add})
+
+
+def nova_record_guild_contribution(conn, player_id: int, contribution_type='activity', raw_xp=0, quantity=1, source='activity', metadata=None) -> dict:
+    nova_guild_ensure_tables(conn)
+    member = _nova_guild_membership(conn, player_id)
+    if not member:
+        return {'ok': False, 'reason': 'player_not_in_guild'}
+    guild_id = int(member['guild_id'])
+    raw_xp = max(0, int(raw_xp or 0))
+    if raw_xp <= 0:
+        return {'ok': False, 'reason': 'no_xp'}
+    day = _NovaGuildDatetime.now(_NovaGuildTimezone.utc).strftime('%Y-%m-%d')
+    cap = _nova_guild_int(_nova_guild_setting(conn, 'daily_contribution_soft_cap', '2500'), 2500)
+    over_mult = _nova_guild_float(_nova_guild_setting(conn, 'daily_contribution_overcap_multiplier', '0.20'), 0.20)
+    existing = _nova_guild_row(conn, 'SELECT raw_xp FROM guild_contributions_daily WHERE guild_id=? AND player_id=? AND day=?', (guild_id, player_id, day))
+    before = _nova_guild_int((existing or {}).get('raw_xp'), 0)
+    full_value = max(0, min(raw_xp, max(0, cap - before)))
+    over_value = max(0, raw_xp - full_value)
+    effective = int(full_value + over_value * over_mult)
+    type_map = {
+        'material': 'material_xp', 'mining': 'material_xp', 'processing': 'material_xp', 'refining': 'material_xp',
+        'money': 'money_xp', 'combat': 'combat_xp', 'crafting': 'crafting_xp', 'mission': 'mission_xp', 'war': 'war_xp'
+    }
+    col = type_map.get(str(contribution_type or '').lower(), 'other_xp')
+    now = _nova_guild_now_iso()
+    conn.execute(f'''INSERT INTO guild_contributions_daily(guild_id,player_id,day,{col},raw_xp,effective_xp,updated_at)
+                     VALUES(?,?,?,?,?,?,?)
+                     ON CONFLICT(guild_id,player_id,day) DO UPDATE SET
+                       {col}={col}+excluded.{col}, raw_xp=raw_xp+excluded.raw_xp, effective_xp=effective_xp+excluded.effective_xp, updated_at=excluded.updated_at''',
+                 (guild_id, player_id, day, effective, raw_xp, effective, now))
+    conn.execute('''INSERT INTO guild_contribution_events(guild_id,player_id,contribution_type,raw_xp,effective_xp,quantity,source,metadata_json,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)''', (guild_id, player_id, str(contribution_type)[:40], raw_xp, effective, int(quantity or 1), str(source)[:80], _nova_guild_json_dumps(metadata or {}), now))
+    conn.execute('UPDATE guild_members SET contribution_total=contribution_total+? WHERE guild_id=? AND player_id=?', (effective, guild_id, player_id))
+    conn.execute('UPDATE guilds SET xp=xp+?, updated_at=? WHERE id=?', (effective, now, guild_id))
+    _nova_guild_level_apply(conn, guild_id)
+    return {'ok': True, 'guild_id': guild_id, 'raw_xp': raw_xp, 'effective_xp': effective, 'soft_capped': over_value > 0}
+
+
+def _nova_guild_summary(conn, guild_id: int) -> dict:
+    g = _nova_guild_row(conn, 'SELECT * FROM guilds WHERE id=? AND deleted_at IS NULL', (guild_id,))
+    if not g:
+        _nova_guild_raise(404, 'Guild not found')
+    count = _nova_guild_row(conn, 'SELECT COUNT(*) AS n FROM guild_members WHERE guild_id=?', (guild_id,))
+    active_wars = _nova_guild_row(conn, '''SELECT COUNT(*) AS n FROM guild_wars WHERE status IN ('pending','active') AND (attacker_guild_id=? OR defender_guild_id=?)''', (guild_id, guild_id))
+    next_xp = _nova_guild_xp_required(min(_nova_guild_int(g.get('level'), 1) + 1, _nova_guild_int(_nova_guild_setting(conn, 'guild_max_level', '5'), 5)))
+    out = dict(g)
+    out['member_count'] = _nova_guild_int((count or {}).get('n'), 0)
+    out['active_wars'] = _nova_guild_int((active_wars or {}).get('n'), 0)
+    out['next_level_xp'] = next_xp
+    return out
+
+
+def _nova_guild_research_bonus_map(conn, guild_id: int) -> dict:
+    rows = _nova_guild_rows(conn, '''SELECT d.bonus_type, d.bonus_per_rank, d.bonus_cap, gr.rank
+                                    FROM guild_research gr JOIN guild_research_definitions d ON d.research_key=gr.research_key
+                                    WHERE gr.guild_id=?''', (guild_id,))
+    bonuses = {}
+    for r in rows:
+        value = min(_nova_guild_float(r.get('bonus_cap'), 0), _nova_guild_float(r.get('bonus_per_rank'), 0) * _nova_guild_int(r.get('rank'), 0))
+        bonuses[r['bonus_type']] = value
+    return bonuses
+
+
+def _nova_guild_inventory_change(conn, player_id: int, planet_id: int, item_type: str, item_key: str, quantity_delta: int) -> None:
+    # Safe adapter. It only touches known simple inventory schemas. If none is detected, the armory action is blocked.
+    candidates = []
+    if str(item_type).lower() in ('material','materials','ore','resource'):
+        candidates = ['player_materials','materials_inventory','inventory_materials']
+    else:
+        candidates = ['player_items','inventory_items','player_inventory','inventory']
+    for table in candidates:
+        if not _nova_guild_table_exists(conn, table):
+            continue
+        cols = _nova_guild_cols(conn, table)
+        player_col = _nova_guild_first_col(cols, ('player_id','user_id','owner_player_id'))
+        planet_col = _nova_guild_first_col(cols, ('planet_id','location_planet_id','stored_planet_id'))
+        qty_col = _nova_guild_first_col(cols, ('quantity','qty','amount','count'))
+        key_col = _nova_guild_first_col(cols, ('item_key','material_key','template_key','name','material','item_name'))
+        if not (player_col and planet_col and qty_col and key_col):
+            continue
+        row = _nova_guild_row(conn, f'SELECT rowid AS rid, {qty_col} AS qty FROM {table} WHERE {player_col}=? AND {planet_col}=? AND {key_col}=? LIMIT 1', (player_id, planet_id, item_key))
+        current = _nova_guild_int((row or {}).get('qty'), 0)
+        new_qty = current + int(quantity_delta)
+        if new_qty < 0:
+            _nova_guild_raise(400, 'Not enough inventory at this planet')
+        if row:
+            conn.execute(f'UPDATE {table} SET {qty_col}=? WHERE rowid=?', (new_qty, row['rid']))
+        elif quantity_delta > 0:
+            conn.execute(f'INSERT INTO {table}({player_col},{planet_col},{key_col},{qty_col}) VALUES(?,?,?,?)', (player_id, planet_id, item_key, new_qty))
+        return
+    _nova_guild_raise(501, 'Guild armory inventory adapter could not find a compatible planet-specific inventory table')
+
+
+def _nova_guild_sanitize_target_type(v: str) -> str:
+    v = str(v or 'guild').lower().strip()
+    return 'planet' if v == 'planet' else 'guild'
+
+
+@app.get('/api/guild/list')
+def nova_guild_list(search: str = '', limit: int = 50):
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        q = f'%{str(search or '').strip()}%'
+        rows = _nova_guild_rows(conn, '''SELECT g.*, COUNT(gm.player_id) AS member_count
+                                       FROM guilds g LEFT JOIN guild_members gm ON gm.guild_id=g.id
+                                       WHERE g.deleted_at IS NULL AND (?='' OR g.name LIKE ? OR g.tag LIKE ?)
+                                       GROUP BY g.id ORDER BY g.level DESC, member_count DESC, g.name ASC LIMIT ?''', (str(search or '').strip(), q, q, max(1, min(int(limit or 50), 100))))
+        return {'guilds': rows}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/me')
+def nova_guild_me(player_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        player = _nova_guild_player(conn, player_id)
+        if not player:
+            _nova_guild_raise(404, 'Player not found')
+        member = _nova_guild_membership(conn, player_id)
+        invites = _nova_guild_rows(conn, '''SELECT gi.*, g.name AS guild_name, g.tag AS guild_tag
+                                         FROM guild_invites gi JOIN guilds g ON g.id=gi.guild_id
+                                         WHERE gi.recipient_player_id=? AND gi.status='pending' ORDER BY gi.id DESC''', (player_id,))
+        if not member:
+            return {'player': player, 'membership': None, 'guild': None, 'invites': invites}
+        guild = _nova_guild_summary(conn, int(member['guild_id']))
+        guild['research_bonuses'] = _nova_guild_research_bonus_map(conn, int(member['guild_id']))
+        return {'player': player, 'membership': member, 'guild': guild, 'invites': invites}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/roster')
+def nova_guild_roster(player_id: int, guild_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        rows = _nova_guild_rows(conn, '''SELECT gm.player_id, gm.joined_at, gm.contribution_total, gr.id AS rank_id, gr.name AS rank_name, gr.sort_order AS rank_order
+                                       FROM guild_members gm JOIN guild_ranks gr ON gr.id=gm.rank_id
+                                       WHERE gm.guild_id=? ORDER BY gr.sort_order DESC, gm.contribution_total DESC''', (guild_id,))
+        for r in rows:
+            p = _nova_guild_player(conn, int(r['player_id']))
+            r['username'] = (p or {}).get('username') or f"Player {r['player_id']}"
+        ranks = _nova_guild_rows(conn, 'SELECT * FROM guild_ranks WHERE guild_id=? ORDER BY sort_order DESC', (guild_id,))
+        return {'members': rows, 'ranks': ranks}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/detail')
+def nova_guild_detail(guild_id: int, player_id: int = 0, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id or None)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        guild = _nova_guild_summary(conn, guild_id)
+        member = _nova_guild_membership(conn, player_id) if player_id else None
+        return {'guild': guild, 'membership': member if member and int(member['guild_id']) == int(guild_id) else None}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/create')
+def nova_guild_create(req: NovaGuildCreateRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    name = _nova_guild_clamp_text(req.name, 64)
+    tag = _nova_guild_clamp_text(req.tag, 8).upper()
+    if len(name) < 3 or len(tag) < 2:
+        _nova_guild_raise(400, 'Guild name/tag too short')
+    status = str(req.status or 'public').lower()
+    if status not in ('public','private','invite'):
+        status = 'public'
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        player = _nova_guild_player(conn, req.player_id)
+        if not player:
+            _nova_guild_raise(404, 'Player not found')
+        if _nova_guild_membership(conn, req.player_id):
+            _nova_guild_raise(400, 'You are already in a guild')
+        planet_id = player.get('planet_id')
+        if planet_id is None:
+            _nova_guild_raise(400, 'You must be docked at a planet to create a guild')
+        cost = _nova_guild_int(_nova_guild_setting(conn, 'guild_creation_cost', '25000'), 25000)
+        _nova_guild_update_player_money(conn, req.player_id, -cost)
+        now = _nova_guild_now_iso()
+        cur = conn.execute('''INSERT INTO guilds(name,tag,description,faction_id,founder_player_id,leader_player_id,home_planet_id,level,xp,research_points,treasury,max_members,status,created_at,updated_at)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (name, tag, _nova_guild_clamp_text(req.description, 500), str(player.get('faction_id') or ''), req.player_id, req.player_id, planet_id, 1, 0, 0, 0, 10, status, now, now))
+        guild_id = int(cur.lastrowid)
+        _nova_guild_create_default_ranks(conn, guild_id)
+        leader_rank = _nova_guild_rank_by_name(conn, guild_id, 'Leader')
+        conn.execute('INSERT INTO guild_members(guild_id,player_id,rank_id,joined_at) VALUES(?,?,?,?)', (guild_id, req.player_id, leader_rank['id'], now))
+        _nova_guild_log(conn, guild_id, req.player_id, 'guild_created', req.player_id, {'cost': cost})
+        conn.commit()
+        return {'ok': True, 'guild': _nova_guild_summary(conn, guild_id)}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/apply')
+def nova_guild_apply(req: NovaGuildApplyRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        if _nova_guild_membership(conn, req.player_id):
+            _nova_guild_raise(400, 'You are already in a guild')
+        guild = _nova_guild_summary(conn, req.guild_id)
+        if guild.get('status') == 'private':
+            _nova_guild_raise(400, 'Guild is private')
+        conn.execute('''INSERT OR REPLACE INTO guild_applications(guild_id,player_id,message,status,created_at)
+                       VALUES(?,?,?,?,?)''', (req.guild_id, req.player_id, _nova_guild_clamp_text(req.message, 500), 'pending', _nova_guild_now_iso()))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'application_created', req.player_id, {})
+        conn.commit()
+        return {'ok': True}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/invite')
+def nova_guild_invite(req: NovaGuildInviteRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        actor = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not _nova_guild_has_perm(actor, 'can_invite'):
+            _nova_guild_raise(403, 'Invite permission required')
+        recipient_id = req.recipient_id
+        if not recipient_id and req.recipient_name:
+            p = _nova_guild_player_by_name(conn, req.recipient_name)
+            if p: recipient_id = int(p['id'])
+        if not recipient_id:
+            _nova_guild_raise(404, 'Recipient not found')
+        if _nova_guild_membership(conn, recipient_id):
+            _nova_guild_raise(400, 'Recipient is already in a guild')
+        conn.execute('''INSERT INTO guild_invites(guild_id,sender_player_id,recipient_player_id,message,status,created_at)
+                       VALUES(?,?,?,?,?,?)''', (req.guild_id, req.player_id, recipient_id, _nova_guild_clamp_text(req.message, 500), 'pending', _nova_guild_now_iso()))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'invite_sent', recipient_id, {})
+        conn.commit()
+        return {'ok': True}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/invite/respond')
+def nova_guild_invite_respond(req: NovaGuildInviteRespondRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        inv = _nova_guild_row(conn, 'SELECT * FROM guild_invites WHERE id=? AND recipient_player_id=? AND status="pending"', (req.invite_id, req.player_id))
+        if not inv:
+            _nova_guild_raise(404, 'Invite not found')
+        if _nova_guild_membership(conn, req.player_id):
+            _nova_guild_raise(400, 'You are already in a guild')
+        status = 'accepted' if req.accept else 'declined'
+        conn.execute('UPDATE guild_invites SET status=?, resolved_at=? WHERE id=?', (status, _nova_guild_now_iso(), req.invite_id))
+        if req.accept:
+            g = _nova_guild_summary(conn, int(inv['guild_id']))
+            if int(g['member_count']) >= int(g['max_members']):
+                _nova_guild_raise(400, 'Guild is full')
+            rank = _nova_guild_default_rank(conn, int(inv['guild_id']))
+            conn.execute('INSERT INTO guild_members(guild_id,player_id,rank_id,joined_at) VALUES(?,?,?,?)', (inv['guild_id'], req.player_id, rank['id'], _nova_guild_now_iso()))
+            _nova_guild_log(conn, int(inv['guild_id']), req.player_id, 'member_joined_by_invite', req.player_id, {})
+        conn.commit()
+        return {'ok': True, 'status': status}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/leave')
+def nova_guild_leave(req: NovaGuildLeaveRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        member = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if str(member.get('rank_name')) == 'Leader':
+            count = _nova_guild_int((_nova_guild_row(conn, 'SELECT COUNT(*) AS n FROM guild_members WHERE guild_id=?', (req.guild_id,)) or {}).get('n'), 0)
+            if count > 1:
+                _nova_guild_raise(400, 'Transfer leadership before leaving')
+        active_war = _nova_guild_row(conn, '''SELECT id FROM guild_wars WHERE status IN ('pending','active') AND (attacker_guild_id=? OR defender_guild_id=?) LIMIT 1''', (req.guild_id, req.guild_id))
+        if active_war and str(member.get('rank_name')) in ('Leader','Officer'):
+            _nova_guild_raise(400, 'Leaders/officers cannot leave during active war')
+        conn.execute('DELETE FROM guild_members WHERE guild_id=? AND player_id=?', (req.guild_id, req.player_id))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'member_left', req.player_id, {'active_war': bool(active_war)})
+        conn.commit()
+        return {'ok': True}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/kick')
+def nova_guild_kick(req: NovaGuildKickRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        actor = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not _nova_guild_has_perm(actor, 'can_kick'):
+            _nova_guild_raise(403, 'Kick permission required')
+        target = _nova_guild_require_membership(conn, req.target_player_id, req.guild_id)
+        if _nova_guild_int(target.get('rank_order'), 0) >= _nova_guild_int(actor.get('rank_order'), 0):
+            _nova_guild_raise(403, 'Cannot kick same/higher rank')
+        conn.execute('DELETE FROM guild_members WHERE guild_id=? AND player_id=?', (req.guild_id, req.target_player_id))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'member_kicked', req.target_player_id, {})
+        conn.commit()
+        return {'ok': True}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/rank/update')
+def nova_guild_rank_update(req: NovaGuildRankUpdateRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        actor = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not (_nova_guild_has_perm(actor, 'can_promote') or _nova_guild_has_perm(actor, 'can_demote') or _nova_guild_has_perm(actor, 'can_manage_ranks')):
+            _nova_guild_raise(403, 'Rank permission required')
+        target = _nova_guild_require_membership(conn, req.target_player_id, req.guild_id)
+        new_rank = _nova_guild_row(conn, 'SELECT * FROM guild_ranks WHERE guild_id=? AND id=?', (req.guild_id, req.rank_id))
+        if not new_rank:
+            _nova_guild_raise(404, 'Rank not found')
+        if _nova_guild_int(target.get('rank_order'), 0) >= _nova_guild_int(actor.get('rank_order'), 0) or _nova_guild_int(new_rank.get('sort_order'), 0) >= _nova_guild_int(actor.get('rank_order'), 0):
+            _nova_guild_raise(403, 'Cannot change same/higher rank')
+        conn.execute('UPDATE guild_members SET rank_id=? WHERE guild_id=? AND player_id=?', (req.rank_id, req.guild_id, req.target_player_id))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'rank_updated', req.target_player_id, {'rank_id': req.rank_id})
+        conn.commit()
+        return {'ok': True}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/contributions')
+def nova_guild_contributions(player_id: int, guild_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        today = _NovaGuildDatetime.now(_NovaGuildTimezone.utc).strftime('%Y-%m-%d')
+        daily = _nova_guild_rows(conn, 'SELECT * FROM guild_contributions_daily WHERE guild_id=? ORDER BY day DESC, effective_xp DESC LIMIT 200', (guild_id,))
+        events = _nova_guild_rows(conn, 'SELECT * FROM guild_contribution_events WHERE guild_id=? ORDER BY id DESC LIMIT 100', (guild_id,))
+        return {'today': today, 'daily': daily, 'events': events}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/contributions/record')
+def nova_guild_contribution_record(req: NovaGuildContributionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    require_admin_context(ctx)
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        result = nova_record_guild_contribution(conn, req.player_id, req.contribution_type, req.xp, req.quantity, req.source, req.metadata)
+        conn.commit()
+        return result
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/research')
+def nova_guild_research(player_id: int, guild_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        guild = _nova_guild_summary(conn, guild_id)
+        defs = _nova_guild_rows(conn, '''SELECT d.*, COALESCE(gr.rank,0) AS current_rank
+                                      FROM guild_research_definitions d LEFT JOIN guild_research gr
+                                      ON gr.research_key=d.research_key AND gr.guild_id=?
+                                      ORDER BY d.category, d.sort_order''', (guild_id,))
+        return {'guild': guild, 'definitions': defs, 'bonuses': _nova_guild_research_bonus_map(conn, guild_id)}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/research/unlock')
+def nova_guild_research_unlock(req: NovaGuildResearchUnlockRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        member = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not _nova_guild_has_perm(member, 'can_start_research'):
+            _nova_guild_raise(403, 'Research permission required')
+        guild = _nova_guild_summary(conn, req.guild_id)
+        d = _nova_guild_row(conn, 'SELECT * FROM guild_research_definitions WHERE research_key=?', (req.research_key,))
+        if not d:
+            _nova_guild_raise(404, 'Research not found')
+        if _nova_guild_int(guild.get('level'), 1) < _nova_guild_int(d.get('required_guild_level'), 1):
+            _nova_guild_raise(400, 'Guild level too low')
+        cur = _nova_guild_row(conn, 'SELECT rank FROM guild_research WHERE guild_id=? AND research_key=?', (req.guild_id, req.research_key))
+        current_rank = _nova_guild_int((cur or {}).get('rank'), 0)
+        if current_rank >= _nova_guild_int(d.get('max_rank'), 5):
+            _nova_guild_raise(400, 'Research already maxed')
+        cost = _nova_guild_int(d.get('points_per_rank'), 1)
+        if _nova_guild_int(guild.get('research_points'), 0) < cost:
+            _nova_guild_raise(400, 'Not enough research points')
+        now = _nova_guild_now_iso()
+        conn.execute('UPDATE guilds SET research_points=research_points-?, updated_at=? WHERE id=?', (cost, now, req.guild_id))
+        conn.execute('''INSERT INTO guild_research(guild_id,research_key,rank,updated_at) VALUES(?,?,?,?)
+                       ON CONFLICT(guild_id,research_key) DO UPDATE SET rank=rank+1, updated_at=excluded.updated_at''', (req.guild_id, req.research_key, 1, now))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'research_unlocked', None, {'research_key': req.research_key, 'new_rank': current_rank + 1})
+        conn.commit()
+        return {'ok': True, 'new_rank': current_rank + 1}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/armory')
+def nova_guild_armory(player_id: int, guild_id: int, planet_id: int = None, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        player = _nova_guild_player(conn, player_id)
+        pid = planet_id or (player or {}).get('planet_id')
+        if pid is None:
+            _nova_guild_raise(400, 'Dock at a planet to view local armory')
+        rows = _nova_guild_rows(conn, 'SELECT * FROM guild_armory WHERE guild_id=? AND planet_id=? AND quantity>0 ORDER BY item_type,item_name,item_key', (guild_id, pid))
+        return {'planet_id': pid, 'items': rows}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/armory/deposit')
+def nova_guild_armory_deposit(req: NovaGuildArmoryMoveRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    qty = max(1, int(req.quantity or 1))
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        member = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not _nova_guild_has_perm(member, 'can_deposit_armory'):
+            _nova_guild_raise(403, 'Deposit permission required')
+        player = _nova_guild_player(conn, req.player_id)
+        planet_id = req.planet_id or (player or {}).get('planet_id')
+        if planet_id is None or str(planet_id) != str((player or {}).get('planet_id')):
+            _nova_guild_raise(400, 'You must be docked at this planet')
+        _nova_guild_inventory_change(conn, req.player_id, int(planet_id), req.item_type, req.item_key, -qty)
+        now = _nova_guild_now_iso()
+        conn.execute('''INSERT INTO guild_armory(guild_id,planet_id,item_type,item_key,item_name,quantity,tier,quality,deposited_by,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(guild_id,planet_id,item_type,item_key,tier,quality) DO UPDATE SET
+                         quantity=quantity+excluded.quantity, deposited_by=excluded.deposited_by, updated_at=excluded.updated_at''',
+                     (req.guild_id, int(planet_id), req.item_type, req.item_key, _nova_guild_clamp_text(req.item_name or req.item_key, 120), qty, _nova_guild_clamp_text(req.tier, 40), _nova_guild_clamp_text(req.quality, 40), req.player_id, now, now))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'armory_deposit', None, _nova_guild_req_dict(req))
+        conn.commit()
+        return {'ok': True}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/armory/withdraw')
+def nova_guild_armory_withdraw(req: NovaGuildArmoryMoveRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    qty = max(1, int(req.quantity or 1))
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        member = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not (_nova_guild_has_perm(member, 'can_withdraw_armory') or _nova_guild_has_perm(member, 'can_manage_armory')):
+            _nova_guild_raise(403, 'Withdraw permission required')
+        lock_seconds = _nova_guild_int(_nova_guild_setting(conn, 'new_member_armory_lock_seconds', '86400'), 86400)
+        try:
+            joined_ts = _NovaGuildDatetime.fromisoformat(str(member.get('joined_at')).replace('Z','+00:00')).timestamp()
+        except Exception:
+            joined_ts = 0
+        if lock_seconds > 0 and _nova_guild_time.time() - joined_ts < lock_seconds and str(member.get('rank_name')) not in ('Leader','Officer'):
+            _nova_guild_raise(403, 'New member armory withdrawal lock is active')
+        player = _nova_guild_player(conn, req.player_id)
+        planet_id = req.planet_id or (player or {}).get('planet_id')
+        if planet_id is None or str(planet_id) != str((player or {}).get('planet_id')):
+            _nova_guild_raise(400, 'You must be docked at this planet')
+        item = _nova_guild_row(conn, '''SELECT * FROM guild_armory WHERE guild_id=? AND planet_id=? AND item_type=? AND item_key=? AND tier=? AND quality=? LIMIT 1''',
+                               (req.guild_id, int(planet_id), req.item_type, req.item_key, _nova_guild_clamp_text(req.tier, 40), _nova_guild_clamp_text(req.quality, 40)))
+        if not item or _nova_guild_int(item.get('quantity'), 0) < qty:
+            _nova_guild_raise(400, 'Not enough item quantity in this planet armory')
+        if _nova_guild_int(item.get('locked'), 0) and not _nova_guild_has_perm(member, 'can_manage_armory'):
+            _nova_guild_raise(403, 'Item is locked')
+        _nova_guild_inventory_change(conn, req.player_id, int(planet_id), req.item_type, req.item_key, qty)
+        conn.execute('UPDATE guild_armory SET quantity=quantity-?, last_withdrawn_by=?, updated_at=? WHERE id=?', (qty, req.player_id, _nova_guild_now_iso(), item['id']))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'armory_withdraw', req.player_id, _nova_guild_req_dict(req))
+        conn.commit()
+        return {'ok': True}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/treasury')
+def nova_guild_treasury(player_id: int, guild_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        guild = _nova_guild_summary(conn, guild_id)
+        logs = _nova_guild_rows(conn, 'SELECT * FROM guild_treasury_log WHERE guild_id=? ORDER BY id DESC LIMIT 100', (guild_id,))
+        return {'treasury': guild.get('treasury'), 'tax_percent': guild.get('tax_percent'), 'logs': logs}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/treasury/deposit')
+def nova_guild_treasury_deposit(req: NovaGuildTreasuryDepositRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    amount = max(1, int(req.amount or 0))
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        _nova_guild_update_player_money(conn, req.player_id, -amount)
+        conn.execute('UPDATE guilds SET treasury=treasury+?, updated_at=? WHERE id=?', (amount, _nova_guild_now_iso(), req.guild_id))
+        balance = _nova_guild_int((_nova_guild_row(conn, 'SELECT treasury FROM guilds WHERE id=?', (req.guild_id,)) or {}).get('treasury'), 0)
+        conn.execute('INSERT INTO guild_treasury_log(guild_id,player_id,amount,balance_after,reason,created_at) VALUES(?,?,?,?,?,?)', (req.guild_id, req.player_id, amount, balance, 'deposit', _nova_guild_now_iso()))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'treasury_deposit', None, {'amount': amount})
+        nova_record_guild_contribution(conn, req.player_id, 'money', max(1, amount // 100), amount, 'treasury_deposit', {'amount': amount})
+        conn.commit()
+        return {'ok': True, 'balance': balance}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/war/declare')
+def nova_guild_war_declare(req: NovaGuildWarDeclareRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        conn.execute('BEGIN IMMEDIATE')
+        member = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not _nova_guild_has_perm(member, 'can_declare_war'):
+            _nova_guild_raise(403, 'War declaration permission required')
+        target_type = _nova_guild_sanitize_target_type(req.target_type)
+        attacker = _nova_guild_summary(conn, req.guild_id)
+        if target_type == 'guild':
+            if not req.target_guild_id or int(req.target_guild_id) == int(req.guild_id):
+                _nova_guild_raise(400, 'Valid target guild required')
+            defender = _nova_guild_summary(conn, req.target_guild_id)
+            base = _nova_guild_int(_nova_guild_setting(conn, 'guild_war_base_cost', '50000'), 50000)
+            cost = base + int(attacker['level']) * 5000 + int(defender['level']) * 5000
+            target_planet_id = None
+            defender_id = req.target_guild_id
+            duration = _nova_guild_int(_nova_guild_setting(conn, 'guild_war_duration_seconds', '86400'), 86400)
+        else:
+            if not req.target_planet_id:
+                _nova_guild_raise(400, 'Target planet required')
+            base = _nova_guild_int(_nova_guild_setting(conn, 'planet_war_base_cost', '150000'), 150000)
+            cost = base + int(attacker['level']) * 10000
+            target_planet_id = req.target_planet_id
+            defender_id = None
+            duration = _nova_guild_int(_nova_guild_setting(conn, 'planet_war_duration_seconds', '172800'), 172800)
+        bonuses = _nova_guild_research_bonus_map(conn, req.guild_id)
+        cost = int(cost * max(0.5, 1.0 - (_nova_guild_float(bonuses.get('war_cost_reduction_pct'), 0) / 100.0)))
+        if _nova_guild_int(attacker.get('treasury'), 0) < cost:
+            _nova_guild_raise(400, 'Guild treasury cannot pay war cost')
+        recent = _nova_guild_row(conn, '''SELECT id FROM guild_wars WHERE attacker_guild_id=? AND COALESCE(defender_guild_id,0)=COALESCE(?,0) AND COALESCE(target_planet_id,0)=COALESCE(?,0)
+                                      AND declared_at >= datetime('now', '-' || ? || ' seconds') LIMIT 1''', (req.guild_id, defender_id or 0, target_planet_id or 0, _nova_guild_int(_nova_guild_setting(conn, 'guild_war_cooldown_seconds', '172800'), 172800)))
+        if recent:
+            _nova_guild_raise(400, 'War cooldown against this target is active')
+        now_ts = _nova_guild_time.time()
+        prep = _nova_guild_int(_nova_guild_setting(conn, 'guild_war_prep_seconds', '1800'), 1800)
+        now_iso = _nova_guild_now_iso()
+        starts = _NovaGuildDatetime.fromtimestamp(now_ts + prep, _NovaGuildTimezone.utc).isoformat()
+        ends = _NovaGuildDatetime.fromtimestamp(now_ts + prep + duration, _NovaGuildTimezone.utc).isoformat()
+        conn.execute('UPDATE guilds SET treasury=treasury-?, updated_at=? WHERE id=?', (cost, now_iso, req.guild_id))
+        balance = _nova_guild_int((_nova_guild_row(conn, 'SELECT treasury FROM guilds WHERE id=?', (req.guild_id,)) or {}).get('treasury'), 0)
+        conn.execute('INSERT INTO guild_treasury_log(guild_id,player_id,amount,balance_after,reason,created_at) VALUES(?,?,?,?,?,?)', (req.guild_id, req.player_id, -cost, balance, f'{target_type}_war_declaration', now_iso))
+        cur = conn.execute('''INSERT INTO guild_wars(attacker_guild_id,defender_guild_id,target_planet_id,target_type,status,declaration_cost,reason,declared_by,declared_at,prep_ends_at,starts_at,ends_at,metadata_json)
+                              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''', (req.guild_id, defender_id, target_planet_id, target_type, 'pending', cost, _nova_guild_clamp_text(req.reason, 500), req.player_id, now_iso, starts, starts, ends, _nova_guild_json_dumps({})))
+        war_id = int(cur.lastrowid)
+        conn.execute('INSERT OR IGNORE INTO guild_war_scores(war_id,guild_id,updated_at) VALUES(?,?,?)', (war_id, req.guild_id, now_iso))
+        if defender_id:
+            conn.execute('INSERT OR IGNORE INTO guild_war_scores(war_id,guild_id,updated_at) VALUES(?,?,?)', (war_id, defender_id, now_iso))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'war_declared', None, {'war_id': war_id, 'target_type': target_type, 'cost': cost})
+        conn.commit()
+        return {'ok': True, 'war_id': war_id, 'cost': cost, 'starts_at': starts, 'ends_at': ends}
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/guild/war/surrender')
+def nova_guild_war_surrender(req: NovaGuildWarSurrenderRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    req.player_id = require_bound_player_id(ctx, req.player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        member = _nova_guild_require_membership(conn, req.player_id, req.guild_id)
+        if not _nova_guild_has_perm(member, 'can_manage_war'):
+            _nova_guild_raise(403, 'War management permission required')
+        war = _nova_guild_row(conn, 'SELECT * FROM guild_wars WHERE id=? AND status IN ("pending","active")', (req.war_id,))
+        if not war:
+            _nova_guild_raise(404, 'Active war not found')
+        if int(war.get('attacker_guild_id') or 0) != int(req.guild_id) and int(war.get('defender_guild_id') or 0) != int(req.guild_id):
+            _nova_guild_raise(403, 'Guild is not in this war')
+        other = int(war.get('defender_guild_id') or 0) if int(war.get('attacker_guild_id') or 0) == int(req.guild_id) else int(war.get('attacker_guild_id') or 0)
+        conn.execute('UPDATE guild_wars SET status="surrendered", resolved_at=?, winner_guild_id=? WHERE id=?', (_nova_guild_now_iso(), other or None, req.war_id))
+        _nova_guild_log(conn, req.guild_id, req.player_id, 'war_surrendered', None, {'war_id': req.war_id})
+        conn.commit()
+        return {'ok': True, 'winner_guild_id': other or None}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/wars')
+def nova_guild_wars(player_id: int, guild_id: int, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        rows = _nova_guild_rows(conn, '''SELECT * FROM guild_wars WHERE attacker_guild_id=? OR defender_guild_id=? ORDER BY id DESC LIMIT 100''', (guild_id, guild_id))
+        scores = {}
+        if rows:
+            ids = tuple(int(r['id']) for r in rows)
+            placeholders = ','.join(['?'] * len(ids))
+            for s in _nova_guild_rows(conn, f'SELECT * FROM guild_war_scores WHERE war_id IN ({placeholders})', ids):
+                scores.setdefault(str(s['war_id']), []).append(s)
+        return {'wars': rows, 'scores': scores}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/guild/logs')
+def nova_guild_logs(player_id: int, guild_id: int, limit: int = 100, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    player_id = require_bound_player_id(ctx, player_id)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        _nova_guild_require_membership(conn, player_id, guild_id)
+        rows = _nova_guild_rows(conn, 'SELECT * FROM guild_logs WHERE guild_id=? ORDER BY id DESC LIMIT ?', (guild_id, max(1, min(int(limit or 100), 250))))
+        return {'logs': rows}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.get('/api/admin/guild/settings')
+def nova_admin_guild_settings(player_id: int = 0, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    require_admin_context(ctx)
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        return {'settings': _nova_guild_settings(conn)}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+@app.post('/api/admin/guild/settings')
+def nova_admin_guild_settings_update(req: NovaGuildSettingsRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)):
+    require_admin_context(ctx)
+    allowed = {
+        'guild_creation_cost','guild_max_level','daily_contribution_soft_cap','daily_contribution_overcap_multiplier',
+        'new_member_armory_lock_seconds','guild_tax_max_percent','guild_war_prep_seconds','guild_war_duration_seconds',
+        'guild_war_cooldown_seconds','guild_war_base_cost','planet_war_base_cost','planet_war_duration_seconds','planet_war_min_security'
+    }
+    conn = _nova_guild_open_conn()
+    try:
+        nova_guild_ensure_tables(conn)
+        now = _nova_guild_now_iso()
+        for k, v in (_nova_guild_req_dict(req).get('settings') or {}).items():
+            if k in allowed:
+                conn.execute('INSERT OR REPLACE INTO guild_settings(key,value,updated_at) VALUES(?,?,?)', (k, str(v), now))
+        conn.commit()
+        return {'ok': True, 'settings': _nova_guild_settings(conn)}
+    finally:
+        try: conn.close()
+        except Exception: pass
+
+
+
+# === NOVA LEADERBOARDS + STATE SLIMMING PATCH START ===
+# Performance-first leaderboard snapshots, compact metric rollups, guarded maintenance jobs,
+# and state_versions/state_flags helpers. This block is intentionally self-contained so it can
+# attach to the existing single-file Nova backend without requiring a framework rewrite.
+import os as _nova_lb_os
+import json as _nova_lb_json
+import time as _nova_lb_time
+import sqlite3 as _nova_lb_sqlite3
+import traceback as _nova_lb_traceback
+from datetime import datetime as _nova_lb_datetime, timezone as _nova_lb_timezone, timedelta as _nova_lb_timedelta, date as _nova_lb_date
+
+_NOVA_LB_LAST_MAINTENANCE_CHECK = 0.0
+_NOVA_LB_SCHEMA_READY_AT = 0.0
+_NOVA_LB_DEFAULT_TOP_N = 100
+_NOVA_LB_DAILY_REFRESH_SECONDS = int(_nova_lb_os.environ.get("NOVA_LEADERBOARD_REFRESH_SECONDS", "86400"))
+_NOVA_LB_STRICT_STATE_SLIMMING = _nova_lb_os.environ.get("NOVA_STRICT_STATE_SLIMMING", "0") == "1"
+_NOVA_LB_HEAVY_STATE_KEYS = {
+    "leaderboards", "leaderboard_rows", "leaderboard_snapshots", "public_rankings",
+    "world_statistics", "server_analytics", "admin_logs", "full_admin_logs",
+    "chat_history", "chat_messages", "full_chat_messages", "guild_logs", "guild_history",
+    "guild_armory", "market_history", "event_history", "achievement_details",
+    "public_profiles_full", "profile_directory",
+}
+# Only removed when NOVA_STRICT_STATE_SLIMMING=1 because older frontend builds may still depend on it.
+_NOVA_LB_STRICT_EXTRA_HEAVY_STATE_KEYS = {
+    "public_profiles", "achievements", "events", "market", "guild", "messages", "mailbox",
+}
+
+_NOVA_LB_METRICS = [
+    ("player_level", "Player Level", "Progression", "Highest player level reached.", "number", "desc", 1, 1, "progression"),
+    ("total_xp", "Total XP", "Progression", "Total character XP earned.", "number", "desc", 1, 1, "progression"),
+    ("skill_points_earned", "Skill Points Earned", "Progression", "Skill points earned.", "number", "desc", 1, 1, "progression"),
+    ("achievement_points", "Achievement Points", "Progression", "Achievement points earned.", "number", "desc", 1, 1, "progression"),
+    ("wealth_gold", "Wealth / Gold", "Economy", "Current or snapshotted gold wealth.", "currency", "desc", 1, 1, "economy"),
+    ("gold_earned", "Gold Earned", "Economy", "Gold earned from validated gameplay.", "currency", "desc", 1, 1, "economy"),
+    ("trade_profit", "Trading Profit", "Economy", "Net profit from validated trade loops.", "currency", "desc", 1, 1, "economy"),
+    ("market_sales_value", "Market Sales Volume", "Economy", "Total value of market sales.", "currency", "desc", 1, 1, "economy"),
+    ("market_purchase_value", "Market Purchases Volume", "Economy", "Total value of market purchases.", "currency", "desc", 1, 1, "economy"),
+    ("resources_mined", "Resources Mined", "Mining", "Total resources mined.", "number", "desc", 1, 1, "mining"),
+    ("rare_resources_mined", "Rare Resources Mined", "Mining", "Rare resources mined.", "number", "desc", 1, 1, "mining"),
+    ("mining_missions_completed", "Mining Missions Completed", "Mining", "Mining missions completed.", "number", "desc", 1, 1, "mining"),
+    ("mining_haul_value", "Highest / Total Mining Haul Value", "Mining", "Validated mining haul value.", "number", "desc", 1, 1, "mining"),
+    ("materials_processed", "Materials Processed", "Processing", "Total materials processed/refined.", "number", "desc", 1, 1, "processing"),
+    ("processing_output_value", "Processing Output Value", "Processing", "Total processing output value.", "number", "desc", 1, 1, "processing"),
+    ("rare_output_generated", "Rare Output Generated", "Processing", "Rare processing output generated.", "number", "desc", 1, 1, "processing"),
+    ("items_crafted", "Items Crafted", "Crafting", "Items crafted.", "number", "desc", 1, 1, "crafting"),
+    ("ships_crafted", "Ships Crafted", "Crafting", "Ships crafted.", "number", "desc", 1, 1, "crafting"),
+    ("equipment_crafted", "Equipment Crafted", "Crafting", "Equipment crafted.", "number", "desc", 1, 1, "crafting"),
+    ("high_tier_crafts", "High-Tier Crafts", "Crafting", "High-tier crafts completed.", "number", "desc", 1, 1, "crafting"),
+    ("crafting_value_created", "Crafting Value Created", "Crafting", "Validated crafting value created.", "number", "desc", 1, 1, "crafting"),
+    ("npc_kills", "NPC Kills", "Combat", "NPCs defeated.", "number", "desc", 1, 1, "combat"),
+    ("player_kills", "Player Kills", "Combat", "Players defeated.", "number", "desc", 1, 1, "combat"),
+    ("damage_dealt", "Damage Dealt", "Combat", "Validated damage dealt.", "number", "desc", 1, 1, "combat"),
+    ("damage_taken", "Damage Tanked", "Combat", "Validated damage taken/tanked.", "number", "desc", 1, 1, "combat"),
+    ("battles_won", "Battles Won", "Combat", "Battles won.", "number", "desc", 1, 1, "combat"),
+    ("battles_survived", "Battles Survived", "Combat", "Battles survived.", "number", "desc", 1, 1, "combat"),
+    ("bounty_value_claimed", "Bounty Value Claimed", "Combat", "Bounty value claimed.", "currency", "desc", 1, 1, "combat"),
+    ("missions_completed", "Missions Completed", "Missions", "Missions completed.", "number", "desc", 1, 1, "missions"),
+    ("mission_reward_value", "Mission Rewards Earned", "Missions", "Mission reward value earned.", "currency", "desc", 1, 1, "missions"),
+    ("event_participation", "Event Participation", "Missions", "Server event participation score.", "number", "desc", 1, 1, "missions"),
+    ("distance_traveled", "Distance Traveled", "Exploration", "Travel distance completed.", "number", "desc", 1, 1, "exploration"),
+    ("systems_visited", "Systems Visited", "Exploration", "Unique or scored system visits.", "number", "desc", 1, 1, "exploration"),
+    ("galaxies_visited", "Galaxies Visited", "Exploration", "Unique or scored galaxy visits.", "number", "desc", 1, 1, "exploration"),
+    ("anomalies_discovered", "Anomalies Discovered", "Exploration", "Anomalies discovered.", "number", "desc", 1, 1, "exploration"),
+    ("salvage_sites_discovered", "Salvage Sites Discovered", "Exploration", "Salvage sites discovered.", "number", "desc", 1, 1, "exploration"),
+    ("guild_contribution_xp", "Guild Contribution XP", "Guild / War", "Guild XP contributed.", "number", "desc", 1, 1, "guild"),
+    ("materials_donated_to_guild", "Materials Donated to Guild", "Guild / War", "Guild material donation score.", "number", "desc", 1, 1, "guild"),
+    ("treasury_donated", "Treasury Donated", "Guild / War", "Guild treasury donations.", "currency", "desc", 1, 1, "guild"),
+    ("armory_deposits", "Armory Deposits", "Guild / War", "Guild armory deposit count/value.", "number", "desc", 1, 1, "guild"),
+    ("war_score", "War Score", "Guild / War", "Validated war score.", "number", "desc", 1, 1, "war"),
+    ("planet_capture_progress", "Planet Capture Progress", "Guild / War", "Planet capture progress contributed.", "number", "desc", 1, 1, "war"),
+    ("defense_kills", "Defense Kills", "Guild / War", "Defense kills during valid defense events/wars.", "number", "desc", 1, 1, "war"),
+    ("faction_contribution", "Faction Contribution", "Planet / Faction", "Faction contribution score.", "number", "desc", 1, 1, "faction"),
+    ("planet_influence_gained", "Planet Influence Gained", "Planet / Faction", "Planet influence gained.", "number", "desc", 1, 1, "faction"),
+    ("planet_defense_participation", "Planet Defense Participation", "Planet / Faction", "Planet defense participation score.", "number", "desc", 1, 1, "faction"),
+    ("patrol_turret_defense", "Patrol/Turret Defense", "Planet / Faction", "Patrol/turret defense contribution.", "number", "desc", 1, 1, "faction"),
+]
+
+def _nova_lb_now_iso():
+    return _nova_lb_datetime.now(_nova_lb_timezone.utc).replace(microsecond=0).isoformat()
+
+def _nova_lb_today():
+    return _nova_lb_datetime.now(_nova_lb_timezone.utc).date().isoformat()
+
+def _nova_lb_conn():
+    # Prefer existing connection helpers if this backend already has them.
+    for name in ("get_db", "get_conn", "get_connection", "connect_db"):
+        fn = globals().get(name)
+        if callable(fn):
+            try:
+                conn = fn()
+                if conn is not None:
+                    try:
+                        conn.row_factory = _nova_lb_sqlite3.Row
+                    except Exception:
+                        pass
+                    return conn
+            except TypeError:
+                pass
+            except Exception:
+                pass
+    existing = globals().get("conn") or globals().get("db")
+    if isinstance(existing, _nova_lb_sqlite3.Connection):
+        try:
+            existing.row_factory = _nova_lb_sqlite3.Row
+        except Exception:
+            pass
+        return existing
+    db_path = globals().get("DB_PATH") or globals().get("DATABASE") or globals().get("DATABASE_PATH") or _nova_lb_os.environ.get("NOVA_DB_PATH") or "nova_frontiers.db"
+    conn = _nova_lb_sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = _nova_lb_sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
+    return conn
+
+def _nova_lb_close_if_standalone(conn):
+    # Do not close framework-managed connections returned by get_db/get_conn.
+    # Standalone sqlite connections created here are cheap enough to leave to request teardown if present.
+    return None
+
+def _nova_lb_table_exists(conn, table_name):
+    try:
+        row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+def _nova_lb_table_cols(conn, table_name):
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    except Exception:
+        return set()
+
+def _nova_lb_first_col(conn, table_name, names, default=None):
+    cols = _nova_lb_table_cols(conn, table_name)
+    for name in names:
+        if name in cols:
+            return name
+    return default
+
+def _nova_lb_current_player(conn=None):
+    for name in ("get_player", "current_player", "get_current_player", "require_player"):
+        fn = globals().get(name)
+        if callable(fn):
+            try:
+                player = fn()
+                if player:
+                    return dict(player) if not isinstance(player, dict) else player
+            except TypeError:
+                try:
+                    player = fn(conn) if conn is not None else None
+                    if player:
+                        return dict(player) if not isinstance(player, dict) else player
+                except Exception:
+                    pass
+            except Exception:
+                pass
+    try:
+        from flask import session, request
+        player_id = session.get("player_id") or session.get("user_id") or request.headers.get("X-Player-Id")
+    except Exception:
+        player_id = None
+    if conn is not None and player_id and _nova_lb_table_exists(conn, "players"):
+        id_col = _nova_lb_first_col(conn, "players", ["id", "player_id"], "id")
+        try:
+            row = conn.execute(f"SELECT * FROM players WHERE {id_col}=?", (player_id,)).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+    return None
+
+def _nova_lb_player_id(player):
+    if not player:
+        return None
+    for key in ("id", "player_id", "userid", "user_id"):
+        if key in player and player.get(key) is not None:
+            return player.get(key)
+    return None
+
+def _nova_lb_is_admin(player):
+    if not player:
+        return False
+    for key in ("is_admin", "admin", "isAdmin", "god_mode", "godmode"):
+        if bool(player.get(key)):
+            return True
+    role = str(player.get("role") or player.get("account_type") or player.get("type") or "").lower()
+    return role in {"admin", "administrator", "god", "godmode", "owner"}
+
+def _nova_lb_player_name_expr(conn):
+    if not _nova_lb_table_exists(conn, "players"):
+        return "CAST(r.player_id AS TEXT)"
+    cols = _nova_lb_table_cols(conn, "players")
+    for col in ("display_name", "name", "username", "handle", "callsign"):
+        if col in cols:
+            return f"COALESCE(p.{col}, CAST(r.player_id AS TEXT))"
+    return "CAST(r.player_id AS TEXT)"
+
+def _nova_lb_players_id_col(conn):
+    return _nova_lb_first_col(conn, "players", ["id", "player_id", "userid", "user_id"], "id")
+
+def nova_ensure_leaderboard_schema(conn=None):
+    global _NOVA_LB_SCHEMA_READY_AT
+    now = _nova_lb_time.time()
+    if conn is None and now - _NOVA_LB_SCHEMA_READY_AT < 60:
+        return
+    conn = conn or _nova_lb_conn()
+    cur = conn.cursor()
+    cur.executescript("""
+    CREATE TABLE IF NOT EXISTS leaderboard_metric_definitions (
+        metric_key TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        value_type TEXT DEFAULT 'number',
+        sort_direction TEXT DEFAULT 'desc',
+        enabled INTEGER DEFAULT 1,
+        visible_to_players INTEGER DEFAULT 1,
+        source_event_type TEXT DEFAULT '',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS player_metric_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        player_id INTEGER NOT NULL,
+        faction_id INTEGER,
+        guild_id INTEGER,
+        planet_id INTEGER,
+        metric_key TEXT NOT NULL,
+        amount REAL NOT NULL,
+        metadata_json TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS player_metric_daily_rollups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        player_id INTEGER NOT NULL,
+        faction_id INTEGER,
+        guild_id INTEGER,
+        metric_key TEXT NOT NULL,
+        metric_date TEXT NOT NULL,
+        value REAL NOT NULL DEFAULT 0,
+        event_count INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(player_id, metric_key, metric_date)
+    );
+    CREATE TABLE IF NOT EXISTS leaderboard_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_key TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        faction_id INTEGER,
+        period TEXT NOT NULL,
+        period_start TEXT,
+        period_end TEXT,
+        generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        next_refresh_at TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
+        generated_by TEXT DEFAULT 'system',
+        is_current INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS leaderboard_snapshot_rows (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        snapshot_id INTEGER NOT NULL,
+        rank INTEGER NOT NULL,
+        player_id INTEGER NOT NULL,
+        player_name TEXT,
+        faction_id INTEGER,
+        guild_id INTEGER,
+        value REAL NOT NULL,
+        secondary_value REAL,
+        metadata_json TEXT,
+        FOREIGN KEY(snapshot_id) REFERENCES leaderboard_snapshots(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS leaderboard_refresh_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_type TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        requested_by INTEGER,
+        started_at TEXT,
+        finished_at TEXT,
+        error_message TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS maintenance_jobs (
+        job_key TEXT PRIMARY KEY,
+        last_run_at TEXT,
+        next_run_at TEXT,
+        interval_seconds INTEGER NOT NULL DEFAULT 86400,
+        status TEXT NOT NULL DEFAULT 'idle',
+        locked_until TEXT,
+        last_error TEXT,
+        manual_requested INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS nova_state_versions (
+        version_key TEXT PRIMARY KEY,
+        version_value INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS leaderboard_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_player_metric_events_metric_created ON player_metric_events(metric_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_player_metric_events_player_metric_created ON player_metric_events(player_id, metric_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_player_metric_events_faction_metric_created ON player_metric_events(faction_id, metric_key, created_at);
+    CREATE INDEX IF NOT EXISTS idx_player_metric_rollups_metric_date ON player_metric_daily_rollups(metric_key, metric_date);
+    CREATE INDEX IF NOT EXISTS idx_player_metric_rollups_player_metric_date ON player_metric_daily_rollups(player_id, metric_key, metric_date);
+    CREATE INDEX IF NOT EXISTS idx_leaderboard_snapshots_lookup ON leaderboard_snapshots(metric_key, scope, faction_id, period, is_current);
+    CREATE INDEX IF NOT EXISTS idx_leaderboard_rows_snapshot_rank ON leaderboard_snapshot_rows(snapshot_id, rank);
+    CREATE INDEX IF NOT EXISTS idx_leaderboard_rows_player ON leaderboard_snapshot_rows(player_id);
+    """)
+    cur.execute("INSERT OR IGNORE INTO leaderboard_settings(setting_key, setting_value) VALUES('top_n', ?)", (str(_NOVA_LB_DEFAULT_TOP_N),))
+    cur.execute("INSERT OR IGNORE INTO leaderboard_settings(setting_key, setting_value) VALUES('refresh_seconds', ?)", (str(_NOVA_LB_DAILY_REFRESH_SECONDS),))
+    for metric in _NOVA_LB_METRICS:
+        cur.execute("""
+            INSERT OR IGNORE INTO leaderboard_metric_definitions
+                (metric_key, display_name, category, description, value_type, sort_direction, enabled, visible_to_players, source_event_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, metric)
+    for key, interval in (
+        ("leaderboard_daily_refresh", 86400),
+        ("leaderboard_weekly_refresh", 86400),
+        ("leaderboard_all_time_refresh", 86400),
+        ("market_summary_refresh", 3600),
+        ("faction_summary_refresh", 3600),
+        ("galaxy_security_balance", 600),
+        ("npc_spawn_balance", 600),
+        ("server_event_summary", 300),
+        ("stale_cleanup", 900),
+        ("achievement_summary_refresh", 86400),
+    ):
+        cur.execute("""
+            INSERT OR IGNORE INTO maintenance_jobs(job_key, interval_seconds, status, next_run_at, updated_at)
+            VALUES (?, ?, 'idle', ?, ?)
+        """, (key, interval, _nova_lb_now_iso(), _nova_lb_now_iso()))
+    conn.commit()
+    _NOVA_LB_SCHEMA_READY_AT = now
+
+def nova_bump_state_version(conn, version_key):
+    try:
+        nova_ensure_leaderboard_schema(conn)
+        conn.execute("""
+            INSERT INTO nova_state_versions(version_key, version_value, updated_at)
+            VALUES(?, 1, ?)
+            ON CONFLICT(version_key) DO UPDATE SET
+                version_value = version_value + 1,
+                updated_at = excluded.updated_at
+        """, (version_key, _nova_lb_now_iso()))
+    except Exception:
+        pass
+
+def _nova_lb_get_setting(conn, key, default):
+    try:
+        row = conn.execute("SELECT setting_value FROM leaderboard_settings WHERE setting_key=?", (key,)).fetchone()
+        return row[0] if row else default
+    except Exception:
+        return default
+
+def record_player_metric(conn, player_id, metric_key, amount, faction_id=None, guild_id=None, planet_id=None, metadata=None):
+    return nova_record_player_metric(conn, player_id, metric_key, amount, faction_id, guild_id, planet_id, metadata)
+
+def nova_record_player_metric(conn, player_id, metric_key, amount, faction_id=None, guild_id=None, planet_id=None, metadata=None):
+    """Server-side metric hook. Call this from validated gameplay actions only."""
+    try:
+        nova_ensure_leaderboard_schema(conn)
+        if not player_id or metric_key is None:
+            return False
+        amount = float(amount)
+        if amount <= 0:
+            return False
+        row = conn.execute("SELECT enabled FROM leaderboard_metric_definitions WHERE metric_key=?", (metric_key,)).fetchone()
+        if not row or int(row[0]) != 1:
+            return False
+        if (faction_id is None or guild_id is None) and _nova_lb_table_exists(conn, "players"):
+            id_col = _nova_lb_players_id_col(conn)
+            cols = _nova_lb_table_cols(conn, "players")
+            select_cols = []
+            if "faction_id" in cols:
+                select_cols.append("faction_id")
+            elif "faction" in cols:
+                select_cols.append("faction")
+            if "guild_id" in cols:
+                select_cols.append("guild_id")
+            if select_cols:
+                prow = conn.execute(f"SELECT {', '.join(select_cols)} FROM players WHERE {id_col}=?", (player_id,)).fetchone()
+                if prow:
+                    pd = dict(prow)
+                    faction_id = faction_id if faction_id is not None else pd.get("faction_id", pd.get("faction"))
+                    guild_id = guild_id if guild_id is not None else pd.get("guild_id")
+        metadata_json = _nova_lb_json.dumps(metadata or {}, separators=(",", ":"))[:2000]
+        now_iso = _nova_lb_now_iso()
+        metric_date = _nova_lb_today()
+        conn.execute("""
+            INSERT INTO player_metric_events(player_id, faction_id, guild_id, planet_id, metric_key, amount, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (player_id, faction_id, guild_id, planet_id, metric_key, amount, metadata_json, now_iso))
+        conn.execute("""
+            INSERT INTO player_metric_daily_rollups(player_id, faction_id, guild_id, metric_key, metric_date, value, event_count, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(player_id, metric_key, metric_date) DO UPDATE SET
+                value = value + excluded.value,
+                event_count = event_count + 1,
+                faction_id = COALESCE(excluded.faction_id, faction_id),
+                guild_id = COALESCE(excluded.guild_id, guild_id),
+                updated_at = excluded.updated_at
+        """, (player_id, faction_id, guild_id, metric_key, metric_date, amount, now_iso))
+        nova_bump_state_version(conn, "leaderboards")
+        return True
+    except Exception as exc:
+        try:
+            print("[leaderboards] metric write failed", metric_key, exc)
+        except Exception:
+            pass
+        return False
+
+def _nova_lb_period_bounds(period):
+    now = _nova_lb_datetime.now(_nova_lb_timezone.utc)
+    today = now.date()
+    if period == "daily":
+        start = today
+        end = today
+    elif period == "weekly":
+        start = today - _nova_lb_timedelta(days=today.weekday())
+        end = today
+    elif period == "monthly":
+        start = today.replace(day=1)
+        end = today
+    elif period in ("all_time", "all-time", "all"):
+        start = _nova_lb_date(1970, 1, 1)
+        end = today
+        period = "all_time"
+    else:
+        start = today
+        end = today
+        period = "daily"
+    return period, start.isoformat(), end.isoformat()
+
+def nova_generate_leaderboard_snapshot(conn, metric_key, scope="global", period="daily", faction_id=None, top_n=None, generated_by="system"):
+    nova_ensure_leaderboard_schema(conn)
+    period, start, end = _nova_lb_period_bounds(period)
+    scope = scope if scope in {"global", "faction"} else "global"
+    if scope == "global":
+        faction_id = None
+    try:
+        top_n = int(top_n or _nova_lb_get_setting(conn, "top_n", _NOVA_LB_DEFAULT_TOP_N))
+    except Exception:
+        top_n = _NOVA_LB_DEFAULT_TOP_N
+    top_n = max(1, min(top_n, 500))
+    metric = conn.execute("SELECT * FROM leaderboard_metric_definitions WHERE metric_key=? AND enabled=1", (metric_key,)).fetchone()
+    if not metric:
+        return None
+    players_join = ""
+    player_name = "CAST(r.player_id AS TEXT)"
+    id_col = "id"
+    if _nova_lb_table_exists(conn, "players"):
+        id_col = _nova_lb_players_id_col(conn)
+        players_join = f"LEFT JOIN players p ON p.{id_col}=r.player_id"
+        player_name = _nova_lb_player_name_expr(conn)
+    where = "r.metric_key=? AND r.metric_date>=? AND r.metric_date<=?"
+    params = [metric_key, start, end]
+    if scope == "faction":
+        where += " AND r.faction_id=?"
+        params.append(faction_id)
+    rows = conn.execute(f"""
+        SELECT r.player_id,
+               {player_name} AS player_name,
+               MAX(r.faction_id) AS faction_id,
+               MAX(r.guild_id) AS guild_id,
+               SUM(r.value) AS value,
+               SUM(r.event_count) AS secondary_value
+        FROM player_metric_daily_rollups r
+        {players_join}
+        WHERE {where}
+        GROUP BY r.player_id
+        HAVING value > 0
+        ORDER BY value DESC, secondary_value DESC
+        LIMIT ?
+    """, tuple(params + [top_n])).fetchall()
+    old = conn.execute("SELECT COALESCE(MAX(version), 0) FROM leaderboard_snapshots WHERE metric_key=? AND scope=? AND COALESCE(faction_id, -1)=COALESCE(?, -1) AND period=?", (metric_key, scope, faction_id, period)).fetchone()[0]
+    version = int(old or 0) + 1
+    now_iso = _nova_lb_now_iso()
+    next_iso = (_nova_lb_datetime.now(_nova_lb_timezone.utc) + _nova_lb_timedelta(seconds=int(_nova_lb_get_setting(conn, "refresh_seconds", _NOVA_LB_DAILY_REFRESH_SECONDS)))).replace(microsecond=0).isoformat()
+    conn.execute("UPDATE leaderboard_snapshots SET is_current=0 WHERE metric_key=? AND scope=? AND COALESCE(faction_id, -1)=COALESCE(?, -1) AND period=?", (metric_key, scope, faction_id, period))
+    cur = conn.execute("""
+        INSERT INTO leaderboard_snapshots(metric_key, scope, faction_id, period, period_start, period_end, generated_at, next_refresh_at, version, generated_by, is_current)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+    """, (metric_key, scope, faction_id, period, start, end, now_iso, next_iso, version, str(generated_by or "system")))
+    snapshot_id = cur.lastrowid
+    for index, row in enumerate(rows, start=1):
+        conn.execute("""
+            INSERT INTO leaderboard_snapshot_rows(snapshot_id, rank, player_id, player_name, faction_id, guild_id, value, secondary_value, metadata_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (snapshot_id, index, row["player_id"], row["player_name"], row["faction_id"], row["guild_id"], row["value"], row["secondary_value"], "{}"))
+    nova_bump_state_version(conn, "leaderboards")
+    return snapshot_id
+
+def nova_generate_leaderboards(conn, metric_key=None, scope=None, faction_id=None, period=None, generated_by="system"):
+    nova_ensure_leaderboard_schema(conn)
+    metric_rows = conn.execute("SELECT metric_key FROM leaderboard_metric_definitions WHERE enabled=1 AND visible_to_players=1" + (" AND metric_key=?" if metric_key else ""), ((metric_key,) if metric_key else ())).fetchall()
+    periods = [period] if period else ["daily", "weekly", "all_time"]
+    scopes = [scope] if scope else ["global", "faction"]
+    faction_ids = []
+    if faction_id is not None:
+        faction_ids = [faction_id]
+    else:
+        try:
+            faction_ids = [r[0] for r in conn.execute("SELECT DISTINCT faction_id FROM player_metric_daily_rollups WHERE faction_id IS NOT NULL").fetchall()]
+        except Exception:
+            faction_ids = []
+    made = 0
+    errors = []
+    for m in metric_rows:
+        mk = m[0]
+        for per in periods:
+            for sc in scopes:
+                if sc == "global":
+                    try:
+                        if nova_generate_leaderboard_snapshot(conn, mk, "global", per, None, generated_by=generated_by):
+                            made += 1
+                    except Exception as exc:
+                        errors.append(f"{mk}/global/{per}: {exc}")
+                elif sc == "faction":
+                    for fid in faction_ids:
+                        try:
+                            if nova_generate_leaderboard_snapshot(conn, mk, "faction", per, fid, generated_by=generated_by):
+                                made += 1
+                        except Exception as exc:
+                            errors.append(f"{mk}/faction/{fid}/{per}: {exc}")
+    conn.commit()
+    return {"generated": made, "errors": errors[:20]}
+
+def nova_should_run_job(conn, job_key, interval_seconds):
+    nova_ensure_leaderboard_schema(conn)
+    now = _nova_lb_datetime.now(_nova_lb_timezone.utc)
+    now_iso = now.replace(microsecond=0).isoformat()
+    locked_cutoff = now_iso
+    row = conn.execute("SELECT * FROM maintenance_jobs WHERE job_key=?", (job_key,)).fetchone()
+    if not row:
+        conn.execute("INSERT OR IGNORE INTO maintenance_jobs(job_key, interval_seconds, status, next_run_at, updated_at) VALUES (?, ?, 'idle', ?, ?)", (job_key, interval_seconds, now_iso, now_iso))
+        row = conn.execute("SELECT * FROM maintenance_jobs WHERE job_key=?", (job_key,)).fetchone()
+    if row["status"] == "running" and row["locked_until"] and row["locked_until"] > locked_cutoff:
+        return False
+    manual = int(row["manual_requested"] or 0) == 1
+    due = manual or not row["next_run_at"] or row["next_run_at"] <= now_iso
+    if not due:
+        return False
+    lock_until = (now + _nova_lb_timedelta(minutes=5)).replace(microsecond=0).isoformat()
+    conn.execute("UPDATE maintenance_jobs SET status='running', locked_until=?, manual_requested=0, updated_at=? WHERE job_key=?", (lock_until, now_iso, job_key))
+    conn.commit()
+    return True
+
+def nova_mark_job_finished(conn, job_key, interval_seconds, error=None):
+    now = _nova_lb_datetime.now(_nova_lb_timezone.utc)
+    now_iso = now.replace(microsecond=0).isoformat()
+    next_iso = (now + _nova_lb_timedelta(seconds=int(interval_seconds))).replace(microsecond=0).isoformat()
+    conn.execute("""
+        UPDATE maintenance_jobs
+        SET status=?, last_run_at=?, next_run_at=?, locked_until=NULL, last_error=?, updated_at=?
+        WHERE job_key=?
+    """, ("error" if error else "idle", now_iso, next_iso, str(error)[:1000] if error else None, now_iso, job_key))
+    conn.commit()
+
+def nova_request_manual_job(conn, job_key, requested_by=None):
+    nova_ensure_leaderboard_schema(conn)
+    conn.execute("""
+        INSERT INTO maintenance_jobs(job_key, interval_seconds, manual_requested, status, updated_at)
+        VALUES(?, 86400, 1, 'idle', ?)
+        ON CONFLICT(job_key) DO UPDATE SET manual_requested=1, updated_at=excluded.updated_at
+    """, (job_key, _nova_lb_now_iso()))
+    conn.execute("INSERT INTO leaderboard_refresh_jobs(job_type, status, requested_by, created_at) VALUES (?, 'queued', ?, ?)", (job_key, requested_by, _nova_lb_now_iso()))
+    conn.commit()
+
+def nova_run_due_maintenance(max_jobs=1):
+    conn = _nova_lb_conn()
+    ran = 0
+    for job_key, interval in (("leaderboard_daily_refresh", 86400), ("leaderboard_weekly_refresh", 86400), ("leaderboard_all_time_refresh", 86400)):
+        if ran >= max_jobs:
+            break
+        if not nova_should_run_job(conn, job_key, interval):
+            continue
+        error = None
+        try:
+            period = "daily" if "daily" in job_key else ("weekly" if "weekly" in job_key else "all_time")
+            nova_generate_leaderboards(conn, period=period, generated_by="maintenance")
+            ran += 1
+        except Exception as exc:
+            error = exc
+            try:
+                print("[leaderboards] maintenance failed", job_key, exc)
+                print(_nova_lb_traceback.format_exc())
+            except Exception:
+                pass
+        finally:
+            nova_mark_job_finished(conn, job_key, interval, error)
+    return ran
+
+def nova_leaderboard_state_versions(conn=None, player=None):
+    conn = conn or _nova_lb_conn()
+    try:
+        nova_ensure_leaderboard_schema(conn)
+        def version(key):
+            row = conn.execute("SELECT version_value FROM nova_state_versions WHERE version_key=?", (key,)).fetchone()
+            return int(row[0]) if row else 1
+        latest_lb = conn.execute("SELECT COALESCE(MAX(version), 1) FROM leaderboard_snapshots WHERE is_current=1").fetchone()[0]
+        result = {
+            "leaderboards": int(latest_lb or version("leaderboards")),
+            "guild_summary": version("guild_summary"),
+            "chat_global": version("chat_global"),
+            "chat_faction": version("chat_faction"),
+            "messages_unread": version("messages_unread"),
+            "market_summary": version("market_summary"),
+            "events_summary": version("events_summary"),
+            "profile": version("profile"),
+            "achievements": version("achievements"),
+            "admin_alerts": version("admin_alerts"),
+        }
+        return result
+    except Exception:
+        return {"leaderboards": 1}
+
+def nova_leaderboard_state_flags(conn=None, player=None):
+    conn = conn or _nova_lb_conn()
+    player = player or _nova_lb_current_player(conn)
+    player_id = _nova_lb_player_id(player)
+    flags = {
+        "has_unread_messages": False,
+        "has_active_battle": False,
+        "has_active_war": False,
+        "has_pending_guild_invite": False,
+        "guild_data_stale": False,
+        "leaderboards_stale": False,
+        "event_page_stale": False,
+    }
+    try:
+        if player_id and _nova_lb_table_exists(conn, "guild_invites"):
+            cols = _nova_lb_table_cols(conn, "guild_invites")
+            recipient_col = _nova_lb_first_col(conn, "guild_invites", ["player_id", "recipient_player_id", "invitee_id"], None)
+            status_col = _nova_lb_first_col(conn, "guild_invites", ["status", "state"], None)
+            if recipient_col:
+                sql = f"SELECT 1 FROM guild_invites WHERE {recipient_col}=?"
+                params = [player_id]
+                if status_col:
+                    sql += f" AND {status_col} IN ('pending','open','sent')"
+                flags["has_pending_guild_invite"] = bool(conn.execute(sql + " LIMIT 1", tuple(params)).fetchone())
+        if _nova_lb_table_exists(conn, "leaderboard_snapshots"):
+            refresh_seconds = int(_nova_lb_get_setting(conn, "refresh_seconds", _NOVA_LB_DAILY_REFRESH_SECONDS))
+            stale_cutoff = (_nova_lb_datetime.now(_nova_lb_timezone.utc) - _nova_lb_timedelta(seconds=refresh_seconds + 3600)).replace(microsecond=0).isoformat()
+            row = conn.execute("SELECT 1 FROM leaderboard_snapshots WHERE is_current=1 AND generated_at < ? LIMIT 1", (stale_cutoff,)).fetchone()
+            flags["leaderboards_stale"] = bool(row)
+    except Exception:
+        pass
+    return flags
+
+def nova_slim_state_payload(state, conn=None, player=None):
+    if not isinstance(state, dict):
+        return state
+    conn = conn or _nova_lb_conn()
+    state.setdefault("state_versions", nova_leaderboard_state_versions(conn, player))
+    state.setdefault("state_flags", nova_leaderboard_state_flags(conn, player))
+    deferred = state.setdefault("deferred_sections", {})
+    keys = set(_NOVA_LB_HEAVY_STATE_KEYS)
+    if _NOVA_LB_STRICT_STATE_SLIMMING:
+        keys |= _NOVA_LB_STRICT_EXTRA_HEAVY_STATE_KEYS
+    for key in list(keys):
+        if key not in state:
+            continue
+        value = state.get(key)
+        count = len(value) if hasattr(value, "__len__") and not isinstance(value, (str, bytes)) else None
+        endpoint = {
+            "leaderboards": "/api/leaderboards",
+            "chat_history": "/api/chat/messages",
+            "chat_messages": "/api/chat/messages",
+            "guild_logs": "/api/guild/logs",
+            "guild_armory": "/api/guild/armory",
+            "market_history": "/api/market/history",
+            "event_history": "/api/events",
+            "achievement_details": "/api/achievements",
+            "public_profiles": "/api/profile/public-profiles",
+        }.get(key)
+        deferred[key] = {"count": count, "endpoint": endpoint, "reason": "not_hot_path"}
+        del state[key]
+    return state
+
+def nova_leaderboard_summary_payload(conn, player=None):
+    nova_ensure_leaderboard_schema(conn)
+    player = player or _nova_lb_current_player(conn)
+    rows = conn.execute("SELECT * FROM leaderboard_metric_definitions WHERE enabled=1 AND visible_to_players=1 ORDER BY category, display_name").fetchall()
+    metrics = [dict(r) for r in rows]
+    categories = []
+    seen = set()
+    for m in metrics:
+        cat = m.get("category")
+        if cat not in seen:
+            seen.add(cat)
+            categories.append(cat)
+    latest = conn.execute("SELECT MAX(generated_at) AS generated_at, MAX(next_refresh_at) AS next_refresh_at, COALESCE(MAX(version), 1) AS version FROM leaderboard_snapshots WHERE is_current=1").fetchone()
+    current_faction = None
+    if player:
+        current_faction = player.get("faction_id", player.get("faction"))
+    return {
+        "metrics": metrics,
+        "categories": categories,
+        "current_faction_id": current_faction,
+        "snapshot_version": int((latest and latest["version"]) or 1),
+        "last_generated_at": (latest and latest["generated_at"]) or None,
+        "next_refresh_at": (latest and latest["next_refresh_at"]) or None,
+        "is_admin": _nova_lb_is_admin(player),
+        "state_versions": nova_leaderboard_state_versions(conn, player),
+    }
+
+def nova_api_json(payload, status=200):
+    try:
+        from flask import jsonify
+        return jsonify(payload), status
+    except Exception:
+        return payload
+
+try:
+    _nova_lb_app = globals().get("app")
+    if _nova_lb_app is not None and not getattr(_nova_lb_app, "_nova_leaderboards_routes_registered", False):
+        @_nova_lb_app.route("/api/leaderboards/summary", methods=["GET"])
+        def nova_api_leaderboard_summary():
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            return nova_api_json(nova_leaderboard_summary_payload(conn, player))
+
+        @_nova_lb_app.route("/api/leaderboards", methods=["GET"])
+        def nova_api_leaderboards():
+            from flask import request
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            nova_ensure_leaderboard_schema(conn)
+            metric_key = request.args.get("metric_key") or "player_level"
+            scope = request.args.get("scope") or "global"
+            period = request.args.get("period") or "daily"
+            limit = max(1, min(int(request.args.get("limit") or _nova_lb_get_setting(conn, "top_n", _NOVA_LB_DEFAULT_TOP_N)), 500))
+            faction_id = request.args.get("faction_id")
+            if scope == "faction" and not faction_id and player:
+                faction_id = player.get("faction_id", player.get("faction"))
+            try:
+                faction_id = int(faction_id) if faction_id not in (None, "", "None") else None
+            except Exception:
+                faction_id = None
+            snap = conn.execute("""
+                SELECT * FROM leaderboard_snapshots
+                WHERE metric_key=? AND scope=? AND COALESCE(faction_id, -1)=COALESCE(?, -1) AND period=? AND is_current=1
+                ORDER BY generated_at DESC, id DESC LIMIT 1
+            """, (metric_key, scope, faction_id, period)).fetchone()
+            if not snap:
+                # Bounded first-view generation only for the selected metric/scope/period. Full rebuilds are admin/maintenance only.
+                nova_generate_leaderboard_snapshot(conn, metric_key, scope, period, faction_id, generated_by="first_view")
+                conn.commit()
+                snap = conn.execute("""
+                    SELECT * FROM leaderboard_snapshots
+                    WHERE metric_key=? AND scope=? AND COALESCE(faction_id, -1)=COALESCE(?, -1) AND period=? AND is_current=1
+                    ORDER BY generated_at DESC, id DESC LIMIT 1
+                """, (metric_key, scope, faction_id, period)).fetchone()
+            metric = conn.execute("SELECT * FROM leaderboard_metric_definitions WHERE metric_key=?", (metric_key,)).fetchone()
+            rows = []
+            if snap:
+                rows = [dict(r) for r in conn.execute("SELECT * FROM leaderboard_snapshot_rows WHERE snapshot_id=? ORDER BY rank LIMIT ?", (snap["id"], limit)).fetchall()]
+            refresh_seconds = int(_nova_lb_get_setting(conn, "refresh_seconds", _NOVA_LB_DAILY_REFRESH_SECONDS))
+            stale = False
+            if snap and snap["generated_at"]:
+                try:
+                    gen = _nova_lb_datetime.fromisoformat(str(snap["generated_at"]).replace("Z", "+00:00"))
+                    stale = (_nova_lb_datetime.now(_nova_lb_timezone.utc) - gen).total_seconds() > refresh_seconds + 3600
+                except Exception:
+                    stale = False
+            return nova_api_json({
+                "metric": dict(metric) if metric else None,
+                "scope": scope,
+                "faction_id": faction_id,
+                "period": period,
+                "generated_at": snap["generated_at"] if snap else None,
+                "next_refresh_at": snap["next_refresh_at"] if snap else None,
+                "stale": stale,
+                "version": int(snap["version"]) if snap else 1,
+                "rows": rows,
+                "current_player_id": _nova_lb_player_id(player),
+            })
+
+        @_nova_lb_app.route("/api/leaderboards/player", methods=["GET"])
+        def nova_api_leaderboard_player():
+            from flask import request
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            player_id = request.args.get("player_id") or _nova_lb_player_id(player)
+            period = request.args.get("period") or "daily"
+            if not player_id:
+                return nova_api_json({"error": "player_id required"}, 400)
+            rows = conn.execute("""
+                SELECT s.metric_key, s.scope, s.faction_id, s.period, s.generated_at, r.rank, r.value, r.secondary_value
+                FROM leaderboard_snapshot_rows r
+                JOIN leaderboard_snapshots s ON s.id=r.snapshot_id
+                WHERE r.player_id=? AND s.period=? AND s.is_current=1
+                ORDER BY s.metric_key, s.scope
+            """, (player_id, period)).fetchall()
+            return nova_api_json({"player_id": player_id, "period": period, "ranks": [dict(r) for r in rows]})
+
+        @_nova_lb_app.route("/api/admin/leaderboards/refresh", methods=["POST"])
+        def nova_api_admin_leaderboard_refresh():
+            from flask import request
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            if not _nova_lb_is_admin(player):
+                return nova_api_json({"error": "admin required"}, 403)
+            data = request.get_json(silent=True) or {}
+            conn.execute("INSERT INTO leaderboard_refresh_jobs(job_type, status, requested_by, started_at, created_at) VALUES('manual_refresh', 'running', ?, ?, ?)", (_nova_lb_player_id(player), _nova_lb_now_iso(), _nova_lb_now_iso()))
+            job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            error = None
+            try:
+                result = nova_generate_leaderboards(conn, metric_key=data.get("metric_key"), scope=data.get("scope"), faction_id=data.get("faction_id"), period=data.get("period"), generated_by=f"admin:{_nova_lb_player_id(player)}")
+                conn.execute("UPDATE leaderboard_refresh_jobs SET status='finished', finished_at=? WHERE id=?", (_nova_lb_now_iso(), job_id))
+                conn.commit()
+                return nova_api_json({"ok": True, **result})
+            except Exception as exc:
+                error = str(exc)
+                conn.execute("UPDATE leaderboard_refresh_jobs SET status='error', finished_at=?, error_message=? WHERE id=?", (_nova_lb_now_iso(), error[:1000], job_id))
+                conn.commit()
+                return nova_api_json({"ok": False, "error": error}, 500)
+
+        @_nova_lb_app.route("/api/admin/leaderboards/settings", methods=["POST"])
+        def nova_api_admin_leaderboard_settings():
+            from flask import request
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            if not _nova_lb_is_admin(player):
+                return nova_api_json({"error": "admin required"}, 403)
+            data = request.get_json(silent=True) or {}
+            for key in ("top_n", "refresh_seconds"):
+                if key in data:
+                    conn.execute("INSERT INTO leaderboard_settings(setting_key, setting_value, updated_at) VALUES(?, ?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at", (key, str(data[key]), _nova_lb_now_iso()))
+            if "metric_key" in data and "enabled" in data:
+                conn.execute("UPDATE leaderboard_metric_definitions SET enabled=? WHERE metric_key=?", (1 if data.get("enabled") else 0, data.get("metric_key")))
+            nova_bump_state_version(conn, "leaderboards")
+            conn.commit()
+            return nova_api_json({"ok": True})
+
+        @_nova_lb_app.route("/api/admin/maintenance/jobs", methods=["GET"])
+        def nova_api_admin_maintenance_jobs():
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            if not _nova_lb_is_admin(player):
+                return nova_api_json({"error": "admin required"}, 403)
+            nova_ensure_leaderboard_schema(conn)
+            jobs = [dict(r) for r in conn.execute("SELECT * FROM maintenance_jobs ORDER BY job_key").fetchall()]
+            refresh_jobs = [dict(r) for r in conn.execute("SELECT * FROM leaderboard_refresh_jobs ORDER BY id DESC LIMIT 25").fetchall()]
+            return nova_api_json({"jobs": jobs, "leaderboard_refresh_jobs": refresh_jobs})
+
+        @_nova_lb_app.route("/api/admin/maintenance/run", methods=["POST"])
+        def nova_api_admin_maintenance_run():
+            from flask import request
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            if not _nova_lb_is_admin(player):
+                return nova_api_json({"error": "admin required"}, 403)
+            data = request.get_json(silent=True) or {}
+            job_key = data.get("job_key") or "leaderboard_daily_refresh"
+            nova_request_manual_job(conn, job_key, _nova_lb_player_id(player))
+            return nova_api_json({"ok": True, "job_key": job_key})
+
+        @_nova_lb_app.route("/api/admin/state/debug", methods=["GET"])
+        def nova_api_admin_state_debug():
+            conn = _nova_lb_conn()
+            player = _nova_lb_current_player(conn)
+            if not _nova_lb_is_admin(player):
+                return nova_api_json({"error": "admin required"}, 403)
+            payload = {}
+            try:
+                if callable(globals().get("build_state")) and player:
+                    current_user = None
+                    try:
+                        uid = player.get("user_id") or player.get("id")
+                        current_user = row(conn, "SELECT * FROM users WHERE id=?", (uid,)) if uid else None
+                    except Exception:
+                        current_user = None
+                    if current_user:
+                        payload = globals()["build_state"](conn, current_user, player)
+            except Exception as exc:
+                return nova_api_json({"error": str(exc)}, 500)
+            sizes = []
+            for key, val in (payload or {}).items():
+                try:
+                    raw = _nova_lb_json.dumps(val, default=str)
+                    sizes.append({"key": key, "bytes": len(raw), "count": len(val) if hasattr(val, "__len__") and not isinstance(val, (str, bytes)) else None})
+                except Exception:
+                    sizes.append({"key": key, "bytes": None, "count": None})
+            sizes.sort(key=lambda x: x["bytes"] or 0, reverse=True)
+            return nova_api_json({"total_bytes": sum(x["bytes"] or 0 for x in sizes), "sections": sizes[:50], "strict_state_slimming": _NOVA_LB_STRICT_STATE_SLIMMING})
+
+        try:
+            @_nova_lb_app.before_request
+            def nova_leaderboard_lightweight_maintenance_tick():
+                global _NOVA_LB_LAST_MAINTENANCE_CHECK
+                try:
+                    from flask import request
+                    if request.path.startswith("/api/state"):
+                        return None
+                    now = _nova_lb_time.time()
+                    if now - _NOVA_LB_LAST_MAINTENANCE_CHECK < 60:
+                        return None
+                    _NOVA_LB_LAST_MAINTENANCE_CHECK = now
+                    nova_run_due_maintenance(max_jobs=1)
+                except Exception:
+                    return None
+                return None
+        except Exception:
+            pass
+
+        setattr(_nova_lb_app, "_nova_leaderboards_routes_registered", True)
+except Exception as _nova_lb_route_exc:
+    try:
+        print("[leaderboards] route registration skipped", _nova_lb_route_exc)
+    except Exception:
+        pass
+# === NOVA LEADERBOARDS + STATE SLIMMING PATCH END ===
+
+
+# === NOVA_GUILD_WAR_MAP_LEVELS_PATCH_BEGIN ===
+def nova_now_iso():
+    try:
+        return datetime.utcnow().isoformat()
+    except Exception:
+        import datetime as _dt
+        return _dt.datetime.utcnow().isoformat()
+
+
+def nova__table_exists(conn, table_name):
+    try:
+        row = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def nova_is_guild_war_active(conn, guild_a_id, guild_b_id):
+    if not guild_a_id or not guild_b_id or guild_a_id == guild_b_id:
+        return False
+    if not nova__table_exists(conn, 'guild_wars'):
+        return False
+    now_iso = nova_now_iso()
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM guild_wars
+            WHERE ((attacker_guild_id = ? AND defender_guild_id = ?) OR (attacker_guild_id = ? AND defender_guild_id = ?))
+              AND status IN ('pending', 'preparation', 'active')
+              AND (end_at IS NULL OR end_at >= ?)
+            LIMIT 1
+            """,
+            (guild_a_id, guild_b_id, guild_b_id, guild_a_id, now_iso)
+        ).fetchone()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def nova_get_player_guild_id(conn, player_id):
+    if not player_id:
+        return None
+    for sql in (
+        "SELECT guild_id FROM guild_members WHERE player_id=? ORDER BY joined_at DESC LIMIT 1",
+        "SELECT guild_id FROM player_guilds WHERE player_id=? ORDER BY id DESC LIMIT 1",
+        "SELECT guild_id FROM players WHERE id=? LIMIT 1",
+    ):
+        try:
+            row = conn.execute(sql, (player_id,)).fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
+    return None
+
+
+def nova_are_players_guild_war_hostile(conn, attacker_player_id, defender_player_id):
+    attacker_guild_id = nova_get_player_guild_id(conn, attacker_player_id)
+    defender_guild_id = nova_get_player_guild_id(conn, defender_player_id)
+    return nova_is_guild_war_active(conn, attacker_guild_id, defender_guild_id)
+
+
+def nova_build_entity_level_lookup(conn):
+    lookup = {}
+    for sql, kind in (
+        ("SELECT id, COALESCE(level, 1) FROM players", 'player'),
+        ("SELECT id, COALESCE(level, 1) FROM npcs", 'npc'),
+        ("SELECT id, COALESCE(level, 1) FROM map_npcs", 'npc'),
+        ("SELECT id, COALESCE(level, 1) FROM ships", 'ship'),
+    ):
+        try:
+            for row in conn.execute(sql).fetchall():
+                lookup[(kind, row[0])] = int(row[1] or 1)
+        except Exception:
+            pass
+    return lookup
+
+
+def nova_build_war_highlight_player_ids(conn, player_id=None):
+    ids = set()
+    try:
+        if not nova__table_exists(conn, 'guild_wars'):
+            return ids
+        guild_id = nova_get_player_guild_id(conn, player_id) if player_id else None
+        rows = conn.execute(
+            """
+            SELECT attacker_guild_id, defender_guild_id
+            FROM guild_wars
+            WHERE status IN ('pending', 'preparation', 'active')
+            """
+        ).fetchall()
+        active_guilds = set()
+        for r in rows:
+            active_guilds.add(r[0])
+            active_guilds.add(r[1])
+        if guild_id:
+            enemy_guilds = set()
+            for a, d in rows:
+                if a == guild_id:
+                    enemy_guilds.add(d)
+                elif d == guild_id:
+                    enemy_guilds.add(a)
+            active_guilds = enemy_guilds
+        for g in list(active_guilds):
+            if not g:
+                continue
+            try:
+                member_rows = conn.execute("SELECT player_id FROM guild_members WHERE guild_id=?", (g,)).fetchall()
+                ids.update(int(r[0]) for r in member_rows if r and r[0])
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return ids
+# === NOVA_GUILD_WAR_MAP_LEVELS_PATCH_END ===
+
+
+# NOVA_GUILD_WAR_PENALTY_GUARD
+# Integration note:
+# Call nova_should_skip_bounty_and_jail(conn, attacker_player_id, defender_player_id)
+# in the bounty/jail penalty path before applying penalties for PvP combat.
+def nova_should_skip_bounty_and_jail(conn, attacker_player_id, defender_player_id):
+    try:
+        return nova_are_players_guild_war_hostile(conn, attacker_player_id, defender_player_id)
+    except Exception:
+        return False

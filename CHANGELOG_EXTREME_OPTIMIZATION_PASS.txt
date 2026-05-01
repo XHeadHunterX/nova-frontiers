@@ -1,0 +1,27 @@
+Extreme Optimization Pass
+
+Backend
+- Added gzip compression for API payloads.
+- Added performance indexes for NPC state, NPC lookup, player location, planet-galaxy lookup, market prices, and event feeds.
+- Removed global NPC simulation from every /api/state request.
+- Removed global NPC-vs-NPC salvage simulation from every /api/state request.
+- Replaced global market drift on state load with bounded current-galaxy market catch-up.
+- Galaxy map is now warp/navigation-only and no longer builds NPC traffic, ore, exploration signatures, event objects, or radar filtering.
+- System-map NPCs only activate in galaxies that currently have an active player.
+- Active system NPC map traffic is capped by NOVA_ACTIVE_SYSTEM_NPC_LIMIT, default 18.
+- /api/action now commits the action immediately and skips full state rebuild by default.
+- Set NOVA_RETURN_STATE_ON_ACTION=1 to restore old full-state-on-every-action behavior.
+- NPC action logs are disabled and cleared by default to reduce DB churn and response payload size.
+- Set NOVA_NPC_LOGS_ENABLED=1 to restore NPC log retention.
+- Battle-alert poll recommendation lowered to 350ms.
+- Added admin action admin_simulate_npc_events to pulse NPC/market simulation in the current galaxy.
+
+Frontend
+- API actions now use a fast path and schedule a throttled state refresh instead of waiting on full state inside the action response.
+- Battle/combat actions request a near-immediate refresh while avoiding duplicate simultaneous /api/state calls.
+- Login now uses /api/auth/login directly, then loads state.
+- Admin page includes Simulate NPC Events In Current Galaxy.
+
+Operational notes
+- For MMO scale, keep galaxy map object simulation disabled unless explicitly testing it with NOVA_GALAXY_MAP_TRAFFIC=1.
+- NPCs outside player-occupied galaxies are not individually active; markets catch up when a player enters/loads that galaxy.

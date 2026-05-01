@@ -1,0 +1,18 @@
+Battle/map responsiveness patch
+
+Backend:
+- Reduced battle alert polling recommendation from 3000ms to 350ms.
+- Changed real-time combat so player actions are gated by attack energy, not a hidden per-action recovery timer.
+- Set player action delay payload to 0 so the frontend does not disable usable actions while energy is available.
+- Flushed old queued Use All actions immediately instead of spacing them across 3-second beats.
+- Lowered combat round timing from 3000ms to 900ms for faster enemy/combat state cadence.
+- Failed escape attempts keep their own escape cooldown but no longer lock all other player actions.
+
+Frontend:
+- Map no longer auto-centers/zooms except initial map open, Find My Ship, and galaxy-change arrival.
+- System/Galaxy buttons show active state.
+- Area Scan now creates an expanding ping radius on the map.
+- Area Scan and Planet Mission cooldowns moved onto the map top-right HUD.
+- Removed dynamic travel route lines from the map; radar ring remains the live visibility circle.
+- Reduced map refresh loop from 500ms to 250ms for smoother UI updates.
+- Removed accidental duplicate map panel render.

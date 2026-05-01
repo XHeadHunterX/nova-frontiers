@@ -1,0 +1,43 @@
+Nova Frontiers - Auto Battle + Galaxy Planet Map Patch
+
+Changed by updater:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+Backend:
+- Adds a one-shot planet coordinate redistributor.
+- Uses deterministic sunflower/golden-angle placement per galaxy.
+- Rewrites existing planet x/y positions once, then marks app_state with nova_planet_sunflower_distribution_v1.
+- The redistributor is guarded so it will not break /api/state if an older DB is missing expected tables/columns.
+
+Frontend:
+- Adds an AUTO BATTLE toggle beside the battle energy strip.
+- Uses the existing combat_action action="use_all" behavior.
+- Persists the toggle in localStorage as novaAutoBattleEnabled.
+- Auto-fires use_all only when battle is active, player action cooldown is clear, and the player has attack energy.
+
+CSS / map:
+- Enlarges the galaxy map canvas to 3600x2400 through CSS.
+- Forces map viewport scrolling instead of cramped corner rendering.
+- Adds styling for the auto battle toggle.
+
+Not included:
+- The experimental immediate travel_state shortcut from the pasted notes was skipped because it is more invasive and could desync travel/map state.
+- Deep backend public profile caching was skipped in this updater because it needs exact source-level integration to avoid stale profile side effects.
+
+Install:
+1. Copy update-nova-auto-battle-map-perf.bat and apply_nova_auto_battle_map_perf_patch.py into the Nova Frontiers project root.
+2. Run update-nova-auto-battle-map-perf.bat.
+3. Restart backend and frontend.
+
+Validation done here:
+- Patch script syntax checked.
+- Updater files created and zipped.
+
+Local validation to run:
+- Start game.
+- Enter a battle.
+- Toggle AUTO BATTLE.
+- Confirm it fires Use All when energy is ready.
+- Open galaxy/system map and confirm planets are spread across the larger canvas after /api/state runs once.

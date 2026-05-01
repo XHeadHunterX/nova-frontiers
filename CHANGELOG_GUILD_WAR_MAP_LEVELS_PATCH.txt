@@ -1,0 +1,20 @@
+Nova Frontiers - Guild War Map + Level Labels Patch
+
+Files targeted:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+
+What this patch adds:
+1. Guild war hostility helper functions.
+2. Bounty/jail skip helper for guild-vs-guild war combat.
+3. Backend helpers to build war-highlight player ids.
+4. Frontend map overlay badge for active guild-war enemies.
+5. Pulsating red/orange crossed-swords badge on the right side of marker circles.
+6. Entity level label under visible NPC/player circles.
+7. CSS for war pulse and level pill.
+
+Important integration note:
+- The backend helper `nova_should_skip_bounty_and_jail(conn, attacker_player_id, defender_player_id)` must be called in the PvP bounty/jail penalty path before penalties are applied.
+- The frontend helper `<NovaMapEntityBadge entity={entity} state={state} />` must render inside each active map marker component for player and NPC entities.
+- Best final result is achieved when build_state exposes `warHighlightPlayerIds` or `war_highlight_player_ids`.

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>Umbral Veil Bug-like Nebula Whisper</title>
+  <defs>
+    <linearGradient id="bg-umbral-ink-female-1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#241c3c"/><stop offset="1" stop-color="#070911"/></linearGradient>
+    <radialGradient id="wash-umbral-ink-female-1" cx="48%" cy="34%" r="72%"><stop offset="0" stop-color="#e7c85b" stop-opacity=".20"/><stop offset=".68" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <filter id="ink-umbral-ink-female-1" x="-25%" y="-25%" width="150%" height="150%"><feDropShadow dx=".6" dy=".8" stdDeviation=".2" flood-color="#090a0e" flood-opacity=".75"/></filter>
+  </defs>
+  <rect width="128" height="128" rx="6" fill="#07080d"/>
+  <rect x="5" y="5" width="118" height="118" rx="4" fill="url(#bg-umbral-ink-female-1)"/>
+  <rect x="5" y="5" width="118" height="118" rx="4" fill="url(#wash-umbral-ink-female-1)"/>
+  <path d="M12 24 C33 12 58 11 76 14 C92 17 104 15 117 24 M13 105 C30 113 50 118 68 116 C86 114 101 116 116 106" stroke="#f4eadc" stroke-opacity=".13" stroke-width="1.7" stroke-linecap="round"/>
+  <path d="M17 33 C15 48 15 78 21 97 M111 32 C114 49 113 76 107 96" stroke="#05060a" stroke-opacity=".42" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M27 126 C31 104 43 92 64 92 C85 92 98 104 102 126Z" fill="#1d1a34" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-umbral-ink-female-1)"/>
+  <path d="M39 101 C48 109 80 109 90 101 L84 126 H44Z" fill="#e7c85b" opacity=".72"/>
+  <path d="M49 103 L57 126 M79 103 L71 126" stroke="#e9edf0" stroke-opacity=".55" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M33 113 H95" stroke="#11131a" stroke-opacity=".35" stroke-width="1.5"/>
+  <path d="M43 43 C32 28 25 21 17 22 M85 43 C96 28 103 21 111 22" stroke="#11131a" stroke-width="3.5" stroke-linecap="round"/>
+  <path d="M43 43 C32 28 25 21 17 22 M85 43 C96 28 103 21 111 22" stroke="#e7c85b" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="17" cy="22" r="3" fill="#d9bc4f" stroke="#11131a" stroke-width="1.4"/><circle cx="111" cy="22" r="3" fill="#d9bc4f" stroke="#11131a" stroke-width="1.4"/>
+  <path d="M39 58 C40 39 51 30 64 29 C78 30 88 40 89 59 C88 80 77 93 64 94 C51 93 40 80 39 58Z" fill="#63c1b5" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-umbral-ink-female-1)"/>
+  <path d="M37 58 C36 36 50 22 65 22 C82 23 94 39 91 62 C80 49 70 45 60 46 C50 47 43 52 37 58Z M38 57 C31 74 36 94 52 99 M90 57 C97 74 91 94 75 99" fill="#211c3a" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-umbral-ink-female-1)"/>
+  <path d="M48 49 C57 44 72 44 82 49" stroke="#f7efe8" stroke-opacity=".14" stroke-width="2" stroke-linecap="round"/>
+  <path d="M47 62 C52 58 58 58 62 62 C57 65 51 65 47 62Z" fill="#d9bc4f" stroke="#11131a" stroke-width="2"/>
+  <path d="M82 62 C77 58 70 58 66 62 C71 65 78 65 82 62Z" fill="#d9bc4f" stroke="#11131a" stroke-width="2"/>
+  <path d="M64 68 L60 78 H68Z" fill="#11131a" opacity=".55"/>
+  <path d="M56 83 C61 86 68 86 73 83" stroke="#11131a" stroke-width="2" stroke-linecap="round"/>
+  <path d="M42 72 C35 78 32 85 33 93 M86 72 C93 78 96 85 95 93" stroke="#e7c85b" stroke-opacity=".65" stroke-width="2" stroke-linecap="round"/>
+  <path d="M51 53 L45 48 M77 53 L83 48 M52 73 L46 78 M76 73 L82 78" stroke="#11131a" stroke-opacity=".33" stroke-width="1.6" stroke-linecap="round"/>
+</svg>

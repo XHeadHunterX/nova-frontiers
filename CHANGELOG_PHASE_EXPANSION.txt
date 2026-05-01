@@ -1,0 +1,61 @@
+Nova Frontiers Phase Expansion Patch
+
+Source requirements:
+- Implemented from the phased Nova Frontiers requirements prompt uploaded with the project.
+
+Files changed:
+1. backend/app/main.py
+   - Added PHASE_EXPANSION_BALANCE game-tuning group and admin config metadata.
+   - Added phase expansion database tables:
+     server_events, event_ladder, player_planet_reputation, phase_contracts,
+     player_phase_contracts, scan_blips, war_supply_contributions, artifacts.
+   - Added seeded phase content:
+     120 station trade goods, category-based trade goods, fuel tanks, probe arrays,
+     counter-scan modules, multi-projectile weapons, starting world artifacts,
+     phase contracts, and server event schedules.
+   - Removed illicit/contraband market goods by migrating them into legal trade goods.
+   - Added server event scheduling/state processing for Alien Raid, Wormhole Control,
+     Convoy Breakthrough, Mining Surge, Derelict Armada, and Warfront Surge.
+   - Added weekly event ladder scoring hooks.
+   - Added planet-specific reputation for completed phase contracts.
+   - Added enemy-territory cargo and escort contract actions.
+   - Added probe scan action that creates temporary 30-second map blips.
+   - Added artifact identification actions.
+   - Added war supply contribution action.
+   - Added fuel service action for inhabitable planets/stations.
+   - Added admin actions for generating events, triggering events, and regenerating world spacing/layout.
+   - Updated skill point purchase cost to exponential progression: 1, 2, 4, 8, 16...
+   - Updated galaxy travel so jump gates do not burn fuel, but 0 fuel blocks galaxy jumps.
+   - Updated local travel so 0 fuel uses emergency power and doubles travel time.
+   - Exposed phase_expansion and fuel_status in /api/state.
+
+2. frontend/src/main.jsx
+   - Added Calendar navigation item.
+   - Added Server Calendar page with tabs for Events, Enemy Contracts, Scans/Artifacts, War Supply, and Admin Events.
+   - Added fuel warning/emergency status in the top bar.
+   - Added toast hooks for low fuel, emergency fuel, and active/starting server events.
+   - Removed illicit goods from the market UI flow.
+   - Updated market subtext to clarify trade goods are legal station-market cargo and player listings are galaxy-scoped.
+
+3. frontend/src/styles.css
+   - Added styling for the Server Calendar dashboard, event cards, scan blips, fuel warning states, compact feeds, and danger admin buttons.
+
+Database/schema changes:
+- New tables are created automatically through backend startup migration/ensure logic.
+- Seed content is guarded by app_state key phase_expansion_seeded_v1.
+- Existing data is preserved. Admin world regeneration updates coordinates only.
+
+Admin settings/actions added:
+- PHASE_EXPANSION_BALANCE tuning group.
+- admin_generate_server_events
+- admin_trigger_server_event
+- admin_regenerate_phase_layout
+
+Testing performed:
+- backend/app/main.py parsed successfully with Python ast.
+- backend/app/main.py compiled successfully with py_compile.
+- Frontend dependency install/build was not completed in this container because node dependencies were not available/extracted.
+
+Notes:
+- This is a bounded implementation pass that scaffolds and wires the phase systems into the existing project without deleting old features.
+- Some deeper mechanics, such as complete Wormhole Control combat-zone resolution, full derelict exploration UI backgrounds, complete bounty-lock behavior, and full artifact equipment bonuses, are scaffold-ready but still need a deeper implementation pass.

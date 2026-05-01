@@ -1,0 +1,32 @@
+Nova Frontiers Leaderboards + State Slimming Patch
+
+Changed files:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- NOVA_LEADERBOARDS_STATE_SLIMMING_NOTES.md
+- NOVA_LEADERBOARDS_STATE_SLIMMING_TEST_CHECKLIST.md
+
+Backend:
+- Added leaderboard schema and seed metrics.
+- Added `record_player_metric` / `nova_record_player_metric`.
+- Added daily rollup writes.
+- Added snapshot generation for global and faction leaderboards.
+- Added guarded maintenance jobs.
+- Added admin manual refresh/settings endpoints.
+- Added state_versions/state_flags helper.
+- Patched build_state to append versions/flags and defer configured heavy sections.
+- Added admin state debug endpoint.
+
+Frontend:
+- Added Leaderboards page/panel with Global and Faction tabs.
+- Added category, metric, and period filters.
+- Added admin manual refresh button.
+- Added client-side state version listener so open leaderboards refetch only when needed.
+
+CSS:
+- Added MMO-style leaderboard panel/table styling.
+
+Notes:
+- Gameplay loops still need explicit calls to `record_player_metric` at each validated server-side action.
+- The patch does not fake missing metrics. Empty boards are valid until hooks record real data.

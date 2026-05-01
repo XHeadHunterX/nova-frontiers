@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000" fill="none" >
+<defs></defs>
+
+<rect width="1600" height="1000" fill="#02060d"/>
+<radialGradient id="neb1" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1220 160) rotate(138) scale(620 360)"><stop stop-color="#18415b"/><stop offset=".43" stop-color="#081c2d" stop-opacity=".72"/><stop offset="1" stop-color="#02060d" stop-opacity="0"/></radialGradient>
+<radialGradient id="neb2" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(280 740) rotate(26) scale(520 300)"><stop stop-color="#26125a"/><stop offset=".46" stop-color="#081225" stop-opacity=".65"/><stop offset="1" stop-color="#02060d" stop-opacity="0"/></radialGradient>
+<rect width="1600" height="1000" fill="url(#neb1)"/><rect width="1600" height="1000" fill="url(#neb2)"/>
+<g fill="#dffbff" opacity=".78"><circle cx="93" cy="121" r="1.3"/><circle cx="188" cy="471" r=".9"/><circle cx="334" cy="193" r="1.1"/><circle cx="488" cy="849" r="1.5"/><circle cx="611" cy="344" r=".85"/><circle cx="789" cy="93" r="1.3"/><circle cx="846" cy="703" r="1"/><circle cx="1011" cy="482" r="1.4"/><circle cx="1139" cy="227" r=".8"/><circle cx="1288" cy="816" r="1.2"/><circle cx="1417" cy="376" r="1.6"/><circle cx="1518" cy="654" r=".9"/></g>
+<g stroke="#6af4ff" stroke-opacity=".08"><path d="M0 218 H1600"/><path d="M0 512 H1600"/><path d="M0 806 H1600"/><path d="M246 0 V1000"/><path d="M742 0 V1000"/><path d="M1260 0 V1000"/></g>
+
+</svg>

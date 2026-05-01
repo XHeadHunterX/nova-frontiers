@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>Solar Accord emblem</title>
+  <rect width="128" height="128" rx="26" fill="#081426"/>
+  <circle cx="64" cy="64" r="56" fill="#ffb84d" opacity=".08"/>
+  <circle cx="64" cy="64" r="22" fill="#ffb84d" opacity=".9"/><path d="M64 18 V38 M64 90 V110 M18 64 H38 M90 64 H110 M31 31 L45 45 M83 83 L97 97 M97 31 L83 45 M45 83 L31 97" stroke="#fff3c4" stroke-width="6" stroke-linecap="round"/><circle cx="64" cy="64" r="34" fill="none" stroke="#2563eb" stroke-width="5"/>
+</svg>

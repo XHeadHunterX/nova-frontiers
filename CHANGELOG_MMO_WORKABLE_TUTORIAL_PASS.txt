@@ -1,0 +1,79 @@
+Nova Frontiers - MMO Workable + Starter Tutorial Pass
+
+Changed by updater:
+- backend/app/main.py
+- frontend/src/main.jsx
+- frontend/src/styles.css
+- NOVA_FRONTIERS_NEXT_PASS_RECOMMENDATIONS.md
+
+Goal:
+- Make the current browser MMO code safer for a small 100-concurrent-user test.
+- Add a starter tutorial that guides new players through getting started.
+- Provide a clear future roadmap and remove/reduce list.
+
+Backend changes:
+- Adds conservative SQLite startup hardening:
+  - PRAGMA busy_timeout=30000
+  - PRAGMA journal_mode=WAL
+  - PRAGMA synchronous=NORMAL
+  - PRAGMA temp_store=MEMORY
+  - PRAGMA foreign_keys=ON
+  - PRAGMA wal_autocheckpoint=1000
+- Adds common indexes only when the target tables and columns exist.
+- Index coverage includes likely hot paths:
+  - players
+  - ships
+  - ship_cargo
+  - inventory
+  - materials
+  - planets
+  - stations
+  - map_objects
+  - travel_state
+  - battles
+  - battle_participants
+  - combat_logs
+  - chat_messages
+  - direct_messages
+  - server_events
+  - player_tutorial_state
+- The hardening block is fail-closed/no-op if an older DB does not have a table or column.
+- No gameplay rules changed.
+
+Frontend changes:
+- Adds in-flight /api/state fetch de-duping per browser tab.
+- Does not cache completed state.
+- Does not change backend authority.
+- Adds a first-run starter tutorial overlay.
+- Tutorial focuses on:
+  - finding the map
+  - understanding travel
+  - docking and safe state
+  - starter missions
+  - basic combat timing
+  - chat/messages
+- Adds a persistent Tutorial launcher button.
+- Tutorial state is stored in localStorage only.
+
+CSS changes:
+- Adds modal/tutorial card styling.
+- Adds Tutorial launcher styling.
+- Keeps the overlay separate from the existing game UI.
+
+Roadmap file:
+- Adds future ideas worth implementing.
+- Adds systems that should be removed/reduced.
+- Adds a 100-user test checklist.
+
+Not changed:
+- No websocket rewrite.
+- No database migration framework added.
+- No combat/travel/economy rules changed.
+- No nav/routes forcibly removed.
+- No large architecture split yet.
+
+Recommended next technical pass:
+- Split /api/state into smaller page-specific endpoints.
+- Move NPC/world simulation out of state reads into a scheduled tick.
+- Add client action ids for idempotent POST actions.
+- Remove public social/profile payloads from the default state response.

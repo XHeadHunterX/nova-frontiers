@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <title>Iron Meridian Robot Titan Loom</title>
+  <defs>
+    <linearGradient id="bg-iron-ink-female-6" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e2936"/><stop offset="1" stop-color="#070911"/></linearGradient>
+    <radialGradient id="wash-iron-ink-female-6" cx="48%" cy="34%" r="72%"><stop offset="0" stop-color="#719de4" stop-opacity=".20"/><stop offset=".68" stop-color="#000" stop-opacity="0"/></radialGradient>
+    <filter id="ink-iron-ink-female-6" x="-25%" y="-25%" width="150%" height="150%"><feDropShadow dx=".6" dy=".8" stdDeviation=".2" flood-color="#090a0e" flood-opacity=".75"/></filter>
+  </defs>
+  <rect width="128" height="128" rx="6" fill="#07080d"/>
+  <rect x="5" y="5" width="118" height="118" rx="4" fill="url(#bg-iron-ink-female-6)"/>
+  <rect x="5" y="5" width="118" height="118" rx="4" fill="url(#wash-iron-ink-female-6)"/>
+  <path d="M12 24 C33 12 58 11 76 14 C92 17 104 15 117 24 M13 105 C30 113 50 118 68 116 C86 114 101 116 116 106" stroke="#f4eadc" stroke-opacity=".13" stroke-width="1.7" stroke-linecap="round"/>
+  <path d="M17 33 C15 48 15 78 21 97 M111 32 C114 49 113 76 107 96" stroke="#05060a" stroke-opacity=".42" stroke-width="1.4" stroke-linecap="round"/>
+  <path d="M27 126 C31 104 43 92 64 92 C85 92 98 104 102 126Z" fill="#171d27" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-iron-ink-female-6)"/>
+  <path d="M39 101 C48 109 80 109 90 101 L84 126 H44Z" fill="#719de4" opacity=".72"/>
+  <path d="M49 103 L57 126 M79 103 L71 126" stroke="#e9edf0" stroke-opacity=".55" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M33 113 H95" stroke="#11131a" stroke-opacity=".35" stroke-width="1.5"/>
+  <path d="M43 55 C43 39 52 30 64 29 C77 30 86 39 86 56 C86 77 76 91 64 92 C52 91 43 77 43 55Z" fill="#9aa5b0" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-iron-ink-female-6)"/>
+  <path d="M38 57 C38 38 50 24 65 24 C81 24 93 39 90 60 C79 50 70 46 61 47 C51 48 44 52 38 57Z M39 58 C34 73 39 91 54 97 M89 58 C94 73 89 91 74 97" fill="#656f7c" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-iron-ink-female-6)"/>
+  <path d="M48 50 C57 45 72 45 82 51" stroke="#fff" stroke-opacity=".20" stroke-width="2" stroke-linecap="round"/>
+  <path d="M48 62 C53 59.6 58 59.8 62 62" stroke="#11131a" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M66 62 C70 59.6 76 59.8 81 62" stroke="#11131a" stroke-width="2.5" stroke-linecap="round"/>
+    <circle cx="55" cy="63" r="2.1" fill="#719de4"/><circle cx="74" cy="63" r="2.1" fill="#719de4"/>
+  <path d="M62 69 L60 77 H68 L66 69" fill="#11131a" opacity=".62"/>
+  <path d="M52 80 H76 M55 88 H73" stroke="#11131a" stroke-opacity=".52" stroke-width="1.8" stroke-linecap="round"/>
+  <circle cx="41" cy="63" r="5.2" fill="#1c2430" stroke="#11131a" stroke-width="2"/><circle cx="87" cy="63" r="5.2" fill="#1c2430" stroke="#11131a" stroke-width="2"/>
+  <path d="M29 34 C35 42 40 49 43 58 M99 34 C93 42 88 49 85 58" stroke="#719de4" stroke-width="2.2" stroke-linecap="round"/>
+  <path d="M35 104 C47 111 81 111 93 104" stroke="#719de4" stroke-opacity=".62" stroke-width="2.7" stroke-linecap="round"/>
+</svg>

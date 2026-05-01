@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200" viewBox="0 0 640 200" fill="none" >
+<defs>
+<linearGradient id="brand-g" x1="40" y1="20" x2="560" y2="180" gradientUnits="userSpaceOnUse"><stop stop-color="#7af7ff"/><stop offset=".45" stop-color="#c7fbff"/><stop offset="1" stop-color="#ffcf6f"/></linearGradient>
+<radialGradient id="brand-r" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(98 95) rotate(45) scale(78 78)"><stop stop-color="#ffffff"/><stop offset=".24" stop-color="#63f5ff"/><stop offset="1" stop-color="#071622" stop-opacity="0"/></radialGradient>
+<filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+</defs>
+
+<rect width="640" height="200" rx="28" fill="#020812"/>
+<path d="M34 162 C99 63 198 26 322 35 C440 44 526 85 606 153" stroke="#143b4c" stroke-width="2" stroke-dasharray="6 10" opacity=".9"/>
+<circle cx="98" cy="96" r="78" fill="url(#brand-r)" opacity=".88"/>
+<path d="M98 21 L122 78 L182 95 L122 112 L98 171 L74 112 L15 95 L74 78 Z" stroke="url(#brand-g)" stroke-width="5" fill="#041420" filter="url(#glow)"/>
+<path d="M98 52 L111 84 L146 95 L111 106 L98 139 L85 106 L51 95 L85 84 Z" fill="url(#brand-g)" opacity=".95"/>
+<path d="M213 68 H582" stroke="url(#brand-g)" stroke-width="2" opacity=".55"/>
+<text x="214" y="116" fill="url(#brand-g)" font-family="Orbitron, Rajdhani, Segoe UI, Arial, sans-serif" font-size="50" font-weight="900" letter-spacing="7">NOVA</text>
+<text x="216" y="156" fill="#d9fbff" font-family="Rajdhani, Segoe UI, Arial, sans-serif" font-size="34" font-weight="700" letter-spacing="9">FRONTIERS</text>
+<path d="M214 170 H545 L580 154" stroke="#49e8ff" stroke-width="2" opacity=".35"/>
+
+</svg>
