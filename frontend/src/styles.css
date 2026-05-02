@@ -8390,6 +8390,237 @@ body,
   }
 }
 
+/* EVE-style placement pass: fuller hero, tighter cards, less empty section gap. */
+.novaLandingScreen .registrationHero,
+.novaLandingScreen.authLoginMode .registrationHero{
+  min-height:100svh!important;
+  grid-template-columns:minmax(0,1fr) minmax(340px,430px)!important;
+  gap:clamp(16px,2.6vw,38px)!important;
+  align-items:stretch!important;
+  padding:0 clamp(18px,4vw,70px) clamp(16px,3vw,44px)!important;
+  overflow:hidden!important;
+}
+.novaLandingScreen.authRegisterMode .registrationHero{
+  grid-template-columns:minmax(0,1fr) minmax(500px,640px)!important;
+  align-items:start!important;
+  overflow:visible!important;
+  padding-top:clamp(16px,2.2vw,32px)!important;
+}
+.novaLandingScreen .registrationWorldPanel{
+  position:relative!important;
+  min-height:100svh!important;
+  grid-template-rows:auto 1fr auto!important;
+  align-content:stretch!important;
+  align-items:stretch!important;
+  gap:clamp(12px,2vh,22px)!important;
+  padding:clamp(18px,3vw,46px) 0 0!important;
+  overflow:visible!important;
+}
+.novaLandingScreen .registrationCoreArt{
+  position:absolute!important;
+  inset:0 calc(-1 * clamp(18px,4vw,70px)) 0 calc(-1 * clamp(18px,4vw,70px))!important;
+  z-index:-2!important;
+  width:auto!important;
+  height:auto!important;
+  aspect-ratio:auto!important;
+  border:0!important;
+  border-radius:0!important;
+  box-shadow:none!important;
+}
+.novaLandingScreen .registrationCoreArt:before{
+  background:
+    linear-gradient(90deg,rgba(1,5,11,.94),rgba(1,5,11,.68) 30%,rgba(1,5,11,.18) 62%,rgba(1,5,11,.72)),
+    radial-gradient(circle at 62% 40%,transparent 0 24%,rgba(1,5,11,.18) 42%,rgba(1,5,11,.82))!important;
+}
+.novaLandingScreen .registrationCoreArt:after{
+  box-shadow:inset 0 -175px 170px rgba(1,5,11,.90),inset 0 1px 0 rgba(255,255,255,.035)!important;
+}
+.novaLandingScreen .registrationCoreArt>img{
+  height:100%!important;
+  object-fit:cover!important;
+  object-position:62% 42%!important;
+  filter:saturate(1.08) contrast(1.08) brightness(.76)!important;
+}
+.novaLandingScreen .registrationHeroCopy{
+  align-self:end!important;
+  max-width:760px!important;
+  margin-top:0!important;
+  padding:0 0 clamp(22px,8vh,104px)!important;
+}
+.novaLandingScreen.authRegisterMode .registrationHeroCopy{
+  align-self:center!important;
+  padding-bottom:clamp(14px,5vh,54px)!important;
+}
+.novaLandingScreen .registrationHeroCopy h1{
+  font-size:clamp(64px,9.2vw,146px)!important;
+  line-height:.82!important;
+}
+.novaLandingScreen .registrationRoleCards{
+  width:min(100%,620px)!important;
+  gap:8px!important;
+}
+.novaLandingScreen .registrationRoleCards span{
+  min-height:66px!important;
+  padding:10px 12px!important;
+  border-radius:2px!important;
+}
+.novaLandingScreen .registrationSignalDeck{
+  width:min(100%,760px)!important;
+  margin-bottom:clamp(10px,2.2vh,26px)!important;
+  border-radius:2px!important;
+  background:rgba(2,9,17,.52)!important;
+  backdrop-filter:blur(10px);
+}
+.novaLandingScreen .registrationConsole{
+  gap:12px!important;
+  align-self:center!important;
+  max-height:calc(100svh - clamp(34px,5vw,80px))!important;
+  overflow:auto!important;
+  margin-top:clamp(16px,4vh,50px)!important;
+  border-radius:2px!important;
+  background:linear-gradient(180deg,rgba(5,17,28,.76),rgba(1,7,14,.82))!important;
+  backdrop-filter:blur(14px);
+}
+.novaLandingScreen.authRegisterMode .registrationConsole{
+  align-self:start!important;
+  max-height:none!important;
+  margin-top:0!important;
+}
+.landingScrollCue{
+  margin:0 auto clamp(24px,4vh,48px)!important;
+}
+.landingStorySection,
+.landingStorySection:nth-child(even){
+  width:min(1500px,calc(100vw - clamp(28px,6vw,104px)))!important;
+  min-height:88vh!important;
+  grid-template-columns:minmax(340px,.76fr) minmax(500px,1.24fr)!important;
+  gap:clamp(22px,3.8vw,64px)!important;
+  padding:clamp(56px,8vh,96px) 0!important;
+}
+.landingStorySection:nth-child(even){
+  grid-template-columns:minmax(500px,1.24fr) minmax(340px,.76fr)!important;
+}
+.landingStorySection:nth-child(even) .landingStickyVisual{
+  order:2;
+}
+.landingStoryCopy{
+  width:min(100%,470px)!important;
+  gap:12px!important;
+}
+.landingStoryCopy p + p{
+  margin-top:-8px!important;
+}
+.landingStickyVisual{
+  min-height:min(62vh,580px)!important;
+  border-radius:2px!important;
+  border-color:rgba(255,255,255,.075)!important;
+  box-shadow:0 30px 86px rgba(0,0,0,.36),inset 0 0 0 1px rgba(255,255,255,.03)!important;
+}
+.landingFactionVisual{
+  inset:16px!important;
+  gap:6px!important;
+}
+.landingFactionVisual article{
+  gap:5px!important;
+  padding:10px!important;
+  border-radius:2px!important;
+}
+.landingFactionShip{
+  height:112px!important;
+}
+.recipeLine{
+  gap:7px!important;
+  padding:8px 11px!important;
+}
+.historyLog{
+  gap:6px!important;
+}
+@media(max-width:1180px){
+  .novaLandingScreen .registrationHero,
+  .novaLandingScreen.authLoginMode .registrationHero,
+  .novaLandingScreen.authRegisterMode .registrationHero{
+    grid-template-columns:1fr!important;
+    padding:0 14px 22px!important;
+    overflow:visible!important;
+  }
+  .novaLandingScreen .registrationWorldPanel{
+    min-height:82svh!important;
+    padding:18px 0!important;
+  }
+  .novaLandingScreen .registrationConsole{
+    width:min(620px,100%)!important;
+    justify-self:center!important;
+    max-height:none!important;
+    margin-top:0!important;
+  }
+  .landingStorySection,
+  .landingStorySection:nth-child(even){
+    grid-template-columns:1fr!important;
+    width:min(960px,calc(100vw - 28px))!important;
+    min-height:auto!important;
+    gap:18px!important;
+  }
+  .landingStorySection:nth-child(even) .landingStickyVisual{
+    order:0!important;
+  }
+}
+@media(max-width:720px){
+  .novaLandingScreen .registrationWorldPanel{
+    min-height:74svh!important;
+  }
+  .novaLandingScreen .registrationHeroCopy{
+    padding-bottom:22px!important;
+  }
+  .novaLandingScreen .registrationHeroCopy h1{
+    font-size:clamp(48px,16vw,76px)!important;
+  }
+  .novaLandingScreen .registrationRoleCards{
+    grid-template-columns:1fr!important;
+  }
+  .novaLandingScreen .registrationSignalDeck{
+    display:grid!important;
+    grid-template-columns:1fr!important;
+  }
+  .landingStickyVisual{
+    min-height:330px!important;
+  }
+}
+
+.novaLandingScreen .registrationAuthForm{
+  gap:14px!important;
+}
+.registrationFormSection{
+  gap:8px!important;
+  padding-bottom:12px!important;
+}
+.novaLandingScreen .registrationFieldGrid{
+  gap:9px!important;
+}
+.novaLandingScreen .registrationOnboarding{
+  gap:12px!important;
+}
+.novaLandingScreen .registrationFactionGrid{
+  gap:8px!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice{
+  gap:6px!important;
+  padding:11px!important;
+}
+.novaLandingScreen .registrationDecisionPanel{
+  gap:10px!important;
+  padding:11px!important;
+}
+.novaLandingScreen .factionBalanceStats{
+  gap:6px!important;
+}
+.novaLandingScreen .factionBalanceStats span{
+  min-height:58px!important;
+  padding:8px!important;
+}
+.novaLandingScreen .registrationGoogleBlock{
+  gap:4px!important;
+}
+
 /* Mobile command shell and proximity-map pass. */
 html,body,#root{max-width:100%;overflow-x:hidden}
 .mobileBottomTabs,.mobileContextActionBar,.mobileMoreBackdrop,.mobileProximityMap,.mobileObjectSheetBackdrop{display:none}
