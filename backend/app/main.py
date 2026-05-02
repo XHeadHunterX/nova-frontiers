@@ -28227,11 +28227,12 @@ def nova_guild_list(search: str = '', limit: int = 50):
     conn = _nova_guild_open_conn()
     try:
         nova_guild_ensure_tables(conn)
-        q = f'%{str(search or '').strip()}%'
+        term = str(search or "").strip()
+        q = f"%{term}%"
         rows = _nova_guild_rows(conn, '''SELECT g.*, COUNT(gm.player_id) AS member_count
                                        FROM guilds g LEFT JOIN guild_members gm ON gm.guild_id=g.id
                                        WHERE g.deleted_at IS NULL AND (?='' OR g.name LIKE ? OR g.tag LIKE ?)
-                                       GROUP BY g.id ORDER BY g.level DESC, member_count DESC, g.name ASC LIMIT ?''', (str(search or '').strip(), q, q, max(1, min(int(limit or 50), 100))))
+                                       GROUP BY g.id ORDER BY g.level DESC, member_count DESC, g.name ASC LIMIT ?''', (term, q, q, max(1, min(int(limit or 50), 100))))
         return {'guilds': rows}
     finally:
         try: conn.close()
