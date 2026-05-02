@@ -5,6 +5,11 @@ const generatedModules = import.meta.glob('./generated/**/*.{png,svg,webp,jpg,jp
   import: 'default',
 });
 
+const brandModules = import.meta.glob('./brand/*.svg', {
+  eager: true,
+  import: 'default',
+});
+
 const factionModules = import.meta.glob('./factions/**/*.svg', {
   eager: true,
   import: 'default',
@@ -125,6 +130,7 @@ const generatedShipRolePools = {
 };
 
 const factionAsset = (path) => factionModules[`./factions/${path}`] || u(`./factions/${path}`);
+const brandAsset = (path) => brandModules[`./brand/${path}`] || u(`./brand/${path}`);
 const pad2 = (value) => String(value).padStart(2, '0');
 
 const factionAvatarNames = {
@@ -144,8 +150,8 @@ const factionAvatarNames = {
 
 const factionAvatarMeta = {
   solar_accord: { name: 'Solar Accord', species: 'Human' },
-  iron_meridian: { name: 'Iron Meridian', species: 'Robot' },
-  umbral_veil: { name: 'Umbral Veil', species: 'Bug-like' },
+  iron_meridian: { name: 'Iron Meridian', species: 'Synthetic' },
+  umbral_veil: { name: 'Umbral Veil', species: 'Voidborne' },
 };
 
 function makeFactionAvatars(factionCode) {
@@ -179,9 +185,9 @@ const avatarAssetById = Object.fromEntries(factionAvatarCatalog.map((avatar) => 
 
 
 export const brandAssets = {
-  logo: u('./brand/nova-frontiers-logo.svg'),
-  emblem: u('./brand/nova-frontiers-emblem.svg'),
-  favicon: u('./brand/favicon.svg'),
+  logo: brandAsset('nova-frontiers-logo.svg'),
+  emblem: brandAsset('nova-frontiers-emblem.svg'),
+  favicon: brandAsset('favicon.svg'),
 };
 
 export const factionAssets = {
@@ -204,7 +210,7 @@ export const factionAssets = {
   iron_meridian: {
     key: 'iron_meridian',
     name: 'Iron Meridian',
-    species: 'Robot',
+    species: 'Synthetic',
     color: '#c9d2d8',
     accent: '#ff8f2e',
     emblem: factionAsset('iron_meridian/emblem.svg'),
@@ -220,7 +226,7 @@ export const factionAssets = {
   umbral_veil: {
     key: 'umbral_veil',
     name: 'Umbral Veil',
-    species: 'Bug-like',
+    species: 'Voidborne',
     color: '#b174ff',
     accent: '#42f0ff',
     emblem: factionAsset('umbral_veil/emblem.svg'),

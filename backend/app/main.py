@@ -242,6 +242,16 @@ def auth_context_from_header(authorization: Optional[str]) -> Tuple[Dict[str, An
         sess = row(conn, "SELECT * FROM sessions WHERE token=?", (token,))
         if not sess or parse_dt(sess["expires_at"]) < utcnow():
             raise HTTPException(401, "Invalid or expired session")
+        now_dt = utcnow()
+        last_seen = parse_dt(sess.get("last_seen_at") or sess.get("created_at"))
+        if last_seen and (now_dt - last_seen) >= timedelta(seconds=PLAYER_MAP_LOGOUT_GRACE_SECONDS):
+            return_player_to_last_gate_after_galaxy_disconnect(conn, int(sess["user_id"]))
+        now_s = iso(now_dt)
+        try:
+            conn.execute("UPDATE sessions SET last_seen_at=? WHERE token=?", (now_s, token))
+            conn.commit()
+        except sqlite3.OperationalError:
+            conn.rollback()
         user = row(conn, "SELECT * FROM users WHERE id=?", (sess["user_id"],))
         player = row(conn, "SELECT * FROM players WHERE user_id=?", (user["id"],)) if user else None
         if not user or not player:
@@ -679,6 +689,15 @@ def nova_security_ensure_tables(conn) -> None:
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_security_defense_registry_galaxy_type ON security_defense_registry(galaxy_id, defense_type, status)')
+    try:
+        migration_key = 'security_gate_turret_circle_v4_clear'
+        if not _nova_sec_row(conn, 'SELECT 1 FROM security_settings WHERE key=?', (migration_key,)):
+            conn.execute("DELETE FROM npcs WHERE id LIKE 'sec_turret:%'")
+            conn.execute("DELETE FROM security_defense_registry WHERE defense_type='turret' OR npc_id LIKE 'sec_turret:%'")
+            conn.execute('UPDATE galaxy_security_state SET last_turret_active_count=0, updated_at=?', (now,))
+            conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (migration_key, '1', now))
+    except Exception:
+        pass
 
     conn.execute('''
         CREATE TABLE IF NOT EXISTS security_auto_engagements (
@@ -884,7 +903,7 @@ def _nova_sec_base_turrets(security_level: float, settings: dict[str, str] | Non
 
 
 def _nova_sec_min_turrets_per_gate(settings: dict[str, str] | None = None) -> int:
-    return max(3, min(8, _nova_sec_int((settings or {}).get('turrets_min_per_gate'), 4)))
+    return max(1, min(8, _nova_sec_int((settings or {}).get('turrets_min_per_gate'), 4)))
 
 
 def _nova_sec_desired_turrets(g: dict, settings: dict[str, str] | None = None, gate_count: int = 0) -> int:
@@ -907,8 +926,51 @@ def _nova_sec_base_patrols(security_level: float, settings: dict[str, str] | Non
     return max(1, min(top, int(_nova_sec_math.ceil(s * top))))
 
 
+def _nova_sec_system_gate_node_pct(conn, galaxy_id: str, gate_index: int, gate_count: int) -> tuple[float, float]:
+    gate_planet = None
+    try:
+        gate_planet = _nova_sec_row(conn, "SELECT * FROM planets WHERE galaxy_id=? AND type LIKE '%Gate%' ORDER BY id LIMIT 1", (galaxy_id,))
+    except Exception:
+        gate_planet = None
+    if gate_planet:
+        base_x = max(7.0, min(93.0, 50.0 + _nova_sec_num(gate_planet.get('x'), 0) / 2.3))
+        base_y = max(8.0, min(92.0, 50.0 + _nova_sec_num(gate_planet.get('y'), 0) / 2.3))
+    else:
+        base_x, base_y = 50.0, 50.0
+    angle = (_nova_sec_math.tau * max(0, int(gate_index or 0)) / max(1, int(gate_count or 1))) - (_nova_sec_math.tau / 4)
+    raw_x = max(3.0, min(97.0, base_x + _nova_sec_math.cos(angle) * 16.0))
+    raw_y = max(3.0, min(97.0, base_y + _nova_sec_math.sin(angle) * 16.0))
+    return (
+        max(2.0, min(98.0, (raw_x - 50.0) * 1.45 + 50.0)),
+        max(2.0, min(98.0, (raw_y - 50.0) * 1.45 + 50.0)),
+    )
+
+
 def _nova_sec_gate_rows(conn, galaxy_id: str) -> list[dict]:
     out: list[dict] = []
+    if _nova_sec_table_exists(conn, 'galaxy_gates') and _nova_sec_table_exists(conn, 'galaxies'):
+        try:
+            links = _nova_sec_rows(conn, '''
+                SELECT gg.to_galaxy_id, g.name AS target_name
+                FROM galaxy_gates gg
+                JOIN galaxies g ON g.id=gg.to_galaxy_id
+                WHERE gg.from_galaxy_id=?
+                ORDER BY gg.distance, gg.to_galaxy_id
+            ''', (galaxy_id,))
+            for i, link in enumerate(links):
+                target_id = str(link.get('to_galaxy_id') or i + 1)
+                x, y = _nova_sec_system_gate_node_pct(conn, galaxy_id, i, len(links))
+                out.append({
+                    'id': f'gate:{target_id}',
+                    'name': f"Gate to {link.get('target_name') or target_id}",
+                    'x': x,
+                    'y': y,
+                    '_coords_are_pct': True,
+                })
+        except Exception:
+            out = []
+    if out:
+        return out[:6]
     if _nova_sec_table_exists(conn, 'planets'):
         cols = _nova_sec_cols(conn, 'planets')
         gal_col = _nova_sec_first_col(cols, ('galaxy_id', 'galaxy'))
@@ -926,6 +988,7 @@ def _nova_sec_gate_rows(conn, galaxy_id: str) -> list[dict]:
                 for r in rows:
                     label = (str(r.get('id') or '') + ' ' + str(r.get('name') or '')).lower()
                     if 'gate' in label or 'crossing' in label or 'jump' in label or 'relay' in label:
+                        r['_coords_are_pct'] = bool(x_col and y_col and ('pct' in str(x_col).lower() or 'map_' in str(x_col).lower() or 'pos_' in str(x_col).lower()))
                         out.append(r)
             except Exception:
                 pass
@@ -933,14 +996,14 @@ def _nova_sec_gate_rows(conn, galaxy_id: str) -> list[dict]:
         # Deterministic fallback gates. Keeps system functional even before real gate schema exists.
         points = [(50, 9), (91, 50), (50, 91), (9, 50)]
         for i, (x, y) in enumerate(points, 1):
-            out.append({'id': f'{galaxy_id}-auto-gate-{i}', 'name': f'Gate {i}', 'x': x, 'y': y})
+            out.append({'id': f'{galaxy_id}-auto-gate-{i}', 'name': f'Gate {i}', 'x': x, 'y': y, '_coords_are_pct': True})
     return out[:6]
 
 
-def _nova_sec_local_point_to_pct(x, y) -> tuple[float, float]:
+def _nova_sec_local_point_to_pct(x, y, coords_are_pct: bool = False) -> tuple[float, float]:
     raw_x = _nova_sec_num(x, 50)
     raw_y = _nova_sec_num(y, 50)
-    if _nova_sec_is_percent_pair(raw_x, raw_y):
+    if coords_are_pct and _nova_sec_is_percent_pair(raw_x, raw_y):
         return max(2.0, min(98.0, raw_x)), max(2.0, min(98.0, raw_y))
     # Mirrors frontend localPointForPlanet(): planet x/y are centered local coordinates.
     px = max(7.0, min(93.0, 50.0 + raw_x / 2.3))
@@ -1022,6 +1085,19 @@ def _nova_sec_seeded_point(galaxy_id: str, slot: int, base_x=5000, base_y=5000, 
     return int(max(650, min(9350, base_x + _nova_sec_math.cos(angle) * dist))), int(max(650, min(9350, base_y + _nova_sec_math.sin(angle) * dist)))
 
 
+def _nova_sec_gate_turret_coord(gate: dict, gate_index: int, slot_index: int, per_gate: int) -> tuple[int, int]:
+    gate_x_pct, gate_y_pct = _nova_sec_local_point_to_pct(gate.get('x'), gate.get('y'), bool(gate.get('_coords_are_pct')))
+    ring_size = max(1, int(per_gate or 1))
+    ring_slot = max(0, min(ring_size - 1, int(slot_index or 0)))
+    desired_offset = max(3.2, min(5.2, 3.2 + ring_size * 0.12))
+    edge_room = min(gate_x_pct - 1.0, 99.0 - gate_x_pct, gate_y_pct - 1.0, 99.0 - gate_y_pct)
+    offset_pct = max(0.85, min(desired_offset, edge_room))
+    angle = 0.0 if ring_size == 1 else (ring_slot / ring_size) * _nova_sec_math.tau - (_nova_sec_math.tau / 4)
+    x_pct = max(1.0, min(99.0, gate_x_pct + _nova_sec_math.cos(angle) * offset_pct))
+    y_pct = max(1.0, min(99.0, gate_y_pct + _nova_sec_math.sin(angle) * offset_pct))
+    return _nova_sec_pct_to_coord(x_pct), _nova_sec_pct_to_coord(y_pct)
+
+
 def _nova_sec_spawn_turrets(conn, g: dict, settings: dict[str, str]) -> None:
     gid = str(g.get('galaxy_id'))
     sec = _nova_sec_num(g.get('security_level'), 0.5)
@@ -1032,21 +1108,23 @@ def _nova_sec_spawn_turrets(conn, g: dict, settings: dict[str, str]) -> None:
     desired_total = _nova_sec_desired_turrets(g, settings, len(gates))
     if desired_total <= 0:
         return
-    per_gate = max(_nova_sec_min_turrets_per_gate(settings), int(_nova_sec_math.ceil(desired_total / max(1, len(gates)))))
-    desired_total = per_gate * len(gates)
+    gate_count = max(1, len(gates))
+    min_total = gate_count * _nova_sec_min_turrets_per_gate(settings)
+    desired_total = max(desired_total, min_total)
+    base_per_gate = desired_total // gate_count
+    extra = desired_total % gate_count
     hp = int(120 + sec * 240)
     level = int(10 + sec * 35)
     slot = 0
     for gate_index, gate in enumerate(gates):
-        gate_x_pct, gate_y_pct = _nova_sec_local_point_to_pct(gate.get('x'), gate.get('y'))
         gate_id = str(gate.get('id') or gate.get('name') or f'gate-{slot}')
-        for i in range(per_gate):
+        turrets_for_gate = base_per_gate + (1 if gate_index < extra else 0)
+        if turrets_for_gate <= 0:
+            continue
+        for i in range(turrets_for_gate):
             if slot >= desired_total:
                 break
-            angle = (i / max(1, per_gate)) * _nova_sec_math.tau + ((gate_index % 2) * _nova_sec_math.tau / max(2, per_gate * 2))
-            offset_pct = 2.70 + (i % 2) * 1.50
-            x = _nova_sec_pct_to_coord(max(1.0, min(99.0, gate_x_pct + _nova_sec_math.cos(angle) * offset_pct)))
-            y = _nova_sec_pct_to_coord(max(1.0, min(99.0, gate_y_pct + _nova_sec_math.sin(angle) * offset_pct)))
+            x, y = _nova_sec_gate_turret_coord(gate, gate_index, i, turrets_for_gate)
             npc_id = f'sec_turret:{gid}:{gate_id}:{slot}'
             row = _nova_sec_row(conn, 'SELECT active,hp FROM npcs WHERE id=?', (npc_id,))
             if row and (_nova_sec_int(row.get('active'), 1) == 0 or _nova_sec_int(row.get('hp'), hp) <= 0):
@@ -1878,16 +1956,16 @@ JOB_RANK_THRESHOLDS = [
 
 # Phase 16: action-trained skills + focused career bonuses. Skills are grindy; careers amplify matching actions without locking other actions.
 SKILL_XP_BALANCE = {
-    # Piecewise cumulative curve. Level 25 is the starter-quarter target, 75 is the few-month band,
-    # 100 is the completion wall. Keep the old keys for backward-compatible raw JSON overrides.
+    # Piecewise cumulative curve. A 12h/day, broad-loop player should hit 25 around one month,
+    # 75 around seven months, and 100 around the 13-month completion wall.
     "base_curve": 620,
     "curve_power": 1.95,
     "max_level": 100,
     "early_level_cutoff": 25,
     "mid_level_cutoff": 75,
-    "early_xp_at_cutoff": 11000,
-    "mid_xp_at_cutoff": 23000,
-    "max_xp_at_cap": 35000,
+    "early_xp_at_cutoff": 500000,
+    "mid_xp_at_cutoff": 3400000,
+    "max_xp_at_cap": 6400000,
     "early_curve_power": 1.55,
     "mid_curve_power": 1.45,
     "late_curve_power": 2.20,
@@ -1951,7 +2029,7 @@ ACTION_PROGRESSION: Dict[str, Dict[str, Any]] = {
 }
 
 
-ACHIEVEMENT_TIER_THRESHOLDS = [10, 50, 200, 750, 2000, 6000, 15000, 24000]
+ACHIEVEMENT_TIER_THRESHOLDS = [10, 50, 200, 700, 1500, 3000, 6000, 9000]
 
 ACHIEVEMENT_LOOPS = {
     "mining": {"name": "Asteroid Miner", "summary": "Mine ore and harvest resource nodes.", "buff": {"mining_efficiency_pct": 0.01}},
@@ -2059,15 +2137,16 @@ PROGRESSION_BALANCE = {
     "baseline_active_hours_per_day": 12,
     "sim_runs": 1000,
     "target_first_quarter_days": 30,
-    "target_third_quarter_days": 180,
-    "target_completion_days": 490,
+    "target_third_quarter_days": 210,
+    "target_completion_days": 395,
     "daily_energy_budget": 244,
     "completion_credit_goal": 300000000,
     "completion_components": {
-        "skills_weight": 0.42,
-        "career_ranks_weight": 0.32,
+        "skills_weight": 0.38,
+        "career_ranks_weight": 0.28,
         "player_level_weight": 0.12,
-        "credits_and_assets_weight": 0.14,
+        "credits_and_assets_weight": 0.12,
+        "loop_achievements_weight": 0.10,
     },
     "player_level_curve": {
         "early_cutoff": 25,
@@ -2083,12 +2162,12 @@ PROGRESSION_BALANCE = {
         "late_power": 1.72,
     },
     "last_1000_run_result": {
-        "mean_days": 490.34,
-        "median_days": 490,
-        "p10_days": 487,
-        "p90_days": 494,
-        "first_quarter_mean_days": 27.52,
-        "third_quarter_mean_days": 176.99,
+        "mean_days": 395.18,
+        "median_days": 395,
+        "p10_days": 392,
+        "p90_days": 398,
+        "first_quarter_mean_days": 30.81,
+        "third_quarter_mean_days": 208.25,
         "completion_shape": "quick first quarter, several-month middle, brutal final quarter",
     },
 }
@@ -2099,7 +2178,7 @@ ECOSYSTEM_BALANCE = {
     "philosophy": {
         "early_game": "Starter jobs, T1 crafting, local travel, and basic vendor sales should feel accessible.",
         "mid_game": "Ships, bases, research, and upgraded modules should become deliberate credit/material sinks.",
-        "end_game": "Maxing everything should take 12-18+ months of steady play and massive material/credit investment.",
+        "end_game": "Maxing everything should take about 13 months for a 12h/day, 7-day/week player rotating all loops.",
     },
     "commodity_price_mult_by_category": {
         "civilian": 0.90,
@@ -2216,12 +2295,12 @@ INVENTORY_BALANCE = {
 TIER_DEFINITIONS: Dict[int, Dict[str, Any]] = {
     0: {"id":0,"name":"Scrap / Civilian","short":"T0","style":"scrap","color":"#94a3b8","bg":"rgba(148,163,184,.16)","border":"rgba(148,163,184,.55)","glow":"rgba(148,163,184,.24)","value_mult":0.55,"stat_mult":0.72,"rarity_weight":1.35,"craft_difficulty":0.72,"repair_mult":0.55,"market_availability":1.45,"min_level":1,"description":"Cheap civilian-grade or salvaged equipment."},
     1: {"id":1,"name":"Basic","short":"T1","style":"basic","color":"#e5e7eb","bg":"rgba(229,231,235,.14)","border":"rgba(229,231,235,.42)","glow":"rgba(229,231,235,.18)","value_mult":1.00,"stat_mult":1.00,"rarity_weight":1.00,"craft_difficulty":1.00,"repair_mult":1.00,"market_availability":1.00,"min_level":1,"description":"Standard starter-grade equipment and materials."},
-    2: {"id":2,"name":"Improved","short":"T2","style":"improved","color":"#22c55e","bg":"rgba(34,197,94,.18)","border":"rgba(34,197,94,.62)","glow":"rgba(34,197,94,.34)","value_mult":1.75,"stat_mult":1.18,"rarity_weight":0.78,"craft_difficulty":1.22,"repair_mult":1.30,"market_availability":0.72,"min_level":3,"description":"Improved commercial-grade technology."},
-    3: {"id":3,"name":"Advanced","short":"T3","style":"advanced","color":"#38bdf8","bg":"rgba(56,189,248,.20)","border":"rgba(56,189,248,.68)","glow":"rgba(56,189,248,.38)","value_mult":3.10,"stat_mult":1.38,"rarity_weight":0.52,"craft_difficulty":1.55,"repair_mult":1.75,"market_availability":0.48,"min_level":7,"description":"Advanced equipment for specialized pilots."},
-    4: {"id":4,"name":"Military Grade","short":"T4","style":"military","color":"#f97316","bg":"rgba(249,115,22,.20)","border":"rgba(249,115,22,.72)","glow":"rgba(249,115,22,.38)","value_mult":5.50,"stat_mult":1.62,"rarity_weight":0.32,"craft_difficulty":2.05,"repair_mult":2.35,"market_availability":0.28,"min_level":12,"description":"Restricted military-grade hardware with high upkeep."},
-    5: {"id":5,"name":"Prototype","short":"T5","style":"prototype","color":"#d946ef","bg":"rgba(217,70,239,.22)","border":"rgba(217,70,239,.75)","glow":"rgba(217,70,239,.42)","value_mult":9.50,"stat_mult":1.92,"rarity_weight":0.16,"craft_difficulty":2.85,"repair_mult":3.25,"market_availability":0.13,"min_level":18,"description":"Powerful prototype gear with high cost and energy demands."},
-    6: {"id":6,"name":"Exotic","short":"T6","style":"exotic","color":"#facc15","bg":"rgba(250,204,21,.24)","border":"rgba(250,204,21,.82)","glow":"rgba(250,204,21,.50)","value_mult":16.0,"stat_mult":2.28,"rarity_weight":0.07,"craft_difficulty":3.90,"repair_mult":4.80,"market_availability":0.05,"min_level":26,"description":"Rare exotic technology with specialized strengths."},
-    7: {"id":7,"name":"Legendary / Relic","short":"T7","style":"relic","color":"#ffffff","bg":"linear-gradient(135deg,rgba(250,204,21,.28),rgba(217,70,239,.22),rgba(56,189,248,.22))","border":"rgba(255,255,255,.92)","glow":"rgba(255,255,255,.62)","value_mult":28.0,"stat_mult":2.75,"rarity_weight":0.02,"craft_difficulty":5.50,"repair_mult":7.00,"market_availability":0.01,"min_level":35,"description":"Relic-class technology. Extremely rare and never routine market stock."},
+    2: {"id":2,"name":"Improved","short":"T2","style":"improved","color":"#22c55e","bg":"rgba(34,197,94,.18)","border":"rgba(34,197,94,.62)","glow":"rgba(34,197,94,.34)","value_mult":1.75,"stat_mult":1.10,"rarity_weight":0.78,"craft_difficulty":1.22,"repair_mult":1.30,"market_availability":0.72,"min_level":3,"description":"Improved commercial-grade technology."},
+    3: {"id":3,"name":"Advanced","short":"T3","style":"advanced","color":"#38bdf8","bg":"rgba(56,189,248,.20)","border":"rgba(56,189,248,.68)","glow":"rgba(56,189,248,.38)","value_mult":3.10,"stat_mult":1.22,"rarity_weight":0.52,"craft_difficulty":1.55,"repair_mult":1.75,"market_availability":0.48,"min_level":7,"description":"Advanced equipment for specialized pilots."},
+    4: {"id":4,"name":"Military Grade","short":"T4","style":"military","color":"#f97316","bg":"rgba(249,115,22,.20)","border":"rgba(249,115,22,.72)","glow":"rgba(249,115,22,.38)","value_mult":5.50,"stat_mult":1.36,"rarity_weight":0.32,"craft_difficulty":2.05,"repair_mult":2.35,"market_availability":0.28,"min_level":12,"description":"Restricted military-grade hardware with high upkeep."},
+    5: {"id":5,"name":"Prototype","short":"T5","style":"prototype","color":"#d946ef","bg":"rgba(217,70,239,.22)","border":"rgba(217,70,239,.75)","glow":"rgba(217,70,239,.42)","value_mult":9.50,"stat_mult":1.52,"rarity_weight":0.16,"craft_difficulty":2.85,"repair_mult":3.25,"market_availability":0.13,"min_level":18,"description":"Powerful prototype gear with high cost and energy demands."},
+    6: {"id":6,"name":"Exotic","short":"T6","style":"exotic","color":"#facc15","bg":"rgba(250,204,21,.24)","border":"rgba(250,204,21,.82)","glow":"rgba(250,204,21,.50)","value_mult":16.0,"stat_mult":1.70,"rarity_weight":0.07,"craft_difficulty":3.90,"repair_mult":4.80,"market_availability":0.05,"min_level":26,"description":"Rare exotic technology with specialized strengths."},
+    7: {"id":7,"name":"Legendary / Relic","short":"T7","style":"relic","color":"#ffffff","bg":"linear-gradient(135deg,rgba(250,204,21,.28),rgba(217,70,239,.22),rgba(56,189,248,.22))","border":"rgba(255,255,255,.92)","glow":"rgba(255,255,255,.62)","value_mult":28.0,"stat_mult":1.90,"rarity_weight":0.02,"craft_difficulty":5.50,"repair_mult":7.00,"market_availability":0.01,"min_level":35,"description":"Relic-class technology. Extremely rare and never routine market stock."},
 }
 
 TIER_BALANCE = {
@@ -2257,8 +2336,8 @@ FACTION_AVATAR_NAMES: Dict[str, Dict[str, List[str]]] = {
 
 FACTION_AVATAR_SPECIES = {
     "solar_accord": "Human",
-    "iron_meridian": "Robot",
-    "umbral_veil": "Bug-like",
+    "iron_meridian": "Synthetic",
+    "umbral_veil": "Voidborne",
 }
 
 FACTION_AVATAR_FACTION_NAMES = {
@@ -2894,9 +2973,9 @@ WORLD_SERVER_BALANCE = {
     "pirate_bases_per_galaxy_max": 2,
     "spawn_one_per_type_per_check": True,
     "trim_one_excess_per_type_per_check": True,
-    "pirate_base_strength_mult": 1.25,
+    "pirate_base_strength_mult": 1.0,
     "pirate_base_min_tier": 1,
-    "pirate_base_max_tier": 9,
+    "pirate_base_max_tier": 3,
 }
 
 
@@ -2995,17 +3074,50 @@ COMBAT_BALANCE = {
     "max_salvage_sites_per_planet": 10,
 }
 
+COMBAT_MATCHUP_BALANCE = {
+    "level_mult_per_level": 0.008,
+    "level_mult_cap": 0.32,
+    "skill_mult_per_point": 0.0020,
+    "skill_mult_cap": 0.32,
+    "skill_accuracy_per_point": 0.00022,
+    "skill_evasion_per_point": 0.00018,
+    "max_accuracy_bonus": 0.075,
+    "max_evasion_bonus": 0.065,
+    "win_curve": 2.05,
+    "win_curve_span": 38,
+}
+
+COMBAT_SHIP_TEMPLATE_BALANCE = {
+    "frontier_endeavor": {"hull": 1600, "shield": 800, "armor": 10, "drive_speed": 0.70, "ship_tier": 1},
+    "nova_runner": {"hull": 2800, "shield": 1350, "armor": 18, "drive_speed": 1.55, "ship_tier": 2},
+    "eclipse_hunter": {"hull": 3400, "shield": 1600, "armor": 24, "drive_speed": 1.75, "ship_tier": 2},
+    "pathfinder": {"hull": 3200, "shield": 1550, "armor": 21, "drive_speed": 1.65, "ship_tier": 3},
+    "reclaimer": {"hull": 3900, "shield": 1500, "armor": 26, "drive_speed": 1.00, "ship_tier": 3},
+    "deepcore_19": {"hull": 4400, "shield": 1500, "armor": 30, "drive_speed": 0.95, "ship_tier": 3},
+    "freightline_77": {"hull": 5200, "shield": 2050, "armor": 32, "drive_speed": 0.88, "ship_tier": 4},
+    "vanguard": {"hull": 6600, "shield": 3100, "armor": 42, "drive_speed": 1.12, "ship_tier": 4},
+    "ironwall": {"hull": 9400, "shield": 4600, "armor": 56, "drive_speed": 0.76, "ship_tier": 5},
+    "titans_bane": {"hull": 15000, "shield": 7200, "armor": 72, "drive_speed": 0.48, "ship_tier": 7},
+}
+
+COMBAT_MODULE_STAT_CAPS = {
+    "damage": {0: 48, 1: 86, 2: 118, 3: 155, 4: 198, 5: 250, 6: 315, 7: 390},
+    "shield": {0: 160, 1: 280, 2: 420, 3: 580, 4: 760, 5: 980, 6: 1220, 7: 1480},
+    "hull": {0: 140, 1: 260, 2: 390, 3: 540, 4: 720, 5: 930, 6: 1160, 7: 1420},
+    "armor": {0: 4, 1: 8, 2: 12, 3: 17, 4: 22, 5: 28, 6: 34, 7: 42},
+    "power": {0: 45, 1: 90, 2: 135, 3: 190, 4: 250, 5: 320, 6: 400, 7: 500},
+}
+
 # Pirate station instances are intentionally scarce. They are map objectives, not normal traffic.
 PIRATE_STATION_BALANCE = {
     "max_stations_per_galaxy": 2,
     "global_station_soft_cap": 24,
-    "max_players_per_station": 3,
-    "respawn_hours": 8,
+    "max_players_per_station": 99,
+    "respawn_hours": 0,
     "min_station_spacing_pct": 18,
     "min_planet_spacing_pct": 14,
-    "enemy_count_base": 4,
-    "enemy_count_per_tier": 2,
-    "enemy_count_jitter": 2,
+    "enemy_count_by_tier": {"1": [3, 5], "2": [6, 12], "3": [12, 24]},
+    "enemy_strength_mult": 2.0,
     "enemy_move_pct_per_tick": 0.65,
     "enemy_tick_seconds": 10,
     "enemy_attack_range_pct": 4.8,
@@ -3014,6 +3126,7 @@ PIRATE_STATION_BALANCE = {
     "battle_max_rounds": 8,
     "victory_credit_per_tier": 900,
     "victory_xp_per_tier": 70,
+    "recipe_drop_chance_by_tier": {"1": 0.05, "2": 0.08, "3": 0.12},
 }
 
 
@@ -4615,6 +4728,7 @@ def migrate() -> None:
           token TEXT PRIMARY KEY,
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           created_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL DEFAULT '',
           expires_at TEXT NOT NULL
         );
 
@@ -6213,6 +6327,7 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
     add_cols("users", {"email":"TEXT", "google_sub":"TEXT", "auth_provider":"TEXT NOT NULL DEFAULT 'local'", "approved":"INTEGER NOT NULL DEFAULT 1", "last_login_at":"TEXT"})
+    add_cols("sessions", {"last_seen_at":"TEXT NOT NULL DEFAULT ''"})
     add_cols("players", {"cargo_operation_until":"TEXT", "cargo_operation_started_at":"TEXT", "cargo_operation_type":"TEXT", "cargo_operation_summary":"TEXT", "faction_id":"INTEGER", "planet_mission_cooldown_until":"TEXT", "planet_mission_cooldown_reason":"TEXT", "player_base_docked_id":"INTEGER", "scan_area_cooldown_until":"TEXT"})
     add_cols("planet_mission_runs", {"reward_items_json":"TEXT NOT NULL DEFAULT '[]'"})
     add_cols("guilds", {"level":"INTEGER NOT NULL DEFAULT 1", "xp":"INTEGER NOT NULL DEFAULT 0", "skill_points":"INTEGER NOT NULL DEFAULT 0", "last_planet_xp_at":"TEXT"})
@@ -6481,6 +6596,90 @@ def ensure_balance_content(conn: sqlite3.Connection) -> None:
                 recalc_market_price(conn, p["id"], c["id"], "security_stock_bias", 0, 0)
     conn.execute("INSERT OR IGNORE INTO market_ticks (id,last_tick_at) VALUES (1,?)", (iso(utcnow()-timedelta(minutes=999)),))
     conn.execute("INSERT OR IGNORE INTO simulation_ticks (id,last_tick_at,last_action_count) VALUES (1,?,0)", (iso(utcnow()-timedelta(minutes=999)),))
+    ensure_combat_balance_content(conn)
+
+
+def _cap_module_stat_value(key: str, value: Any, tier: int) -> Any:
+    if not isinstance(value, (int, float)):
+        return value
+    caps = COMBAT_MODULE_STAT_CAPS.get(str(key))
+    if not caps:
+        return value
+    cap = caps.get(clamp_tier(tier), caps[max(caps)])
+    return min(float(value), float(cap))
+
+
+def normalized_combat_module_stats(stats: Dict[str, Any], tier: int) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, value in (stats or {}).items():
+        normalized_key = "projectile_count" if str(key) in {"projectiles", "projectileCount"} else str(key)
+        if normalized_key in {"projectile_count", "volley"}:
+            try:
+                out[normalized_key] = clamp_int(int(value or 1), 1, 6)
+            except Exception:
+                out[normalized_key] = 1
+            continue
+        capped = _cap_module_stat_value(normalized_key, value, tier)
+        if isinstance(capped, float) and float(capped).is_integer():
+            capped = int(capped)
+        out[normalized_key] = capped
+    return out
+
+
+def ensure_combat_balance_content(conn: sqlite3.Connection) -> None:
+    if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ship_templates'"):
+        for code, spec in COMBAT_SHIP_TEMPLATE_BALANCE.items():
+            old = row(conn, "SELECT * FROM ship_templates WHERE code=?", (code,))
+            if not old:
+                continue
+            conn.execute(
+                """
+                UPDATE ship_templates
+                SET hull=?, shield=?, armor=?, drive_speed=?, ship_tier=?, slots_json=?
+                WHERE code=?
+                """,
+                (
+                    int(spec["hull"]),
+                    int(spec["shield"]),
+                    int(spec["armor"]),
+                    float(spec["drive_speed"]),
+                    int(spec["ship_tier"]),
+                    encode_json(normalized_ship_weapon_slots(old.get("slots_json") or "{}", old.get("role") or "", old.get("size_class") or "M", int(spec["ship_tier"]))),
+                    code,
+                ),
+            )
+            for ship in rows(conn, "SELECT id,hull,max_hull,shield,max_shield FROM ships WHERE template_id=?", (old["id"],)):
+                hull_ratio = max(0.0, min(1.0, float(ship.get("hull") or 0) / max(1.0, float(ship.get("max_hull") or old.get("hull") or 1))))
+                shield_ratio = max(0.0, min(1.0, float(ship.get("shield") or 0) / max(1.0, float(ship.get("max_shield") or old.get("shield") or 1))))
+                conn.execute(
+                    """
+                    UPDATE ships
+                    SET max_hull=?, hull=?, max_shield=?, shield=?, armor=?, drive_speed=?, current_tier=?, max_tier=max(COALESCE(max_tier, ?), ?)
+                    WHERE id=?
+                    """,
+                    (
+                        int(spec["hull"]),
+                        max(1, int(int(spec["hull"]) * hull_ratio)),
+                        int(spec["shield"]),
+                        max(0, int(int(spec["shield"]) * shield_ratio)),
+                        int(spec["armor"]),
+                        float(spec["drive_speed"]),
+                        int(spec["ship_tier"]),
+                        int(spec["ship_tier"]) + 2,
+                        int(spec["ship_tier"]) + 2,
+                        ship["id"],
+                    ),
+                )
+    if scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='module_templates'"):
+        for mt in rows(conn, "SELECT id,tier,stats_json FROM module_templates"):
+            tier = clamp_tier(mt.get("tier", 1))
+            stats = normalized_combat_module_stats(decode_json(mt.get("stats_json"), {}) or {}, tier)
+            conn.execute("UPDATE module_templates SET tier=?, stats_json=? WHERE id=?", (tier, encode_json(stats), mt["id"]))
+        conn.execute("""
+            UPDATE ship_modules
+            SET current_tier=min(COALESCE(current_tier, 1), ?),
+                max_tier=min(COALESCE(max_tier, ?), ?)
+        """, (int(TIER_BALANCE.get("max_tier", 7)), int(TIER_BALANCE.get("max_tier", 7)), int(TIER_BALANCE.get("max_tier", 7))))
 
 
 
@@ -6629,6 +6828,26 @@ MAP_TRAVEL_MIN_SECONDS = 2
 GATE_JUMP_INIT_SECONDS = 3
 AUTO_GATE_JUMP_INIT_SECONDS = 10
 GALAXY_SPAWN_IMMUNITY_SECONDS = 5
+PLAYER_MAP_LOGOUT_GRACE_SECONDS = 60
+
+
+def player_recently_seen_on_map(conn: sqlite3.Connection, player: Dict[str, Any], now: Optional[datetime] = None) -> bool:
+    user_id = int(player.get("user_id") or 0)
+    if not user_id:
+        return False
+    now = now or utcnow()
+    cutoff = iso(now - timedelta(seconds=PLAYER_MAP_LOGOUT_GRACE_SECONDS))
+    try:
+        return bool(row(
+            conn,
+            """SELECT 1 as ok
+               FROM sessions
+               WHERE user_id=? AND expires_at>? AND COALESCE(NULLIF(last_seen_at,''), created_at)>?
+               LIMIT 1""",
+            (user_id, iso(now), cutoff),
+        ))
+    except sqlite3.OperationalError:
+        return bool(row(conn, "SELECT 1 as ok FROM sessions WHERE user_id=? AND expires_at>? LIMIT 1", (user_id, iso(now))))
 
 
 def map_route_seconds_for_distance(conn: sqlite3.Connection, ship: Dict[str, Any], distance_pct: float, god: bool = False) -> int:
@@ -6696,6 +6915,46 @@ def current_player_map_position(conn: sqlite3.Connection, player: Dict[str, Any]
     if map_type == "system" and travel.get("dock_base_id"):
         return {"x_pct": float(travel.get("dock_base_x_pct") or 50), "y_pct": float(travel.get("dock_base_y_pct") or 50)}
     return map_point_for_player_anchor(conn, player, map_type)
+
+
+def interrupt_active_local_travel(conn: sqlite3.Connection, player: Dict[str, Any], action_label: str = "new course") -> Dict[str, Any]:
+    travel = build_travel_state(conn, player)
+    if not travel.get("active"):
+        return player
+    mode = str(travel.get("mode") or player.get("travel_mode") or "").lower()
+    map_type = str(travel.get("map_type") or ("galaxy" if mode in {"galaxy", "galaxy_route"} else "system")).lower()
+    if map_type == "galaxy" or mode in {"galaxy", "galaxy_route"}:
+        raise HTTPException(409, "Gate jumps are already initiated and cannot be interrupted. Wait for the jump to complete.")
+    point = current_player_map_position(conn, player, map_type)
+    pid = int(player["id"])
+    clear_player_waypoint(conn, pid)
+    clear_player_intercept(conn, pid)
+    clear_player_route(conn, pid)
+    clear_pirate_station_travel_intent(conn, pid)
+    try:
+        clear_planet_mission_travel_intent(conn, pid)
+    except NameError:
+        pass
+    set_player_open_space(conn, pid, {
+        "active": True,
+        "map_type": map_type,
+        "x_pct": float(point.get("x_pct") or 50),
+        "y_pct": float(point.get("y_pct") or 50),
+        "anchor_planet_id": player.get("location_planet_id"),
+        "anchor_galaxy_id": travel.get("origin_galaxy_id") or player.get("travel_origin_galaxy_id"),
+        "arrived_at": iso(),
+        "label": f"Interrupted for {action_label}",
+    })
+    conn.execute(
+        """UPDATE players
+           SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+               travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL,
+               travel_destination_galaxy_id=NULL, player_base_docked_id=NULL
+           WHERE id=?""",
+        (pid,),
+    )
+    add_event(conn, pid, "travel", f"Travel interrupted for {action_label} at {point.get('x_pct'):.1f} / {point.get('y_pct'):.1f}.", {"map_type": map_type, "x_pct": point.get("x_pct"), "y_pct": point.get("y_pct")})
+    return get_player(conn, pid)
 
 
 def player_action_range_pct(conn: sqlite3.Connection, player: Dict[str, Any], seconds: float = ACTION_RANGE_SECONDS) -> float:
@@ -7276,7 +7535,7 @@ def resolve_intercept_if_close(conn: sqlite3.Connection, player: Dict[str, Any])
     if not target_ref:
         return player
     map_type = str(meta.get("map_type") or travel.get("map_type") or "system")
-    active_map = build_galaxy_map(conn, player) if map_type == "galaxy" else build_system_map(conn, player)
+    active_map = build_galaxy_map_shallow(conn, player) if map_type == "galaxy" else build_system_map_shallow(conn, player)
     nodes = {int(n["id"]): n for n in active_map.get("nodes", []) if str(n.get("id") or "").isdigit()}
     origin_key = int(travel.get("origin_galaxy_id") or 0) if map_type == "galaxy" else int(travel.get("origin_planet_id") or 0)
     origin_node = {"x_pct": float(meta.get("origin_x_pct")), "y_pct": float(meta.get("origin_y_pct"))} if meta.get("origin_x_pct") is not None else nodes.get(origin_key)
@@ -7284,8 +7543,15 @@ def resolve_intercept_if_close(conn: sqlite3.Connection, player: Dict[str, Any])
     if not origin_node:
         return player
     own = map_point_between(origin_node, destination, float(travel.get("progress") or 0))
-    target = next((x for x in active_map.get("traffic", []) if x.get("combatTargetRef") == target_ref or x.get("id") == target_ref), None)
-    target_point = {"x_pct": float((target or meta).get("x_pct") or destination["x_pct"]), "y_pct": float((target or meta).get("y_pct") or destination["y_pct"])}
+    target_point = {"x_pct": float(meta.get("x_pct") or destination["x_pct"]), "y_pct": float(meta.get("y_pct") or destination["y_pct"])}
+    velocity = meta.get("target_velocity") if isinstance(meta.get("target_velocity"), dict) else {}
+    started = parse_dt(meta.get("started_at"))
+    if started and meta.get("target_start_x_pct") is not None and meta.get("target_start_y_pct") is not None:
+        elapsed = max(0.0, (utcnow() - started).total_seconds())
+        target_point = {
+            "x_pct": clamp_pct(float(meta.get("target_start_x_pct") or 50) + float(velocity.get("x_pct_per_sec") or 0.0) * elapsed, 1, 99),
+            "y_pct": clamp_pct(float(meta.get("target_start_y_pct") or 50) + float(velocity.get("y_pct_per_sec") or 0.0) * elapsed, 1, 99),
+        }
     dist_pct = ((own["x_pct"] - target_point["x_pct"]) ** 2 + (own["y_pct"] - target_point["y_pct"]) ** 2) ** 0.5
     if dist_pct <= INTERCEPT_CONTACT_RANGE_PCT:
         dest = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("travel_destination_id"),))
@@ -7940,10 +8206,16 @@ def scan_area_profile_for_player(conn: sqlite3.Connection, player: Dict[str, Any
     now = utcnow()
     ready_at = parse_dt(player.get("scan_area_cooldown_until"))
     remaining = max(0, int(math.ceil(((ready_at or now) - now).total_seconds()))) if ready_at else 0
+    cooldown_total = max(1, int(profile.get("cooldown_seconds") or 1))
+    started_at = ready_at - timedelta(seconds=cooldown_total) if ready_at and remaining > 0 else None
+    elapsed = max(0, cooldown_total - remaining) if remaining > 0 else cooldown_total
+    ready_pct = clamp_int(math.floor((elapsed / cooldown_total) * 100), 0, 99) if remaining > 0 else 100
     profile.update({
         "cooldown_until": player.get("scan_area_cooldown_until") if remaining > 0 else None,
+        "cooldown_started_at": iso(started_at) if started_at else None,
         "cooldown_active": remaining > 0,
         "remaining_seconds": remaining,
+        "cooldown_ready_pct": ready_pct,
     })
     return profile
 
@@ -7993,12 +8265,15 @@ def player_radar_centers(conn: sqlite3.Connection, player: Dict[str, Any], nodes
 
     party = active_party_for_player(conn, player["id"]) if "active_party_for_player" in globals() else None
     current_scope = current_map_scope(conn, player, map_type)
+    presence_now = utcnow()
     if party:
         for member_id in party_member_ids(conn, int(party["id"])):
             if int(member_id) == int(player["id"]):
                 continue
             member = row(conn, "SELECT * FROM players WHERE id=?", (int(member_id),))
             if not member:
+                continue
+            if not player_recently_seen_on_map(conn, member, presence_now):
                 continue
             if map_type == "system":
                 member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (member.get("location_planet_id"),)) or {}
@@ -8024,6 +8299,9 @@ def annotate_and_filter_by_player_radar(conn: sqlite3.Connection, player: Dict[s
     for obj in objects:
         # The local player is rendered from travel_state only. Never re-emit player:self as traffic.
         if obj.get("id") == "player:self" or (obj.get("kind") == "self"):
+            continue
+        if obj.get("activeBattle") or obj.get("recentBattle"):
+            visible.append({**obj, "radarVisible": True, "radarBypass": obj.get("radarBypass") or "combat_contact", "radarSource": obj.get("radarSource") or "combat"})
             continue
         if obj.get("securityDefense"):
             visible.append({**obj, "radarVisible": True, "radarBypass": obj.get("radarBypass") or "security_defense", "radarSource": obj.get("radarSource") or "security_grid"})
@@ -8887,6 +9165,7 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
         security_count = 0
 
     party_ids_added: set = set()
+    map_presence_now = utcnow()
     party = active_party_for_player(conn, player["id"]) if "active_party_for_player" in globals() else None
     if party:
         for member_id in party_member_ids(conn, int(party["id"])):
@@ -8894,6 +9173,8 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
                 continue
             other = row(conn, "SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id=?", (int(member_id),))
             if not other:
+                continue
+            if not player_recently_seen_on_map(conn, other, map_presence_now):
                 continue
             if map_type == "system":
                 member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (other.get("location_planet_id"),)) or {}
@@ -8954,6 +9235,8 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
             other = row(conn, "SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id=?", (other_id,))
             if not other:
                 continue
+            if not player_recently_seen_on_map(conn, other, map_presence_now):
+                continue
             if map_type == "system":
                 member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (other.get("location_planet_id"),)) or {}
                 if int(member_planet.get("galaxy_id") or 0) != int(current_scope.get("galaxy_id") or 0):
@@ -8992,8 +9275,18 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
             battle_ids_added.add(other_id)
 
     # Real other players in transit, if any exist in persistence. Galaxy map stays gate-only unless explicitly enabled.
+    presence_cutoff = iso(map_presence_now - timedelta(seconds=PLAYER_MAP_LOGOUT_GRACE_SECONDS))
     if map_type != "galaxy" or PERF_GALAXY_MAP_TRAFFIC:
-        other_rows = rows(conn, """SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code FROM players p JOIN users u ON u.id=p.user_id LEFT JOIN user_profiles up ON up.user_id=u.id WHERE p.id<>? AND p.travel_until IS NOT NULL ORDER BY p.id LIMIT 12""", (player["id"],))
+        other_rows = rows(conn, """SELECT p.*, u.id as user_id, u.username, up.display_name, up.avatar_id, up.selected_badge_code
+                                   FROM players p
+                                   JOIN users u ON u.id=p.user_id
+                                   LEFT JOIN user_profiles up ON up.user_id=u.id
+                                   WHERE p.id<>? AND p.travel_until IS NOT NULL
+                                     AND EXISTS (
+                                       SELECT 1 FROM sessions s
+                                       WHERE s.user_id=p.user_id AND s.expires_at>? AND COALESCE(NULLIF(s.last_seen_at,''), s.created_at)>?
+                                     )
+                                   ORDER BY p.id LIMIT 12""", (player["id"], iso(map_presence_now), presence_cutoff))
     else:
         other_rows = []
     for other in other_rows:
@@ -9650,21 +9943,39 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
         max_count = int(max_count or 0)
     if max_count <= 0:
         return []
+    pinned_npc_ids = combat_recent_or_active_npc_ids(conn)
+    pinned_clause = ""
+    pinned_order = "2"
+    pinned_params: tuple = ()
+    if pinned_npc_ids:
+        pinned_marks = ",".join("?" for _ in pinned_npc_ids)
+        pinned_clause = f" OR n.id IN ({pinned_marks})"
+        pinned_order = f"CASE WHEN n.id IN ({pinned_marks}) THEN 0 ELSE 2 END"
+        pinned_params = tuple(sorted(pinned_npc_ids))
     if map_type == "galaxy":
-        npc_query = """
+        npc_query = f"""
             SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id, p.security_level AS npc_security_level, f.color AS npc_faction_color
             FROM npc_agents n
             LEFT JOIN planets p ON p.id=n.planet_id
             LEFT JOIN factions f ON f.id=p.faction_id
-            WHERE COALESCE(n.alive,1)=1
-              AND NOT (n.career_code='faction_patrol' OR n.role='faction_patrol')
-            ORDER BY n.id
+            WHERE COALESCE(n.alive,1)=1 AND (
+              NOT (n.career_code='faction_patrol' OR n.role='faction_patrol')
+              {pinned_clause}
+            )
+            ORDER BY {pinned_order}, n.id
             LIMIT ?
         """
-        params: tuple = (max_count,)
+        params: tuple = pinned_params + pinned_params + (max_count,)
     else:
-        npc_query = ("SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id, p.security_level AS npc_security_level, f.color AS npc_faction_color FROM npc_agents n LEFT JOIN planets p ON p.id=n.planet_id LEFT JOIN factions f ON f.id=p.faction_id WHERE COALESCE(n.alive,1)=1 AND n.planet_id IN (%s) ORDER BY CASE WHEN COALESCE(n.simulated,1)=2 THEN 0 WHEN n.career_code='faction_patrol' OR n.role='faction_patrol' THEN 1 ELSE 2 END, n.id DESC LIMIT ?" % ",".join("?" for _ in node_ids))
-        params = tuple(node_ids + [max_count])
+        node_marks = ",".join("?" for _ in node_ids)
+        npc_query = f"""SELECT n.*, p.faction_id AS npc_faction_id, p.galaxy_id AS npc_galaxy_id, p.security_level AS npc_security_level, f.color AS npc_faction_color
+            FROM npc_agents n
+            LEFT JOIN planets p ON p.id=n.planet_id
+            LEFT JOIN factions f ON f.id=p.faction_id
+            WHERE COALESCE(n.alive,1)=1 AND (n.planet_id IN ({node_marks}){pinned_clause})
+            ORDER BY {pinned_order}, CASE WHEN COALESCE(n.simulated,1)=2 THEN 0 WHEN n.career_code='faction_patrol' OR n.role='faction_patrol' THEN 1 ELSE 2 END, n.id DESC
+            LIMIT ?"""
+        params = tuple(node_ids) + pinned_params + pinned_params + (max_count,)
     now = utcnow()
     out: List[Dict[str, Any]] = []
     player_contact = npc_player_attack_contact(conn, player, map_type)
@@ -9781,7 +10092,9 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
         }
         hostile = role_l in COMBAT_LEGAL_ROLES or int(npc.get("aggression") or 0) > 70 or state.get("objective") in {"pirate_intercept"}
         traveler_id = f"traveler:{npc_id}:{map_type}"
-        npc_combat_locked = combat_actor_is_immune(conn, f"npc:{npc_id}") or combat_actor_is_immune(conn, traveler_id)
+        npc_active_battle = bool(combat_actor_active_battle(conn, f"npc:{npc_id}") or combat_actor_active_battle(conn, traveler_id))
+        npc_recent_battle = bool(npc_id in pinned_npc_ids)
+        npc_combat_locked = npc_active_battle or combat_actor_is_immune(conn, f"npc:{npc_id}") or combat_actor_is_immune(conn, traveler_id)
         out.append({
             "id": traveler_id,
             "combatTargetRef": traveler_id,
@@ -9808,6 +10121,8 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "npcGalaxyId": int(npc.get("npc_galaxy_id") or gid or 0),
             "npcSecurityLevel": int(npc.get("npc_security_level") or 50),
             "isFactionPatrol": bool(str(npc.get("career_code") or "").lower() == "faction_patrol" or role_l == "faction_patrol"),
+            "activeBattle": npc_active_battle,
+            "recentBattle": npc_recent_battle,
             "attackable": not npc_combat_locked,
             "blockedReason": "Battle locked / temporary immunity" if npc_combat_locked else "",
             "hostile": hostile,
@@ -9847,8 +10162,8 @@ def build_map_salvage_icons(conn: sqlite3.Connection, planet_id: int) -> List[Di
 
 FACTION_SEED_DEFS = [
     {"code": "solar_accord", "name": "Solar Accord", "color": "orange", "home_galaxy_code": "helios", "description": "Human republic fleets built around law, logistics, patrols, clean trade, and stable markets."},
-    {"code": "iron_meridian", "name": "Iron Meridian", "color": "grey", "home_galaxy_code": "meridian", "description": "Robot compact built around shipyards, mining, armored logistics, and hard-border control."},
-    {"code": "umbral_veil", "name": "Umbral Veil", "color": "purple", "home_galaxy_code": "nyx", "description": "Bug-like alien freeholds of bioluminescent scouts, intelligence brokers, smugglers, and deep-space mystics."},
+    {"code": "iron_meridian", "name": "Iron Meridian", "color": "grey", "home_galaxy_code": "meridian", "description": "Synthetic compact built around shipyards, mining, armored logistics, and hard-border control."},
+    {"code": "umbral_veil", "name": "Umbral Veil", "color": "purple", "home_galaxy_code": "nyx", "description": "Voidborne alien freeholds of bioluminescent scouts, intelligence brokers, smugglers, and deep-space mystics."},
 ]
 
 GALAXY_EXPANSION_SEED = [
@@ -10296,7 +10611,20 @@ def pirate_base_level_for_galaxy(conn: sqlite3.Connection, galaxy_id: int, rng: 
 
 
 def pirate_base_tier_for_level(level: int) -> int:
-    return clamp_int(int(math.ceil(max(1, level) / 10)), int(WORLD_SERVER_BALANCE.get("pirate_base_min_tier", 1)), int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9)))
+    lo = int(WORLD_SERVER_BALANCE.get("pirate_base_min_tier", 1))
+    hi = min(3, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 3)))
+    return clamp_int(int(math.ceil(max(1, level) / 10)), lo, hi)
+
+
+def pirate_station_tier(value: Any) -> int:
+    return clamp_int(int(value or 1), 1, 3)
+
+
+def pirate_station_enemy_count_for_tier(tier: int, rng: random.Random) -> int:
+    tier = pirate_station_tier(tier)
+    configured = PIRATE_STATION_BALANCE.get("enemy_count_by_tier") or {}
+    lo, hi = configured.get(str(tier), [3, 5])
+    return rng.randint(int(lo), max(int(lo), int(hi)))
 
 
 def spawn_server_pirate_base_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[str, Any], rng: random.Random) -> Optional[Dict[str, Any]]:
@@ -10321,9 +10649,9 @@ def spawn_server_pirate_base_for_galaxy(conn: sqlite3.Connection, galaxy: Dict[s
     candidate, nearest_planet = best
     station_level = pirate_base_level_for_galaxy(conn, int(galaxy["id"]), rng)
     station_level = pirate_level_for_security(station_level, int(nearest_planet.get("security_level") or 50), rng)
-    tier = pirate_base_tier_for_level(station_level)
+    tier = pirate_station_tier(pirate_base_tier_for_level(station_level))
     difficulty = clamp_int(tier + int(station_level // 18) + rng.randint(0, 1), 1, 12)
-    total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
+    total = pirate_station_enemy_count_for_tier(tier, rng)
     name = f"{rng.choice(['Blackwake','Red Dagger','Void Maw','Corsair','Grim Halo','Iron Fang'])} Base {galaxy['code'].upper()}-{uuid.uuid4().hex[:4].upper()}"
     code = f"server_pirate_base_{galaxy['id']}_{uuid.uuid4().hex[:8]}"
     conn.execute(
@@ -10401,16 +10729,14 @@ def default_resource_tier_for_galaxy(conn: sqlite3.Connection, galaxy_id: int, a
 
 def admin_spawn_pirate_station_level_range(conn: sqlite3.Connection, galaxy_id: int) -> Tuple[int, int]:
     lo, hi = world_level_range_for_galaxy(conn, int(galaxy_id or 0))
-    mult = float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25) or 1.25)
+    mult = float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.0) or 1.0)
     station_lo = max(1, int(math.ceil(lo * mult)))
     station_hi = max(station_lo, int(math.ceil(max(lo, hi) * mult)))
     return station_lo, station_hi
 
 
 def admin_spawn_pirate_station_tier_options(conn: sqlite3.Connection, galaxy_id: int) -> List[int]:
-    lo, hi = admin_spawn_pirate_station_level_range(conn, int(galaxy_id or 0))
-    tiers = {pirate_base_tier_for_level(level) for level in range(lo, hi + 1)}
-    return sorted(tiers) or [pirate_base_tier_for_level(lo)]
+    return [1, 2, 3]
 
 
 def admin_spawn_constraints(conn: sqlite3.Connection, galaxy_id: int, planet_id: Optional[int] = None) -> Dict[str, Any]:
@@ -10478,9 +10804,9 @@ def admin_spawn_resolve_pirate_station_level_tier(conn: sqlite3.Connection, gala
         level_lo = max(lo, (tier - 1) * 10 + 1)
         level_hi = min(hi, tier * 10)
         level = clamp_int(tier * 10, lo, hi) if level_lo > level_hi else rng.randint(level_lo, level_hi)
-        return level, pirate_base_tier_for_level(level)
+        return level, pirate_station_tier(tier)
     station_level = pirate_base_level_for_galaxy(conn, int(galaxy_id or 0), rng)
-    return station_level, pirate_base_tier_for_level(station_level)
+    return station_level, pirate_station_tier(pirate_base_tier_for_level(station_level))
 
 
 def admin_spawn_spread_point(x_pct: float, y_pct: float, index: int) -> Dict[str, float]:
@@ -10667,9 +10993,9 @@ def admin_spawn_pirate_station_at(conn: sqlite3.Connection, galaxy: Dict[str, An
     station_level, tier = admin_spawn_resolve_pirate_station_level_tier(conn, int(galaxy["id"]), rng, level_override, tier_override)
     if level_override is None and tier_override is None:
         station_level = pirate_level_for_security(station_level, int(nearest_planet.get("security_level") or 50), rng)
-        tier = pirate_base_tier_for_level(station_level)
+        tier = pirate_station_tier(pirate_base_tier_for_level(station_level))
     difficulty = clamp_int(tier + int(station_level // 18) + rng.randint(0, 1), 1, 12)
-    total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
+    total = pirate_station_enemy_count_for_tier(tier, rng)
     name = f"{rng.choice(['Blackwake','Red Dagger','Void Maw','Corsair','Grim Halo','Iron Fang'])} Admin Base {uuid.uuid4().hex[:4].upper()}"
     code = f"admin_pirate_base_{galaxy['id']}_{uuid.uuid4().hex[:8]}"
     conn.execute(
@@ -11982,31 +12308,35 @@ def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
 
     # Performance rule: galaxy view is gate navigation only.
     # No NPC AI, signatures, scans, or combat objects are built here.
+    event_sites = build_server_event_map_sites(conn, player, nodes, "galaxy", int(current_gid or 0))
     scan_area = scan_area_profile_for_player(conn, player, "galaxy")
     scan_blips = build_scan_area_blips(conn, player, nodes, "galaxy")
     scan_pings = build_scan_area_pings(conn, player, "galaxy")
     annotate_object_scan_unlocks(conn, player, nodes, "galaxy", int(current_gid or 0))
     annotate_object_scan_unlocks(conn, player, scan_blips, "galaxy", int(current_gid or 0))
+    ship = active_ship_for_player(conn, player)
+    radar_range = ship_radar_range_pct(conn, ship, "galaxy")
+    radar_center = player_map_center(conn, player, "galaxy", nodes)
     summary = {
         "ships_in_transit": 0,
         "ore_signatures": 0,
         "ancient_sites": 0,
-        "server_events": 0,
+        "server_events": len(event_sites),
         "wrecks": 0,
         "hostile_contacts": 0,
         "risk_band": "Regional",
         "security_level": int(sum([n.get("security_avg", 50) for n in nodes]) / max(1, len(nodes))),
-        "radar_range_pct": 0,
-        "radar_center_x_pct": 0,
-        "radar_center_y_pct": 0,
+        "radar_range_pct": radar_range,
+        "radar_center_x_pct": round(float(radar_center.get("x_pct") or 50), 2),
+        "radar_center_y_pct": round(float(radar_center.get("y_pct") or 50), 2),
         "hidden_by_radar": 0,
         "scan_area": scan_area,
         "player_faction": pf,
         "war_count": len(active_or_upcoming_planet_wars(conn)),
-        "readable_hint": "Galaxy map is gate-only. Select a destination galaxy; autopilot follows connected gate lanes. Local objects exist only in system view.",
+        "readable_hint": f"Galaxy map is gate-only. Select a destination galaxy; autopilot follows connected gate lanes. Local objects exist only in system view. Radar boundary: {radar_range}%.",
         "nearby_opportunities": ["Gate lanes", "Faction borders", "Gate destinations"],
     }
-    return {"nodes": nodes, "lanes": lanes, "current_galaxy_id": current_gid, "traffic": [], "ore_sites": [], "exploration_sites": [], "event_sites": [], "war_zones": [], "scan_blips": scan_blips, "scan_pings": scan_pings, "summary": summary}
+    return {"nodes": nodes, "lanes": lanes, "current_galaxy_id": current_gid, "traffic": [], "ore_sites": [], "exploration_sites": [], "event_sites": event_sites, "war_zones": [], "scan_blips": scan_blips, "scan_pings": scan_pings, "summary": summary}
 
     return {"nodes": nodes, "lanes": lanes, "current_galaxy_id": current_gid, "traffic": traffic, "ore_sites": ore_sites, "exploration_sites": exploration_sites, "event_sites": event_sites, "war_zones": war_zones, "summary": summary}
 
@@ -12258,9 +12588,9 @@ def ensure_pirate_station_content(conn: sqlite3.Connection) -> None:
             galaxy_center_value = int(g.get("center_value") or galaxy_center_value_from_xy(g.get("x_pct") or 50, g.get("y_pct") or 50))
             raw_level = (1 + int(radius // 10) + max(0, galaxy_center_value - 2) + int(int(nearest_planet.get("pirate_activity") or 40) >= 65)) * 8
             station_level = pirate_level_for_security(raw_level, int(nearest_planet.get("security_level") or 50), rng)
-            tier = pirate_base_tier_for_level(station_level)
+            tier = pirate_station_tier(pirate_base_tier_for_level(station_level))
             difficulty = clamp_int(tier + rng.randint(0, 2), 2, 9)
-            total = int(PIRATE_STATION_BALANCE["enemy_count_base"]) + tier * int(PIRATE_STATION_BALANCE["enemy_count_per_tier"]) + rng.randint(0, int(PIRATE_STATION_BALANCE["enemy_count_jitter"]))
+            total = pirate_station_enemy_count_for_tier(tier, rng)
             name = f"{rng.choice(['Blackwake','Red Dagger','Void Maw','Corsair','Grim Halo','Iron Fang'])} Station {g['code'].upper()}-{existing + slot + 1}"
             code = f"pirate_station_{g['id']}_{existing + slot + 1}_{int(now.timestamp())}"
             conn.execute(
@@ -12281,7 +12611,7 @@ def build_system_pirate_stations(conn: sqlite3.Connection, player: Dict[str, Any
     for st in rows(conn, "SELECT ps.*, p.name as nearest_planet_name FROM pirate_stations ps LEFT JOIN planets p ON p.id=ps.nearest_planet_id WHERE ps.galaxy_id=? AND ps.status IN ('active','occupied') ORDER BY ps.tier DESC, ps.name", (galaxy_id,)):
         active_count = pirate_station_active_player_count(conn, int(st["id"]))
         player_inside = bool(row(conn, "SELECT 1 FROM pirate_station_runs WHERE station_id=? AND player_id=? AND status='active'", (st["id"], player["id"])))
-        locked = active_count >= cap and not player_inside
+        locked = False
         remaining = pirate_station_remaining_for_station(conn, int(st["id"]))
         total = max(1, int(st.get("total_pirates") or 1))
         resource = clamp_int(round((remaining / total) * 100), 0, 100)
@@ -12296,10 +12626,10 @@ def build_system_pirate_stations(conn: sqlite3.Connection, player: Dict[str, Any
             "resourcePct": resource,
             "resource_pct": resource,
             "adminSpawned": str(st.get("code") or "").startswith("admin_pirate_base_") or str(st.get("seed") or "").startswith("admin:"),
-            "label": f"Pirate Station • T{st.get('tier')} • {resource}% defenders • {active_count}/{cap} pilots",
-            "selectedSummary": f"Open-world pirate station near {st.get('nearest_planet_name') or 'deep space'}. Capacity {active_count}/{cap}. Shared defenders persist until cleared.",
-            "outcomeFactors": "Entering opens an open-world station map. Pirates move slowly toward the closest pilot. Multiple pilots can enter up to capacity.",
-            "dangerHint": "Open-world station assault. Retreat through the outer edge. Last pirate kill is tracked for future rewards.",
+            "label": f"Pirate Station - T{st.get('tier')} - {resource}% defenders - {active_count} pilot(s) inside",
+            "selectedSummary": f"Pirate station map near {st.get('nearest_planet_name') or 'deep space'}. Entering removes you from the system map until you escape through the outer edge.",
+            "outcomeFactors": "Pirates are level-appropriate for this area but use doubled station strength. Defeated pirates stay dead, even after everyone leaves.",
+            "dangerHint": "Reach the outer 10% escape zone to return to the system map. Clearing every pirate removes the station.",
             "image_url": pirate_station_visual_payload(st),
         })
         out.append(st)
@@ -12360,8 +12690,8 @@ def update_pirate_station_resource(conn: sqlite3.Connection, run: Dict[str, Any]
     total = max(1, int(station.get("total_pirates") or remaining or 1))
     pct = clamp_int(round((remaining / total) * 100), 0, 100)
     active_count = pirate_station_active_player_count(conn, int(station["id"]))
-    status = "depleted" if remaining <= 0 else ("occupied" if active_count > 0 else "active")
-    respawn_at = iso(utcnow() + timedelta(hours=float(PIRATE_STATION_BALANCE["respawn_hours"]))) if remaining <= 0 else station.get("respawn_at")
+    status = "depleted" if remaining <= 0 else "active"
+    respawn_at = None if remaining <= 0 else station.get("respawn_at")
     occupied = scalar(conn, "SELECT player_id FROM pirate_station_runs WHERE station_id=? AND status='active' ORDER BY id LIMIT 1", (station["id"],))
     conn.execute(
         "UPDATE pirate_stations SET remaining_pirates=?, resource_pct=?, status=?, occupied_by_player_id=?, updated_at=?, respawn_at=? WHERE id=?",
@@ -12372,11 +12702,11 @@ def update_pirate_station_resource(conn: sqlite3.Connection, run: Dict[str, Any]
 
 
 def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station: Dict[str, Any]) -> None:
-    count = max(1, int(station.get("remaining_pirates") or station.get("total_pirates") or 8))
-    tier = int(station.get("tier") or 1)
+    tier = pirate_station_tier(station.get("tier") or 1)
+    count = max(1, int(station.get("remaining_pirates") or station.get("total_pirates") or pirate_station_enemy_count_for_tier(tier, random.Random(str(station.get("seed") or run_id)))))
     galaxy_id = int(station.get("galaxy_id") or 0)
     level_min, level_max = world_level_range_for_galaxy(conn, galaxy_id) if galaxy_id else (tier * 6, tier * 10)
-    strength_mult = float(WORLD_SERVER_BALANCE.get("pirate_base_strength_mult", 1.25))
+    strength_mult = float(PIRATE_STATION_BALANCE.get("enemy_strength_mult", 2.0) or 2.0)
     station_planet = row(conn, "SELECT security_level FROM planets WHERE id=?", (int(station.get("nearest_planet_id") or station.get("planet_id") or 0),))
     station_security = int((station_planet or {}).get("security_level") or 50)
     station_band = pirate_security_band(station_security)
@@ -12404,11 +12734,11 @@ def create_pirate_station_enemies(conn: sqlite3.Connection, run_id: int, station
         points.append(best or {"x_pct": rng.uniform(10, 90), "y_pct": rng.uniform(10, 90)})
     for i, pt in enumerate(points):
         base_level = rng.randint(max(1, level_min), max(level_min, level_max))
-        enemy_level = pirate_level_for_security(max(1, int(math.ceil(base_level * strength_mult))), station_security, rng)
-        enemy_tier = clamp_int(max(tier, pirate_base_tier_for_level(enemy_level)) + (1 if i % 5 == 0 and tier >= 4 else 0), 1, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9)))
-        power = int(85 + enemy_level * rng.uniform(14.5, 20.5) + enemy_tier * 32 + rng.randint(0, 55))
-        hull = int(150 + enemy_level * rng.uniform(32, 44) + enemy_tier * 45 + rng.randint(0, 80))
-        shield = int(90 + enemy_level * rng.uniform(18, 28) + enemy_tier * 28 + rng.randint(0, 55))
+        enemy_level = pirate_level_for_security(base_level, station_security, rng)
+        enemy_tier = tier
+        power = int((85 + enemy_level * rng.uniform(14.5, 20.5) + enemy_tier * 32 + rng.randint(0, 55)) * strength_mult)
+        hull = int((150 + enemy_level * rng.uniform(32, 44) + enemy_tier * 45 + rng.randint(0, 80)) * strength_mult)
+        shield = int((90 + enemy_level * rng.uniform(18, 28) + enemy_tier * 28 + rng.randint(0, 55)) * strength_mult)
         name_roots = {
             "high_sec": ["Knife", "Rutter", "Backdock", "Scrapjaw"],
             "border_sec": ["Raider", "Cutlass", "Corsair", "Blackwake"],
@@ -12451,10 +12781,16 @@ def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], s
     if not station:
         raise HTTPException(404, "Pirate station not found")
     if station.get("status") == "depleted":
-        raise HTTPException(400, "Pirate station is depleted and waiting to respawn")
+        raise HTTPException(400, "Pirate station has already been cleared")
     current = active_pirate_station_run(conn, player["id"])
     if current and int(current["station_id"]) != int(station_id):
-        raise HTTPException(409, "You are already inside a different pirate station")
+        update_pirate_station_resource(conn, current)
+        conn.execute(
+            "UPDATE pirate_station_runs SET status='retreated', battle_open=0, battle_target_enemy_id=NULL, battle_report_json='{}', completed_at=?, updated_at=? WHERE id=?",
+            (iso(), iso(), current["id"]),
+        )
+        update_pirate_station_resource(conn, {**current, "status": "retreated"})
+        current = None
     if current:
         clear_player_open_space(conn, player["id"])
         clear_player_waypoint(conn, player["id"])
@@ -12463,11 +12799,6 @@ def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], s
         conn.execute("UPDATE players SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL, travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL, travel_destination_galaxy_id=NULL WHERE id=?", (player["id"],))
         update_pirate_station_resource(conn, current)
         return {"message": f"Returned to {station['name']}.", "openPage": "Pirate Station"}
-
-    cap = max(1, int(PIRATE_STATION_BALANCE.get("max_players_per_station", 3)))
-    active_count = pirate_station_active_player_count(conn, station_id)
-    if active_count >= cap:
-        raise HTTPException(409, f"Pirate station is at capacity ({active_count}/{cap}).")
 
     clear_player_open_space(conn, player["id"])
     clear_player_waypoint(conn, player["id"])
@@ -12498,8 +12829,8 @@ def begin_pirate_station_run(conn: sqlite3.Connection, player: Dict[str, Any], s
     run = row(conn, "SELECT * FROM pirate_station_runs WHERE id=?", (run_id,))
     update_pirate_station_resource(conn, run)
     active_count = pirate_station_active_player_count(conn, station_id)
-    add_event(conn, player["id"], "pirate_station", f"Entered open-world pirate station {station['name']} ({active_count}/{cap} pilots inside).")
-    return {"message": f"Entered {station['name']} ({active_count}/{cap} pilots inside). Pirates will converge on the closest target.", "openPage": "Pirate Station"}
+    add_event(conn, player["id"], "pirate_station", f"Entered pirate station map {station['name']} ({active_count} pilot(s) inside).")
+    return {"message": f"Entered {station['name']}. You are now on the station map; reach the outer 10% edge to escape.", "openPage": "Pirate Station"}
 
 
 def advance_pirate_station_run(conn: sqlite3.Connection, player_id: int) -> None:
@@ -12694,6 +13025,7 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
     e_shield = int(enemy.get("shield") or 0)
     log = []
     player_won = False
+    station_for_drop = None
     for round_no in range(1, int(PIRATE_STATION_BALANCE["battle_max_rounds"]) + 1):
         p_damage = int(player_power * rng.uniform(0.20, 0.38)) + (20 if god else 0)
         e_shield, e_hull, sh, hh = apply_track_damage(e_shield, e_hull, p_damage)
@@ -12713,10 +13045,11 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
         conn.execute("UPDATE pirate_station_enemies SET status='defeated', hull=0, shield=0, updated_at=? WHERE id=?", (iso(), enemy["id"]))
         tier = int(enemy.get("tier") or 1)
         credits = int(PIRATE_STATION_BALANCE["victory_credit_per_tier"]) * tier + int(enemy.get("power") or 0) * 4
-        xp = int(PIRATE_STATION_BALANCE["victory_xp_per_tier"]) * tier
+        station_for_drop = row(conn, "SELECT * FROM pirate_stations WHERE id=?", (run["station_id"],))
+        station_tier = pirate_station_tier((station_for_drop or {}).get("tier") or tier)
+        xp = int(PIRATE_STATION_BALANCE["victory_xp_per_tier"]) * station_tier
         conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (credits, player["id"]))
         add_xp(conn, player["id"], xp)
-        station_for_drop = row(conn, "SELECT * FROM pirate_stations WHERE id=?", (run["station_id"],))
         salvage_site = None
         if station_for_drop:
             defender_target = {
@@ -12740,8 +13073,9 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
                 "armor": tier * 10,
                 "combatRating": enemy.get("power") or 100,
             }
-            salvage_site = create_salvage_site(conn, int(station_for_drop["planet_id"]), None, defender_target, defender_ship, source_type="pirate_station_defender")
-        rewards = {"credits": credits, "xp": xp, "items": [], "salvageSite": salvage_site}
+            salvage_site = create_salvage_site(conn, int(station_for_drop.get("nearest_planet_id") or 0), None, defender_target, defender_ship, source_type="pirate_station_defender")
+        recipe_drops = roll_pirate_station_enemy_recipe_drop(conn, player["id"], station_tier, rng)
+        rewards = {"credits": credits, "xp": xp, "items": [], "recipes": recipe_drops, "salvageSite": salvage_site}
         if salvage_site:
             rewards["items"].append({"code": "salvage_site", "name": "Pirate Defender Wreck", "qty": 1, "siteId": salvage_site.get("id")})
         grant_action_progression(conn, player["id"], "combat", 1.0 + tier * 0.35, True)
@@ -12770,9 +13104,6 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
         "message": f"{'Defeated' if player_won else 'Damaged'} {enemy['name']}. {remaining} defenders remain.",
     }
     if remaining <= 0:
-        recipe_drops = roll_pirate_base_completion_recipe_drops(conn, player["id"], rng)
-        if recipe_drops:
-            rewards["recipes"] = recipe_drops
         station_tier = int((station_now or {}).get("tier") or (station_for_drop or {}).get("tier") or enemy.get("tier") or 1)
         ultra_reward = roll_pirate_base_ultra_reward(station_tier, rng)
         if ultra_reward:
@@ -12781,13 +13112,16 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
                 ultra_reward = granted_ultra
                 rewards.setdefault("items", []).append(ultra_reward)
                 rewards["ultraItem"] = ultra_reward
-        report["message"] = f"Station cleared. Final defender {enemy['name']} destroyed. Recovered {len(recipe_drops)} recipe copy/copies from station databanks."
+        report["message"] = f"Station cleared. Final defender {enemy['name']} destroyed. The pirate station vanished from the system map."
         if ultra_reward:
             report["message"] += f" Ultra vault find: {ultra_reward['name']}."
-        conn.execute("UPDATE pirate_station_runs SET status='completed', completed_at=?, updated_at=? WHERE station_id=? AND status='active'", (iso(), iso(), run["station_id"]))
-    conn.execute("UPDATE pirate_station_runs SET battle_report_json=?, updated_at=? WHERE id=?", (encode_json(report), iso(), run["id"]))
+        conn.execute("DELETE FROM pirate_station_enemies WHERE run_id IN (SELECT id FROM pirate_station_runs WHERE station_id=?)", (run["station_id"],))
+        conn.execute("DELETE FROM pirate_station_runs WHERE station_id=?", (run["station_id"],))
+        conn.execute("DELETE FROM pirate_stations WHERE id=?", (run["station_id"],))
+    if remaining > 0:
+        conn.execute("UPDATE pirate_station_runs SET battle_report_json=?, updated_at=? WHERE id=?", (encode_json(report), iso(), run["id"]))
     add_event(conn, player["id"], "pirate_station", report["message"], {"runId": run["id"], "enemyId": enemy["id"], "outcome": outcome})
-    return {"message": report["message"], "openPage": "Pirate Station"}
+    return {"message": report["message"], "openPage": "System Map" if remaining <= 0 else "Pirate Station"}
 
 
 
@@ -12799,7 +13133,7 @@ def close_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, Any]
     update_pirate_station_resource(conn, run)
     fresh = row(conn, "SELECT * FROM pirate_station_runs WHERE id=?", (run["id"],))
     if not fresh or fresh.get("status") == "completed":
-        return {"message": "Pirate station cleared. Station will respawn later.", "openPage": "System Map"}
+        return {"message": "Pirate station cleared. Station vanished from the system map.", "openPage": "System Map"}
     conn.execute("UPDATE pirate_station_runs SET battle_open=0, battle_target_enemy_id=NULL, battle_report_json='{}', updated_at=? WHERE id=?", (iso(), run["id"]))
     return {"message": "Battle panel closed. Open-world station movement continues.", "openPage": "Pirate Station"}
 
@@ -13875,6 +14209,7 @@ def cargo_operation_status(conn: sqlite3.Connection, player_id: int) -> Dict[str
         "progress": progress,
         "message": f"Cargo {label}: {op.get('qty')}x {op.get('item_name')}. You are protected but cannot travel, change ships, or fight until handling finishes.",
         "pendingInboundMass": pending_cargo_mass(conn, player_id),
+        "canCancel": op_type in {"buy_commodity", "sell_commodity", "sell_inventory_item"},
     }
 
 
@@ -13965,6 +14300,105 @@ def resolve_completed_cargo_operations(conn: sqlite3.Connection, player_id: int,
         if not row(conn, "SELECT 1 FROM pending_cargo_operations WHERE player_id=? AND status='active'", (player_id,)):
             conn.execute("UPDATE players SET cargo_operation_until=NULL, cargo_operation_started_at=NULL, cargo_operation_type=NULL, cargo_operation_summary=NULL WHERE id=?", (player_id,))
     return completed
+
+
+def _cargo_operation_market_reversal(conn: sqlite3.Connection, op: Dict[str, Any], payload: Dict[str, Any], reverse_buy: bool) -> None:
+    commodity_id = payload.get("commodity_id")
+    if not commodity_id:
+        return
+    qty = int(op.get("qty") or 0)
+    if qty <= 0:
+        return
+    supply_delta = int(qty * ECONOMY_CONFIG["player_market_force"])
+    demand_delta = max(1, qty // MARKET_LAW_BALANCE["buy_demand_gain_divisor" if reverse_buy else "sell_demand_relief_divisor"])
+    if reverse_buy:
+        mutate_market(conn, int(op.get("planet_id") or 0), int(commodity_id), supply_delta, -demand_delta, "player_buy_cancelled")
+    else:
+        mutate_market(conn, int(op.get("planet_id") or 0), int(commodity_id), -supply_delta, demand_delta, "player_sell_cancelled")
+
+
+def _restore_cancelled_inventory_sale(conn: sqlite3.Connection, player_id: int, op: Dict[str, Any], payload: Dict[str, Any]) -> None:
+    qty = int(op.get("qty") or 0)
+    if qty <= 0:
+        return
+    mass_each = float(payload.get("mass_each") if payload.get("mass_each") is not None else (float(op.get("mass") or 0) / max(1, qty)))
+    add_inventory_item(
+        conn,
+        player_id,
+        str(payload.get("code") or op.get("item_code") or "item"),
+        str(payload.get("name") or op.get("item_name") or op.get("item_code") or "Item"),
+        str(payload.get("item_type") or "goods"),
+        qty,
+        int(op.get("legal") if op.get("legal") is not None else payload.get("legal", 1)),
+        int(payload.get("base_value") or payload.get("unit_price") or 0),
+        mass_each,
+        str(payload.get("description") or "Cancelled cargo offload returned to inventory."),
+        str(payload.get("source") or "cargo_cancel"),
+        payload.get("category"),
+        payload.get("rarity"),
+        subcategory=str(payload.get("subcategory") or ""),
+        stack_size=int(payload.get("stack_size") or 9999),
+        cargo_exempt=int(payload.get("cargo_exempt") or 0),
+        usable=int(payload.get("usable") or 0),
+        sellable=int(payload.get("sellable") if payload.get("sellable") is not None else 1),
+        craftable_material=int(payload.get("craftable_material") or 0),
+        equippable=int(payload.get("equippable") or 0),
+        image_id=str(payload.get("image_id") or ""),
+        tier=payload.get("current_tier") or payload.get("tier"),
+        max_tier=payload.get("max_tier"),
+        tier_locked=int(payload.get("tier_locked") or 0),
+        tier_source=payload.get("tier_source") or "cargo_cancel",
+        item_stats=payload.get("item_stats") or (decode_json(payload.get("item_stats_json"), {}) if isinstance(payload.get("item_stats_json"), str) else {}),
+        god=True,
+    )
+
+
+def cancel_active_cargo_operation(conn: sqlite3.Connection, player_id: int) -> Dict[str, Any]:
+    op = row(conn, "SELECT * FROM pending_cargo_operations WHERE player_id=? AND status='active' ORDER BY complete_at LIMIT 1", (player_id,))
+    if not op:
+        return {"message": "No active cargo handling to cancel."}
+    payload = decode_json(op.get("payload_json"), {}) or {}
+    typ = str(op.get("operation_type") or "")
+    qty = int(op.get("qty") or 0)
+    item_name = op.get("item_name") or payload.get("name") or op.get("item_code") or "cargo"
+    message = f"Cancelled cargo handling for {qty}x {item_name}."
+    if typ == "buy_commodity":
+        refund = int(op.get("gross") or 0) + int(op.get("fee") or 0)
+        if refund > 0:
+            conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (refund, player_id))
+        _cargo_operation_market_reversal(conn, op, payload, reverse_buy=True)
+        message = f"Cancelled loading {qty}x {item_name}. No cargo was loaded and {refund:,} credits were returned."
+    elif typ == "sell_commodity":
+        commodity_id = int(payload.get("commodity_id") or 0)
+        if commodity_id:
+            avg_cost = int(payload.get("avg_cost") or payload.get("unit_price") or 0)
+            conn.execute(
+                """
+                INSERT INTO cargo_hold (player_id,commodity_id,qty,avg_cost)
+                VALUES (?,?,?,?)
+                ON CONFLICT(player_id, commodity_id) DO UPDATE SET
+                  qty=qty+excluded.qty,
+                  avg_cost=CASE WHEN avg_cost>0 THEN avg_cost ELSE excluded.avg_cost END
+                """,
+                (player_id, commodity_id, qty, avg_cost),
+            )
+            conn.execute("UPDATE players SET cargo=cargo+? WHERE id=?", (int(math.ceil(float(op.get("mass") or 0))), player_id))
+            _cargo_operation_market_reversal(conn, op, payload, reverse_buy=False)
+        message = f"Cancelled offloading {qty}x {item_name}. No sale completed; cargo returned to your hold."
+    elif typ == "sell_inventory_item":
+        _restore_cancelled_inventory_sale(conn, player_id, op, payload)
+        _cargo_operation_market_reversal(conn, op, payload, reverse_buy=False)
+        message = f"Cancelled offloading {qty}x {item_name}. No sale completed; items returned to your cargo."
+    else:
+        message = f"Cancelled cargo handling for {qty}x {item_name}."
+    conn.execute("UPDATE pending_cargo_operations SET status='cancelled', completed_at=? WHERE id=?", (iso(), op["id"]))
+    if not row(conn, "SELECT 1 FROM pending_cargo_operations WHERE player_id=? AND status='active'", (player_id,)):
+        conn.execute("UPDATE players SET cargo_operation_until=NULL, cargo_operation_started_at=NULL, cargo_operation_type=NULL, cargo_operation_summary=NULL WHERE id=?", (player_id,))
+    usage = build_cargo_usage(conn, player_id)
+    if usage.get("over_capacity"):
+        message += f" Cargo is overweight at {usage.get('total')}/{usage.get('max')}; reduce to 100% capacity before departing."
+    add_event(conn, player_id, "cargo", message, {"operationId": int(op["id"]), "operationType": typ, "cancelled": True, "cargoUsage": usage})
+    return {"message": message, "cancelled": True, "cargo_usage": usage, "forceStateRefresh": True}
 
 
 def simulate_npc_market_arbitrage(conn: sqlite3.Connection, force: bool = False) -> int:
@@ -14309,13 +14743,14 @@ def ecosystem_balance_summary(conn: sqlite3.Connection) -> Dict[str, Any]:
             "first_quarter_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("first_quarter_mean_days", 27.52)),
             "third_quarter_days": float((PROGRESSION_BALANCE.get("last_1000_run_result") or {}).get("third_quarter_mean_days", 176.99)),
             "component_mean_days": {
-                "skills": 490.34,
-                "credits": 339.6,
-                "career_ranks": 490.34,
-                "player_level": 214.3,
-                "completion_wall": 490.34,
+                "skills": 391.73,
+                "credits": 222.48,
+                "career_ranks": 205.33,
+                "player_level": 158.4,
+                "loop_achievements": 395.14,
+                "completion_wall": 395.18,
             },
-            "note": "1000-run no-lifer Monte Carlo target: first quarter around one month, third quarter around a few months, final completion wall around another year.",
+            "note": "1000-run no-lifer Monte Carlo target: first quarter around one month, next 50% around six months, final 25% around six months.",
         },
     }
 
@@ -14898,7 +15333,7 @@ def roll_mission_ultra_reward(mission_key: str, level: int, seed: str) -> Option
 
 
 def roll_pirate_base_ultra_reward(tier: int, rng: random.Random) -> Optional[Dict[str, Any]]:
-    chance = scaled_ultra_drop_chance(tier, 0.0025, 0.01, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 9) or 9))
+    chance = scaled_ultra_drop_chance(tier, 0.0025, 0.01, int(WORLD_SERVER_BALANCE.get("pirate_base_max_tier", 3) or 3))
     return roll_ultra_reward(list(ULTRA_ITEM_POOLS.get("pirate_base") or []), chance, rng)
 
 
@@ -15682,6 +16117,8 @@ def storage_listing_from_row(storage: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def store_item_at_current_planet(conn: sqlite3.Connection, player: Dict[str, Any], payload: Dict[str, Any], god: bool = False) -> Dict[str, Any]:
+    if player_is_in_open_space(conn, int(player["id"])):
+        raise HTTPException(400, "You must be docked at a planet or station to store cargo")
     scope = player_location_scope(conn, player)
     listing = listing_payload_from_inventory(conn, int(player["id"]), payload)
     qty = int(listing["qty"])
@@ -15718,6 +16155,8 @@ def store_item_at_current_planet(conn: sqlite3.Connection, player: Dict[str, Any
 
 
 def withdraw_item_from_current_planet(conn: sqlite3.Connection, player: Dict[str, Any], storage_id: int, qty: int, god: bool = False) -> Dict[str, Any]:
+    if player_is_in_open_space(conn, int(player["id"])):
+        raise HTTPException(400, "You must be docked at the cargo planet or station to withdraw storage")
     scope = player_location_scope(conn, player)
     storage = row(conn, "SELECT * FROM player_storage_items WHERE id=? AND player_id=?", (int(storage_id), int(player["id"])))
     if not storage or int(storage.get("qty") or 0) <= 0:
@@ -15738,18 +16177,19 @@ def withdraw_item_from_current_planet(conn: sqlite3.Connection, player: Dict[str
 
 def build_player_storage_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
     scope = player_location_scope(conn, player)
+    in_open_space = player_is_in_open_space(conn, int(player["id"]))
     stored = rows(
         conn,
         """
         SELECT psi.*, p.name as planet_name, g.name as galaxy_name, g.code as galaxy_code,
-               CASE WHEN psi.planet_id=? THEN 1 ELSE 0 END as can_modify
+               CASE WHEN psi.planet_id=? AND ?=0 THEN 1 ELSE 0 END as can_modify
         FROM player_storage_items psi
         JOIN planets p ON p.id=psi.planet_id
         JOIN galaxies g ON g.id=psi.galaxy_id
         WHERE psi.player_id=? AND psi.qty>0
         ORDER BY g.name, p.name, psi.category, psi.item_name
         """,
-        (int(scope["planet_id"]), int(player["id"])),
+        (int(scope["planet_id"]), 1 if in_open_space else 0, int(player["id"])),
     )
     for item in stored:
         item["current_tier"] = clamp_tier(item.get("tier", 1))
@@ -15776,6 +16216,7 @@ def build_player_storage_state(conn: sqlite3.Connection, player: Dict[str, Any])
             "goldGlobalOnly": True,
             "currentPlanetId": int(scope["planet_id"]),
             "currentGalaxyId": int(scope["galaxy_id"]),
+            "inOpenSpace": in_open_space,
         },
     }
 
@@ -16301,6 +16742,55 @@ def roll_pirate_base_completion_recipe_drops(conn: sqlite3.Connection, player_id
         allowed_ranks=list(RECIPE_DROP_BALANCE.get("pirate_base_completion_allowed_ranks") or ["improved", "advanced", "elite"]),
         rank_weights=RECIPE_DROP_BALANCE.get("pirate_base_completion_rank_weights") or {},
     )
+
+
+def roll_pirate_station_enemy_recipe_drop(conn: sqlite3.Connection, player_id: int, station_tier: int, rng: random.Random) -> List[Dict[str, Any]]:
+    tier = pirate_station_tier(station_tier)
+    chance_by_tier = PIRATE_STATION_BALANCE.get("recipe_drop_chance_by_tier") or {}
+    if rng.random() > float(chance_by_tier.get(str(tier), 0.05)):
+        return []
+    allowed_ranks = ["improved"] if tier == 1 else (["improved", "advanced"] if tier == 2 else ["improved", "advanced", "elite"])
+    placeholders = ",".join("?" for _ in allowed_ranks)
+    recipe_tier_hi = min(7, tier + 2)
+    candidates = rows(
+        conn,
+        f"""
+        SELECT code,name,recipe_rank_key,recipe_rank_name,set_name,category,recipe_tier,output_tier
+        FROM crafting_recipes
+        WHERE unlock_model='consumable'
+          AND recipe_rank_key IN ({placeholders})
+          AND COALESCE(NULLIF(output_tier,0), recipe_tier) BETWEEN ? AND ?
+        ORDER BY RANDOM()
+        LIMIT 40
+        """,
+        tuple(allowed_ranks + [tier, recipe_tier_hi]),
+    )
+    if not candidates:
+        return []
+    rank_weights = RECIPE_DROP_BALANCE.get("normal_kill_rank_weights") or {}
+    weighted = []
+    for candidate in candidates:
+        weight = float(rank_weights.get(candidate.get("recipe_rank_key"), 1.0))
+        if int(candidate.get("output_tier") or candidate.get("recipe_tier") or 1) == tier:
+            weight *= 1.35
+        if candidate.get("set_name"):
+            weight *= 1.15
+        weighted.append((candidate, max(0.1, weight)))
+    total = sum(w for _, w in weighted)
+    roll = rng.uniform(0, total)
+    acc = 0.0
+    picked = weighted[-1][0]
+    for candidate, weight in weighted:
+        acc += weight
+        if roll <= acc:
+            picked = candidate
+            break
+    grant = grant_recipe_copy(conn, player_id, picked["code"], 1)
+    if not grant:
+        return []
+    grant["source"] = "pirate station pirate"
+    add_event(conn, player_id, "recipe_drop", f"Recovered a recipe copy from a pirate station defender: {grant.get('name')}.", {"recipes": [grant], "stationTier": tier})
+    return [grant]
 
 
 def material_availability(conn: sqlite3.Connection, player_id: int) -> Dict[str, Dict[str, Any]]:
@@ -17417,19 +17907,28 @@ def seed(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO bounties (name,target_type,planet_id,threat,reward,status) VALUES (?,?,?,?,?,?)", (name,"npc",pid,threat,80000 + i*35000,"open"))
 
     # Users/players.
-    conn.execute("INSERT INTO users (username,password_hash,role,god_mode,created_at) VALUES (?,?,?,?,?)", ("godmode", pw_hash("godmode123"), "admin", 1, now))
-    conn.execute("INSERT INTO users (username,password_hash,role,god_mode,created_at) VALUES (?,?,?,?,?)", ("pilot", pw_hash("pilot123"), "player", 0, now))
+    seed_users = [
+        ("jon", "K3ri223!", "Jon", 1),
+        ("cleo", "i$G@y", "Cleo", 2),
+        ("jeff", "i$G@y", "Jeff", 3),
+    ]
+    for username, password, _callsign, faction_id in seed_users:
+        conn.execute(
+            "INSERT INTO users (username,password_hash,role,god_mode,created_at) VALUES (?,?,?,?,?)",
+            (username, pw_hash(password), "god", 1, now),
+        )
     conn.execute("INSERT INTO guilds (name,tag,respect,treasury,created_at) VALUES (?,?,?,?,?)", ("Void Reapers", "VOID", 128750, 37842990, now))
     guild_id = scalar(conn, "SELECT id FROM guilds WHERE name='Void Reapers'")
-    for username, callsign, god in [("godmode","STARLORD87",1), ("pilot","RookiePilot",0)]:
+    for username, _password, callsign, faction_id in seed_users:
+        god = 1
         uid = scalar(conn, "SELECT id FROM users WHERE username=?", (username,))
         loc = scalar(conn, "SELECT id FROM planets WHERE code='solaria'")
         if god:
-            vals = (uid,callsign,47,850000,12845,94732419,1250,1500,0,1000,18640,12450,500,500,78000,12000,"Honored",loc,guild_id,now)
+            vals = (uid,callsign,47,850000,12845,94732419,1250,1500,0,1000,18640,12450,500,500,78000,12000,"Honored",loc,guild_id,faction_id,now)
         else:
-            vals = (uid,callsign,1,0,3,5000,160,220,0,40,100,0,100,100,0,0,"Clean",loc,None,now)
-        conn.execute("""INSERT INTO players (user_id,callsign,level,xp,skill_points,credits,fuel,max_fuel,cargo,max_cargo,scrap,loyalty,health,max_health,reputation,faction_standing,security_status,location_planet_id,guild_id,created_at)
-                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
+            vals = (uid,callsign,1,0,3,5000,160,220,0,40,100,0,100,100,0,0,"Clean",loc,None,faction_id,now)
+        conn.execute("""INSERT INTO players (user_id,callsign,level,xp,skill_points,credits,fuel,max_fuel,cargo,max_cargo,scrap,loyalty,health,max_health,reputation,faction_standing,security_status,location_planet_id,guild_id,faction_id,created_at)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", vals)
         pid = scalar(conn, "SELECT id FROM players WHERE user_id=?", (uid,))
         starter_template = row(conn, "SELECT * FROM ship_templates WHERE starter=1")
         conn.execute("""INSERT INTO ships (player_id,template_id,name,hull,max_hull,shield,max_shield,armor,cargo_capacity,fuel_capacity,drive_speed,size_class,mass,insured,insurance_tier,destroyed,starter)
@@ -18124,9 +18623,20 @@ def ensure_action_allowed(conn: sqlite3.Connection, user: Dict[str,Any], player:
     if t_until and t_until > utcnow() and action.type not in {"complete_travel","admin_godmode","update_profile","send_chat_message"} and not user["god_mode"]:
         raise HTTPException(409, f"You are in transit until {t_until.isoformat()}")
     cargo_status = cargo_operation_status(conn, player["id"])
-    cargo_allowed = {"admin_godmode", "update_profile", "send_chat_message"}
+    cargo_allowed = {"admin_godmode", "update_profile", "send_chat_message", "cancel_cargo_operation"}
     if cargo_status.get("active") and action.type not in cargo_allowed and not user["god_mode"]:
         raise HTTPException(409, f"Cargo {cargo_status.get('operationLabel','handling')} in progress until {cargo_status.get('completeAt')}. You cannot leave, change ships, fight, or start more cargo work.")
+    departure_actions = {"go_here", "galaxy_travel"}
+    travel_to_current_dock = False
+    if action.type == "travel":
+        try:
+            travel_to_current_dock = int((action.payload or {}).get("planet_id") or 0) == int(player.get("location_planet_id") or 0) and player_is_in_open_space(conn, player["id"])
+        except Exception:
+            travel_to_current_dock = False
+    if (action.type in departure_actions or (action.type == "travel" and not travel_to_current_dock)) and not user["god_mode"]:
+        usage = build_cargo_usage(conn, player["id"])
+        if usage.get("over_capacity"):
+            raise HTTPException(409, f"Cargo overweight: {usage.get('total')}/{usage.get('max')} capacity. Reduce cargo to 100% or less before leaving the planet.")
     station_run = active_pirate_station_run(conn, player["id"])
     station_allowed = {"admin_godmode", "update_profile", "send_chat_message", "pirate_station_move", "pirate_station_retreat", "pirate_station_start_battle", "pirate_station_resolve_battle", "pirate_station_close_battle"}
     if station_run and action.type not in station_allowed and not user["god_mode"]:
@@ -19055,7 +19565,11 @@ def pve_progression_key(op_type: str) -> str:
     if op_type in {"trade", "cargo", "escort"}:
         return "hauling" if op_type in {"cargo", "escort"} else "legal_trade"
     if op_type in {"bounty", "patrol", "law", "group", "boss"}:
-        return "bounty" if op_type == "bounty" else "combat"
+        if op_type == "bounty":
+            return "bounty"
+        if op_type in {"patrol", "law"}:
+            return "security"
+        return "combat"
     if op_type in {"exploration"}:
         return "exploration"
     if op_type == "medical":
@@ -19385,21 +19899,28 @@ def public_faction_balance_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
         int(r["faction_id"] or 0): int(r["count"] or 0)
         for r in rows(conn, "SELECT faction_id, COUNT(*) as count FROM galaxies WHERE faction_id IS NOT NULL GROUP BY faction_id")
     }
+    total_controlled_galaxies = max(1, sum(home_counts.values()))
     playstyle = {
         "solar_accord": {
             "short": "Human diplomats, patrol fleets, safer routes, clean trade, and steady faction warfare.",
             "youAreChoosing": "Pick them if you want a human lawful-navy lane: brighter uniforms, organized wars, safer starts, and fewer early surprises.",
-            "watchOut": "You will make money safely, but shadow markets and pirate-style shortcuts are not their strength."
+            "watchOut": "You will make money safely, but shadow markets and pirate-style shortcuts are not their strength.",
+            "bonuses": ["+8% patrol and escort payouts", "+5% lawful market prices", "Starter systems begin with higher security"],
+            "debuffs": ["-6% illicit market margins", "Hostile pirate space escalates faster"],
         },
         "iron_meridian": {
-            "short": "Robotic chassis, shipyards, mining, armor, heavy logistics, and hard-border fights.",
+            "short": "Synthetic chassis, shipyards, mining, armor, heavy logistics, and hard-border fights.",
             "youAreChoosing": "Pick them if a robotic race with chrome bodies, disciplined industry, and ships that are hard to kill sounds right.",
-            "watchOut": "You are not picking the fastest or sneakiest faction. You win by preparation, mass, and uptime."
+            "watchOut": "You are not picking the fastest or sneakiest faction. You win by preparation, mass, and uptime.",
+            "bonuses": ["+8% mining and refinery yield", "+6% hull repair efficiency", "Guild industry projects complete faster"],
+            "debuffs": ["-5% evasion in light ships", "Diplomacy checks start colder in free ports"],
         },
         "umbral_veil": {
-            "short": "Bug-like aliens, stealth scouts, black-market pressure, and opportunistic strikes.",
-            "youAreChoosing": "Pick them if you want something stranger: chitinous alien pilots, risky routes, and more freedom to play clever.",
-            "watchOut": "This is not the calm starter lane. Risk and attention from security are part of the deal."
+            "short": "Voidborne aliens, stealth scouts, black-market pressure, and opportunistic strikes.",
+            "youAreChoosing": "Pick them if you want something stranger: luminous alien pilots, risky routes, and more freedom to play clever.",
+            "watchOut": "This is not the calm starter lane. Risk and attention from security are part of the deal.",
+            "bonuses": ["+9% smuggling and salvage payouts", "+6% scan range in unstable space", "Lower black-market heat from first offenses"],
+            "debuffs": ["-7% lawful faction standing gains", "Security patrols inspect them more often"],
         }
     }
     faction_rows = []
@@ -19407,26 +19928,59 @@ def public_faction_balance_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
         fid = int(f["id"])
         players = int(player_by_faction.get(fid, 0))
         online = int(online_by_faction.get(fid, 0))
+        galaxies = int(home_counts.get(fid, 0))
         pct = round((players / total_players) * 100, 1) if total_players else 0
+        galaxy_pct = round((galaxies / total_controlled_galaxies) * 100, 1) if total_controlled_galaxies else 0
+        code = str(f.get("code") or "")
+        guidance = playstyle.get(code, {})
         faction_rows.append({
             **dict(f),
             "players": players,
             "online_players": online,
             "player_percent": pct,
-            "galaxies": int(home_counts.get(fid, 0)),
+            "galaxies": galaxies,
+            "galaxy_control_percent": galaxy_pct,
             "balance_label": "Underdog" if total_players and pct < 28 else "Crowded" if total_players and pct > 39 else "Balanced",
-            "guidance": playstyle.get(str(f.get("code") or ""), {}),
-            "species": FACTION_AVATAR_SPECIES.get(str(f.get("code") or ""), "Pilot"),
-            "avatar_options": avatar_options_for_faction_code(str(f.get("code") or "")),
-            "avatarOptions": avatar_options_for_faction_code(str(f.get("code") or "")),
+            "bonuses": guidance.get("bonuses", []),
+            "debuffs": guidance.get("debuffs", []),
+            "guidance": guidance,
+            "species": FACTION_AVATAR_SPECIES.get(code, "Pilot"),
+            "avatar_options": avatar_options_for_faction_code(code),
+            "avatarOptions": avatar_options_for_faction_code(code),
         })
-    return {"factions": faction_rows, "total_players": total_players, "updated_at": now_s}
+    return {"factions": faction_rows, "total_players": total_players, "total_controlled_galaxies": sum(home_counts.values()), "updated_at": now_s}
+
+
+def return_player_to_last_gate_after_galaxy_disconnect(conn: sqlite3.Connection, user_id: int) -> None:
+    player = row(conn, "SELECT * FROM players WHERE user_id=?", (int(user_id),))
+    if not player:
+        return
+    mode = str(player.get("travel_mode") or "").lower()
+    if mode not in {"galaxy", "galaxy_route"} or not (player.get("travel_until") or player.get("travel_destination_id")):
+        return
+    last_gate_id = int(player.get("travel_origin_planet_id") or player.get("location_planet_id") or 0)
+    if not last_gate_id:
+        return
+    clear_player_open_space(conn, int(player["id"]))
+    clear_player_waypoint(conn, int(player["id"]))
+    clear_player_intercept(conn, int(player["id"]))
+    clear_player_route(conn, int(player["id"]))
+    conn.execute(
+        """UPDATE players
+           SET location_planet_id=?, travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+               travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL,
+               travel_destination_galaxy_id=NULL
+           WHERE id=?""",
+        (last_gate_id, int(player["id"])),
+    )
+    add_event(conn, int(player["id"]), "travel", "Disconnected during a gate jump. Ship returned to the last jump gate.", {"mode": mode, "last_gate_id": last_gate_id})
 
 
 def issue_auth_session(conn: sqlite3.Connection, user: Dict[str, Any]) -> Dict[str, Any]:
     token = new_session_token()
     now = iso()
-    conn.execute("INSERT INTO sessions (token,user_id,created_at,expires_at) VALUES (?,?,?,?)", (token, user["id"], now, iso(utcnow()+timedelta(days=7))))
+    return_player_to_last_gate_after_galaxy_disconnect(conn, int(user["id"]))
+    conn.execute("INSERT INTO sessions (token,user_id,created_at,last_seen_at,expires_at) VALUES (?,?,?,?,?)", (token, user["id"], now, now, iso(utcnow()+timedelta(days=7))))
     try:
         conn.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, user["id"]))
     except sqlite3.OperationalError:
@@ -19802,6 +20356,83 @@ def combat_now_block_reason(conn: sqlite3.Connection, player: Dict[str, Any]) ->
     # Do not globally block the Fight page after an NPC battle. Specific PvP/unlawful cooldowns are enforced on those actions.
     return None
 
+
+def combat_pilot_balance_context(conn: sqlite3.Connection, player_id: Any) -> Dict[str, Any]:
+    try:
+        pid = int(player_id or 0)
+    except Exception:
+        pid = 0
+    if not pid:
+        return {"player_id": 0, "level": 1, "skill_score": 0.0, "levelMult": 1.0, "skillMult": 1.0, "accuracyBonus": 0.0, "evasionBonus": 0.0}
+    player = row(conn, "SELECT level FROM players WHERE id=?", (pid,)) or {}
+    skills = player_skill_totals(conn, pid)
+    skill_score = (
+        float(skills.get("combat") or 0) +
+        float(skills.get("piloting") or 0) * 0.60 +
+        float(skills.get("bounty_hunting") or 0) * 0.35 +
+        float(skills.get("engineering") or 0) * 0.15
+    )
+    level = max(1, int(player.get("level") or 1))
+    level_mult = 1.0 + min(float(COMBAT_MATCHUP_BALANCE["level_mult_cap"]), max(0, level - 1) * float(COMBAT_MATCHUP_BALANCE["level_mult_per_level"]))
+    skill_mult = 1.0 + min(float(COMBAT_MATCHUP_BALANCE["skill_mult_cap"]), skill_score * float(COMBAT_MATCHUP_BALANCE["skill_mult_per_point"]))
+    return {
+        "player_id": pid,
+        "level": level,
+        "skill_score": round(skill_score, 2),
+        "levelMult": round(level_mult, 4),
+        "skillMult": round(skill_mult, 4),
+        "accuracyBonus": min(float(COMBAT_MATCHUP_BALANCE["max_accuracy_bonus"]), skill_score * float(COMBAT_MATCHUP_BALANCE["skill_accuracy_per_point"])),
+        "evasionBonus": min(float(COMBAT_MATCHUP_BALANCE["max_evasion_bonus"]), skill_score * float(COMBAT_MATCHUP_BALANCE["skill_evasion_per_point"])),
+    }
+
+
+def apply_pilot_combat_scaling(profile: Dict[str, Any], pilot_ctx: Dict[str, Any]) -> Dict[str, Any]:
+    if not profile or not pilot_ctx or not int(pilot_ctx.get("player_id") or 0):
+        return profile
+    level_mult = float(pilot_ctx.get("levelMult") or 1.0)
+    skill_mult = float(pilot_ctx.get("skillMult") or 1.0)
+    defense_mult = level_mult * (1.0 + (skill_mult - 1.0) * 0.78)
+    offense_mult = skill_mult * (1.0 + (level_mult - 1.0) * 0.55)
+    profile["hull"] = max(1, int(int(profile.get("hull") or 1) * defense_mult))
+    profile["shield"] = max(0, int(int(profile.get("shield") or 0) * defense_mult))
+    profile["armor"] = max(0, int(int(profile.get("armor") or 0) + max(0, int(pilot_ctx.get("level") or 1) - 1) * 0.20 + float(pilot_ctx.get("skill_score") or 0) * 0.018))
+    profile["combatRating"] = max(1, int(int(profile.get("combatRating") or 1) * ((offense_mult + defense_mult) / 2.0)))
+    profile["accuracy"] = min(0.94, float(profile.get("accuracy") or 0.55) + float(pilot_ctx.get("accuracyBonus") or 0.0))
+    profile["evasion"] = min(0.60, float(profile.get("evasion") or 0.05) + float(pilot_ctx.get("evasionBonus") or 0.0))
+    scaled_weapons = []
+    for weapon in profile.get("weapons") or []:
+        w = dict(weapon)
+        w["damage"] = max(1, int(int(w.get("damage") or 1) * offense_mult))
+        scaled_weapons.append(w)
+    profile["weapons"] = scaled_weapons
+    stats = dict(profile.get("stats") or {})
+    stats.update({"pilotLevel": int(pilot_ctx.get("level") or 1), "pilotSkillScore": float(pilot_ctx.get("skill_score") or 0.0), "levelMult": round(level_mult, 3), "skillMult": round(skill_mult, 3)})
+    profile["stats"] = stats
+    return profile
+
+
+def combat_profile_balance_score(profile: Dict[str, Any]) -> float:
+    if not profile:
+        return 1.0
+    rating = max(1.0, float(profile.get("combatRating") or 1))
+    durability = max(1.0, float(profile.get("hull") or 0) + float(profile.get("shield") or 0) * 0.72 + float(profile.get("armor") or 0) * 65.0)
+    weapons = profile.get("weapons") or []
+    weapon_score = 0.0
+    for weapon in weapons:
+        cost = max(1, combat_weapon_energy_requirement(weapon))
+        weapon_score += float(weapon.get("damage") or 0) * float(weapon.get("accuracy") or 0.55) / (0.65 + cost * 0.35)
+    return max(1.0, rating * 0.48 + durability * 0.10 + weapon_score * 5.2)
+
+
+def estimated_combat_win_chance(your: Dict[str, Any], enemy: Dict[str, Any]) -> int:
+    your_score = combat_profile_balance_score(your)
+    enemy_score = combat_profile_balance_score(enemy)
+    ratio = your_score / max(1.0, enemy_score)
+    curve = float(COMBAT_MATCHUP_BALANCE.get("win_curve", 1.7))
+    span = float(COMBAT_MATCHUP_BALANCE.get("win_curve_span", 38))
+    return max(12, min(88, int(round(50 + math.tanh(math.log(max(0.01, ratio)) * curve) * span))))
+
+
 def combat_ship_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]], fallback_name: str = "Unknown Ship") -> Dict[str, Any]:
     if not ship:
         return {"name": fallback_name, "image_url": ship_visual_payload(fallback_name, "ship"), "hull": 600, "shield": 250, "armor": 12, "energy": 100, "combatRating": 100, "accuracy": 0.58, "evasion": 0.12, "weapons": normalize_combat_weapons([{"name":"Improvised Battery","type":"laser","damage":85,"accuracy":0.55,"requiredEnergy":2}], 100, False), "utilities": [dict(UTILITY_ARCHETYPES[0]), dict(UTILITY_ARCHETYPES[5])], "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)), "stats": {}}
@@ -19816,12 +20447,12 @@ def combat_ship_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]
         if any(x in {"weapon", "mining"} for x in compat) or stats.get("damage"):
             dmg = int(stats.get("damage") or stats.get("mining", 0) * 2.2 or 60)
             wtype = "missile" if "missile" in str(m.get("name", "")).lower() else "laser" if "laser" in str(m.get("name", "")).lower() else "projectile"
-            projectile_count = clamp_int(int(stats.get("projectile_count") or stats.get("projectileCount") or stats.get("volley") or 1), 1, 6)
+            projectile_count = clamp_int(int(stats.get("projectile_count") or stats.get("projectileCount") or stats.get("projectiles") or stats.get("volley") or 1), 1, 6)
             weapons.append({"name": m.get("name") or "Weapon", "type": wtype, "damage": max(35, dmg), "accuracy": min(0.88, 0.55 + int(m.get("current_tier") or 1) * 0.035), "energy": int(m.get("power_usage") or stats.get("energy_use") or 8), "projectileCount": projectile_count, "projectile_count": projectile_count})
     combat_role = str(ship.get("role") or ship.get("class_name") or "").lower() in {"combat", "siege", "fleet", "gunship", "interceptor", "patrol", "security", "bounty", "mercenary"}
     weapons = normalize_combat_weapons(weapons, int(derived.get("combat_rating") or get_ship_power(conn, int(ship["id"])) or 100), combat_role)
     utilities = combat_utilities_from_modules(installed, derived)
-    return {
+    profile = {
         "id": ship.get("id"), "name": ship.get("name") or ship.get("template_name") or fallback_name,
         "class": ship.get("class_name") or ship.get("role") or "ship", "role": ship.get("role") or "general",
         "tier": int(ship.get("current_tier") or ship.get("ship_tier") or 1),
@@ -19835,6 +20466,7 @@ def combat_ship_profile(conn: sqlite3.Connection, ship: Optional[Dict[str, Any]]
         "evasion": min(0.55, max(0.05, int(derived.get("evasion") or 0) / 650.0)),
         "weapons": weapons, "utilities": utilities, "attackEnergyMax": int(COMBAT_BALANCE.get("attack_energy_max", 12)), "stats": derived,
     }
+    return apply_pilot_combat_scaling(profile, combat_pilot_balance_context(conn, ship.get("player_id")))
 
 PIRATE_SECURITY_BANDS = [
     {"key": "null_sec", "name": "0-sec endgame", "security_min": 0, "security_max": 14, "level_min": 45, "level_max": 80, "tier_min": 5, "tier_max": 7, "power_floor": 3600, "power_per_level": 86, "power_cap": 14000},
@@ -20530,8 +21162,7 @@ def combat_preview(conn: sqlite3.Connection, player: Dict[str, Any], target_ref:
     active_ship = row(conn, "SELECT s.*, t.name as template_name, t.class_name, t.role, t.slots_json, t.ship_tier FROM ships s JOIN ship_templates t ON t.id=s.template_id WHERE s.id=?", (player.get("active_ship_id"),)) if player.get("active_ship_id") else None
     your = combat_ship_profile(conn, active_ship, "Your Ship"); enemy = target["ship"]; legal = combat_target_legality(conn, player, target, mode)
     skills = player_skill_totals(conn, player["id"]); combat_skill = int(skills.get("combat", 0)); bounty_skill = int(skills.get("bounty_hunting", 0))
-    ratio = your["combatRating"] / max(1, enemy["combatRating"])
-    win_est = max(12, min(88, int(50 + (ratio - 1) * 24 + combat_skill * 0.18 + bounty_skill * 0.08)))
+    win_est = estimated_combat_win_chance(your, enemy)
     reward_profile = combat_reward_profile(target, enemy, legal)
     defense_preview = planetary_defense_preview(conn, player, legal)
     mods = [f"Combat skill {combat_skill}", f"Ship combat {your['combatRating']}", f"Enemy combat {enemy['combatRating']}", f"Enemy tier T{reward_profile['tier']}", f"Difficulty {reward_profile['difficulty']}", legal["label"]]
@@ -20920,7 +21551,9 @@ def apply_combatant_attack(conn: sqlite3.Connection, player: Dict[str, Any], ses
     if hit:
         crit = rng.random() <= (0.05 + (combat_bonus if actor_ref == combat_primary_ref(session, "player") else 0))
         base = int(action.get("damage") or 50)
-        career_bonus = 1.08 if actor_ref == combat_primary_ref(session, "player") and legal.get("state") == "legal" and active_career_code(conn, player["id"]) in {"bounty_hunter", "security_pilot", "mercenary"} else 1.0
+        actor_player_id = int(actor_ref.split(":", 1)[1]) if actor_ref.startswith("player:") and actor_ref.split(":", 1)[1].isdigit() else 0
+        actor_career = active_career_code(conn, actor_player_id) if actor_player_id else ""
+        career_bonus = 1.08 if legal.get("state") == "legal" and actor_career in {"bounty_hunter", "security_pilot", "mercenary"} else 1.0
         attack_mult = 1.0 + float(attacker_mods.get("attackPct") or 0) - float(attacker_mods.get("attackDownPct") or 0)
         defense_mult = 1.0 + float(defender_mods.get("defenseDownPct") or 0) - float(defender_mods.get("defensePct") or 0)
         raw = int(base * (1.45 if crit else 1.0) * career_bonus * max(0.25, attack_mult) * max(0.25, defense_mult))
@@ -22070,7 +22703,7 @@ def route_surviving_npc_after_player_battle(conn: sqlite3.Connection, player: Di
     return {"state": "resume_objective", "hullPct": round(hull_pct, 3), "shieldPct": round(shield_pct, 3)}
 
 
-def reroll_npc_targets_after_player_escape(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any]) -> None:
+def combat_npc_ids_from_session(session: Dict[str, Any]) -> set[int]:
     npc_ids: set[int] = set()
 
     def remember_ref(ref: Any) -> None:
@@ -22098,6 +22731,31 @@ def reroll_npc_targets_after_player_escape(conn: sqlite3.Connection, player: Dic
         remember_ref(ref)
     for participant in (session.get("player_support") or []) + (session.get("enemy_support") or []):
         remember_ref((participant or {}).get("ref"))
+    return npc_ids
+
+
+def combat_recent_or_active_npc_ids(conn: sqlite3.Connection, recent_seconds: int = 120) -> set[int]:
+    npc_ids: set[int] = set()
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        active_sessions = rows(conn, "SELECT key,value FROM app_state WHERE key LIKE 'combat_session:%' ORDER BY key DESC LIMIT 80")
+    except Exception:
+        return npc_ids
+    now = utcnow()
+    for stored in active_sessions:
+        session = decode_json(stored.get("value"), {}) or {}
+        status = str(session.get("status") or "active")
+        include = status == "active"
+        if not include:
+            completed_at = parse_dt(session.get("completed_at"))
+            include = bool(completed_at and (now - completed_at).total_seconds() <= recent_seconds)
+        if include:
+            npc_ids.update(combat_npc_ids_from_session(session))
+    return npc_ids
+
+
+def reroll_npc_targets_after_player_escape(conn: sqlite3.Connection, player: Dict[str, Any], session: Dict[str, Any]) -> None:
+    npc_ids = combat_npc_ids_from_session(session)
 
     if npc_ids:
         marks = ",".join("?" for _ in npc_ids)
@@ -22525,7 +23183,9 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
     if not free_start:
         spend(conn, player["id"], energy=energy_cost, god=god)
     skills = player_skill_totals(conn, player["id"])
-    combat_bonus = min(0.22, int(skills.get("combat", 0)) * 0.0035 + int(skills.get("piloting", 0)) * 0.0018)
+    # Pilot stats are already folded into both combat profiles, including PvP defenders.
+    # Keep this neutral so equal ships, levels, and skills resolve as a true 50/50 matchup.
+    combat_bonus = 0.0
     your["weapons"] = normalize_combat_weapons(your.get("weapons") or [], int(your.get("combatRating") or 100), str(your.get("role") or "").lower() in {"combat", "siege", "fleet", "gunship", "interceptor"})
     your["utilities"] = your.get("utilities") or [dict(UTILITY_ARCHETYPES[0]), dict(UTILITY_ARCHETYPES[5])]
     for idx, util in enumerate(your["utilities"]):
@@ -22665,7 +23325,7 @@ def attempt_realtime_combat_escape(conn: sqlite3.Connection, player: Dict[str, A
             if actor_ref == player_ref:
                 reroll_npc_targets_after_player_escape(conn, player, session)
             log = session.get("log") or []
-            log.append({"round": int(session.get("round_no") or 1), "actor": "system", "actorRef": actor_ref, "action": "Combatant Escaped", "weaponType": "escape", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{actor_name} escaped the battle. Their contact dropped from the board."})
+            log.append({"round": int(session.get("round_no") or 1), "actor": "system", "actorRef": actor_ref, "action": "Combatant Escaped", "weaponType": "escape", "hit": True, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{actor_name} escaped the battle and remains visible in local space."})
             session["log"] = log
             session["summary"] = f"{actor_name} escaped the battle."
             final_payload = maybe_finalize_combat_after_action(conn, player, session)
@@ -22680,15 +23340,14 @@ def attempt_realtime_combat_escape(conn: sqlite3.Connection, player: Dict[str, A
     if actor_ref == combat_primary_ref(session, "player"):
         session["next_escape_at"] = next_escape_at
     combat_actor_set_action_until(session, actor_ref, now + timedelta(milliseconds=int(COMBAT_BALANCE.get("round_ms", 3000))))
-    target_ref = combat_default_target_for_actor(session, actor_ref)
-    target_name = (combat_actor_profile(session, target_ref) or {}).get("name") or (session.get("target") or {}).get("name") or "target"
-    session["summary"] = f"Escape failed against {target_name}. Thrusters cycling for {combat_escape_cooldown_seconds()}s."
+    failed_escape_message = "Failed to escape, try again in 6 seconds"
+    session["summary"] = failed_escape_message
     log = session.get("log") or []
-    log.append({"round": int(session.get("round_no") or 1), "actor": combat_participant_side(session, actor_ref) or "player", "actorRef": actor_ref, "action": "Attempt Escape", "weaponType": "escape", "hit": False, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": f"{actor_name} failed to escape. Roll {round(roll*100)} vs {round(chance*100)}%. Next attempt in {combat_escape_cooldown_seconds()}s."})
+    log.append({"round": int(session.get("round_no") or 1), "actor": combat_participant_side(session, actor_ref) or "player", "actorRef": actor_ref, "action": "Attempt Escape", "weaponType": "escape", "hit": False, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "text": failed_escape_message})
     session["log"] = log
     persist_combat_session(conn, session)
     add_event(conn, player["id"], "combat", f"Escape attempt failed at {round(chance*100)}% odds.", {"escaped": False, "chance": chance, "roll": roll, "battleId": battle_id})
-    return {"message": "Escape failed.", "escaped": False, "chance": round(chance, 3), "roll": round(roll, 3), "cooldownSeconds": combat_escape_cooldown_seconds(), "nextEscapeAt": next_escape_at, "battle": build_combat_session_payload(session, player["id"])}
+    return {"message": failed_escape_message, "escaped": False, "chance": round(chance, 3), "roll": round(roll, 3), "cooldownSeconds": combat_escape_cooldown_seconds(), "nextEscapeAt": next_escape_at, "battle": build_combat_session_payload(session, player["id"])}
 
 
 def build_combat_battle_payload(b: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -23647,21 +24306,52 @@ def build_server_event_state(conn: sqlite3.Connection, player: Dict[str, Any]) -
     toasts = []
     for ev in items:
         meta = decode_json(ev.get("metadata_json"), {}) or {}
+        site = row(conn, """
+            SELECT object_key,map_type,galaxy_id,planet_id,name,x_pct,y_pct,code,metadata_json
+            FROM map_objects
+            WHERE kind='server_event'
+              AND object_key LIKE ?
+              AND state NOT IN ('depleted','expired','deleted')
+              AND (expires_at IS NULL OR expires_at>?)
+            ORDER BY CASE WHEN map_type='galaxy' THEN 0 ELSE 1 END, id
+            LIMIT 1
+        """, (f"server_event:{int(ev['id'])}:%", iso(now)))
+        site_meta = decode_json(site.get("metadata_json"), {}) if site else {}
         payload = {
             "id": int(ev["id"]),
             "eventType": ev.get("event_type"),
+            "event_type": ev.get("event_type"),
             "name": ev.get("name"),
             "cadence": ev.get("cadence"),
             "status": ev.get("status"),
             "startsAt": ev.get("starts_at"),
+            "starts_at": ev.get("starts_at"),
             "warningAt": ev.get("warning_at"),
+            "warning_at": ev.get("warning_at"),
             "endsAt": ev.get("ends_at"),
+            "ends_at": ev.get("ends_at"),
             "summary": meta.get("summary") or server_event_definition(ev.get("event_type")).get("summary") or "",
             "targetGalaxyId": ev.get("target_galaxy_id"),
+            "target_galaxy_id": ev.get("target_galaxy_id"),
             "targetPlanetId": ev.get("target_planet_id"),
+            "target_planet_id": ev.get("target_planet_id"),
             "winningFactionId": ev.get("winning_faction_id"),
             "metadata": meta,
         }
+        if site:
+            payload["mapSite"] = {
+                "objectKey": site.get("object_key"),
+                "map_type": site.get("map_type"),
+                "mapType": site.get("map_type"),
+                "galaxy_id": site.get("galaxy_id"),
+                "planet_id": site.get("planet_id"),
+                "name": site.get("name"),
+                "x_pct": float(site.get("x_pct") or 50),
+                "y_pct": float(site.get("y_pct") or 50),
+                "eventId": int(ev["id"]),
+                "eventType": site_meta.get("eventType") or ev.get("event_type"),
+                "image_url": site_meta.get("image_url"),
+            }
         if ev.get("status") == "active":
             active.append(payload)
         if ev.get("status") in {"scheduled", "warning", "active"}:
@@ -24033,6 +24723,8 @@ def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str
 @app.post("/api/action")
 def action(req: ActionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
     user, player = ctx
+    session_token = player.get("_session_token") if player else None
+    user_session_token = user.get("_session_token") if user else None
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -24049,18 +24741,20 @@ def action(req: ActionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depend
             advance_pirate_station_run(conn, player["id"])
             process_server_events(conn)
             player = get_player(conn, player["id"])
+        if player and session_token:
+            player["_session_token"] = session_token
         ensure_action_allowed(conn, user, player, req)
         result = handle_action(conn, user, player, req)
         conn.commit()
         if lightweight_combat_action:
             return {"ok": True, "result": result, "refresh": False}
-        if PERF_RETURN_STATE_ON_ACTION or req.type in {"get_state", "admin_spawn_map_objects"}:
+        if PERF_RETURN_STATE_ON_ACTION or req.type in {"get_state", "admin_spawn_map_objects", "scan_area"}:
             fresh = get_player(conn, player["id"])
-            if fresh and player.get("_session_token"):
-                fresh["_session_token"] = player.get("_session_token")
+            if fresh and session_token:
+                fresh["_session_token"] = session_token
             fresh_user = row(conn, "SELECT * FROM users WHERE id=?", (user["id"],)) or user
-            if fresh_user and user.get("_session_token"):
-                fresh_user["_session_token"] = user.get("_session_token")
+            if fresh_user and user_session_token:
+                fresh_user["_session_token"] = user_session_token
             next_state = build_state(conn, fresh_user, fresh)
             conn.commit()
             return {"ok": True, "result": result, "state": next_state}
@@ -24102,13 +24796,16 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         "salvage_inventory_item", "use_inventory_item", "pve_operation",
         "run_smuggling_route", "planet_control_action", "career_task",
         "start_planet_mission", "cancel_planet_mission",
-        "accept_bounty", "start_combat", "preview_combat", "mine", "salvage",
+        "accept_bounty", "mine", "salvage",
         "collect_property_income", "upgrade_property", "insure_ship",
     }
     if t in docked_only_actions:
         t_until = parse_dt(player.get("travel_until"))
         if (t_until and t_until > utcnow()) or player_is_in_open_space(conn, pid):
             raise HTTPException(409, "You are in open space. Dock at a planet or station before using market, crafting, repairs, hangar, planet services, or local combat.")
+
+    if t == "cancel_cargo_operation":
+        return cancel_active_cargo_operation(conn, pid)
 
     if t == "participate_server_event":
         return participate_server_event_action(conn, player, payload)
@@ -24254,6 +24951,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
 
 
     if t == "enter_pirate_station":
+        player = interrupt_active_local_travel(conn, player, "pirate station approach")
         station_id = int(payload.get("station_id") or payload.get("stationId") or 0)
         station = row(conn, "SELECT * FROM pirate_stations WHERE id=?", (station_id,))
         if not station:
@@ -24323,22 +25021,11 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             raise HTTPException(400, "Galaxy map travel is gate-only. Select a destination galaxy instead.")
         x_pct = max(1.0, min(99.0, float(payload.get("x_pct") or 50)))
         y_pct = max(1.0, min(99.0, float(payload.get("y_pct") or 50)))
-        t_until = parse_dt(player.get("travel_until"))
-        if t_until and t_until > utcnow():
-            raise HTTPException(409, "Already traveling. Finish the current route before plotting a new waypoint.")
+        player = interrupt_active_local_travel(conn, player, "new waypoint")
         current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
         if not current:
             raise HTTPException(400, "Current location is unknown")
-        active_map = build_galaxy_map(conn, player) if map_type == "galaxy" else build_system_map(conn, player)
-        nodes = active_map.get("nodes", [])
-        if not nodes:
-            raise HTTPException(404, "No navigable map nodes are available")
-        origin_key = active_map.get("current_galaxy_id") if map_type == "galaxy" else active_map.get("current_planet_id")
-        travel_state = build_travel_state(conn, player)
-        if travel_state.get("open_space") and (not travel_state.get("open_space_map_type") or travel_state.get("open_space_map_type") == map_type):
-            origin_node = {"id": origin_key, "x_pct": float(travel_state.get("open_space_x_pct") or 50), "y_pct": float(travel_state.get("open_space_y_pct") or 50), "name": "Current open-space position"}
-        else:
-            origin_node = next((n for n in nodes if str(n.get("id")) == str(origin_key)), nodes[0])
+        origin_node = current_player_map_position(conn, player, map_type)
         distance = ((float(origin_node.get("x_pct") or 50) - x_pct) ** 2 + (float(origin_node.get("y_pct") or 50) - y_pct) ** 2) ** 0.5
         ship = row(conn, "SELECT * FROM ships WHERE id=?", (player["active_ship_id"],)) if player.get("active_ship_id") else None
         seconds = fuel_adjusted_route_seconds(conn, player, ship or {}, distance, god)
@@ -24427,7 +25114,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         map_type = str(payload.get("map_type") or "system").lower()
         map_type = "galaxy" if map_type == "galaxy" else "system"
         profile = scan_area_profile_for_player(conn, player, map_type)
-        if profile.get("cooldown_active") and not god:
+        if profile.get("cooldown_active"):
             raise HTTPException(409, f"Area scan cooling down for {int(profile.get('remaining_seconds') or 0)} seconds.")
         x_pct = clamp_pct(float(payload.get("x_pct") if payload.get("x_pct") is not None else 50), 1, 99)
         y_pct = clamp_pct(float(payload.get("y_pct") if payload.get("y_pct") is not None else 50), 1, 99)
@@ -24444,15 +25131,16 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             candidates,
             nodes,
         )
-        if not god:
-            cooldown_until = utcnow() + timedelta(seconds=int(profile["cooldown_seconds"]))
-            conn.execute("UPDATE players SET scan_area_cooldown_until=? WHERE id=?", (iso(cooldown_until), pid))
+        cooldown_until = utcnow() + timedelta(seconds=int(profile["cooldown_seconds"]))
+        conn.execute("UPDATE players SET scan_area_cooldown_until=? WHERE id=?", (iso(cooldown_until), pid))
+        profile = scan_area_profile_for_player(conn, get_player(conn, pid) or player, map_type)
         scan_quality = clamp_int(45 + int(player_skill_totals(conn, pid).get("scanning", 0) or 0) * 2 + random.randint(-8, 18), 5, 99)
         add_event(conn, pid, "exploration", f"Area scan pinged {revealed} class contacts. Signal quality {scan_quality}%.", {"map_type": map_type, "scan_quality": scan_quality, "revealed": revealed, "radius_pct": profile["radius_pct"], "duration_seconds": profile["duration_seconds"], "cooldown_seconds": profile["cooldown_seconds"]})
         grant_action_progression(conn, pid, "exploration", max(1.0, (scan_quality / 35) + revealed * 0.15), True)
         return {"message": f"Area scan pinged {revealed} class contacts for {int(profile['duration_seconds'])} seconds. Radius {profile['radius_pct']}%, cooldown {int(profile['cooldown_seconds'])}s.", "scan_quality": scan_quality, "revealed": revealed, "scan_area": profile, "forceStateRefresh": True}
 
     if t == "scan_exploration_site":
+        player = interrupt_active_local_travel(conn, player, "exploration scan")
         site_id = str(payload.get("site_id") or payload.get("siteId") or "")
         obj = row(conn, "SELECT * FROM map_objects WHERE object_key=? AND kind='exploration' AND state NOT IN ('deleted','expired','depleted') AND qty_remaining>0", (site_id,))
         if not obj:
@@ -24475,6 +25163,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message": f"Scan complete: {meta.get('realName') or site.get('name')} shows {site.get('rewardHint')} potential, {site.get('riskBand')} risk, quality {meta['signalQuality']}%.", "mapOperation": map_op}
 
     if t == "investigate_exploration_site":
+        player = interrupt_active_local_travel(conn, player, "exploration investigation")
         site_id = str(payload.get("site_id") or payload.get("siteId") or "")
         obj = row(conn, "SELECT * FROM map_objects WHERE object_key=? AND kind='exploration' AND state NOT IN ('deleted','expired','depleted') AND qty_remaining>0", (site_id,))
         if not obj:
@@ -24539,9 +25228,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
         if not current:
             raise HTTPException(400, "Current location is unknown")
-        t_until = parse_dt(player.get("travel_until"))
-        if t_until and t_until > utcnow():
-            raise HTTPException(409, "Already traveling. Finish the current route before plotting an intercept.")
+        player = interrupt_active_local_travel(conn, player, "intercept course")
 
         system_map = build_system_map(conn, player)
         galaxy_map = build_galaxy_map(conn, player)
@@ -24607,6 +25294,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message": f"Intercept course plotted against {target.get('name') or target_ref}. Predicted contact in about {seconds} seconds.", "target_ref": target_ref, "etaSeconds": seconds, "mode": "intercept", "intercept": intercept}
 
     if t == "mine_ore_site":
+        player = interrupt_active_local_travel(conn, player, "mining operation")
         site_id = str(payload.get("site_id") or payload.get("siteId") or "")
         obj = row(conn, "SELECT * FROM map_objects WHERE object_key=? AND kind='ore' AND state NOT IN ('deleted','expired','depleted') AND qty_remaining>0", (site_id,))
         if not obj:
@@ -24667,6 +25355,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return result
 
     if t == "start_combat":
+        player = interrupt_active_local_travel(conn, player, "combat engagement")
         target_ref = str(payload.get("target_ref") or payload.get("targetId") or "")
         mode = str(payload.get("mode") or "attack")
         result = simulate_combat_battle(conn, player, target_ref, mode, god)
@@ -24827,6 +25516,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         current = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
         if int(target.get("galaxy_id") or 0) != int(current.get("galaxy_id") or 0):
             raise HTTPException(400, "Use the Galaxies map for galaxy-to-galaxy travel")
+        player = interrupt_active_local_travel(conn, player, "new destination")
         dock_requested = bool(payload.get("dock") or payload.get("dock_on_arrival") or payload.get("dockOnArrival"))
         open_space_before_travel = get_player_open_space(conn, pid)
         in_open_space_before_travel = bool(open_space_before_travel.get("active"))
@@ -24853,15 +25543,13 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         minutes = max(1, int(math.ceil(seconds / 60)))
         spend(conn, pid, fuel=fuel_cost, god=god)
         route_meta = {}
-        active_map = build_system_map(conn, player)
-        target_node = next((n for n in active_map.get("nodes", []) if str(n.get("id")) == str(dest)), None)
         if in_open_space_before_travel or dock_requested:
             route_meta = {
                 "map_type": "system",
                 "origin_x_pct": float(origin_point_for_speed.get("x_pct") or 50),
                 "origin_y_pct": float(origin_point_for_speed.get("y_pct") or 50),
-                "destination_x_pct": float((target_node or target_point_for_speed).get("x_pct") or 50),
-                "destination_y_pct": float((target_node or target_point_for_speed).get("y_pct") or 50),
+                "destination_x_pct": float(target_point_for_speed.get("x_pct") or 50),
+                "destination_y_pct": float(target_point_for_speed.get("y_pct") or 50),
                 "label": f"Docking approach to {target['name']}" if dock_requested else f"Local travel to {target['name']}",
                 "route_target_type": "dock" if dock_requested else "local",
                 "route_target_id": int(target["id"]),
@@ -25005,7 +25693,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if active and active["job_code"] == "smuggler" and not int(holding["legal"]):
             increment_job_metrics(conn, pid, "smuggler", {"smuggles": 1, "contraband_profit": revenue})
         grant_action_progression(conn, pid, "legal_trade" if int(holding["legal"]) else "illicit_trade", max(1.0, qty / 4), True)
-        op = begin_cargo_operation(conn, pid, player["location_planet_id"], "sell_commodity", holding.get("code") or str(commodity_id), holding["name"], qty, mass, gross_revenue, sale_fee, revenue, int(holding["legal"]), {"commodity_id": commodity_id, "code": holding.get("code"), "unit_price": effective_sell_price, "tier": int(holding.get("tier") or 1)}, god)
+        op = begin_cargo_operation(conn, pid, player["location_planet_id"], "sell_commodity", holding.get("code") or str(commodity_id), holding["name"], qty, mass, gross_revenue, sale_fee, revenue, int(holding["legal"]), {"commodity_id": commodity_id, "code": holding.get("code"), "unit_price": effective_sell_price, "avg_cost": int(holding.get("avg_cost") or effective_sell_price), "mass_each": float(holding.get("mass") or 1), "tier": int(holding.get("tier") or 1)}, god)
         return {**op, "revenue": revenue, "gross": gross_revenue, "fee": sale_fee, "profit": profit, "risk": illicit.get("risk")}
 
     if t in {"sell_inventory_item", "sell_inventory"}:
@@ -25042,7 +25730,35 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             mutate_market(conn, player["location_planet_id"], commodity["id"], int(qty * ECONOMY_CONFIG["player_market_force"]), -demand_relief, "player_inventory_sell_illicit_pending" if not legal else "player_inventory_sell_pending")
         grant_action_progression(conn, pid, "legal_trade" if legal else "illicit_trade", max(1.0, qty / 4), True)
         mass = int(math.ceil(float(inv.get("mass") or 0) * qty))
-        op = begin_cargo_operation(conn, pid, player["location_planet_id"], "sell_inventory_item", item_code, inv["name"], qty, mass, gross_revenue, sale_fee, revenue, legal, {"commodity_id": commodity["id"] if commodity else None, "code": item_code, "unit_price": unit_price, "tier": int(inv.get("current_tier") or inv.get("base_tier") or 1)}, god)
+        op_payload = {
+            "commodity_id": commodity["id"] if commodity else None,
+            "code": item_code,
+            "name": inv.get("name") or item_code,
+            "unit_price": unit_price,
+            "item_type": inv.get("item_type") or "goods",
+            "category": inv.get("category"),
+            "subcategory": inv.get("subcategory") or "",
+            "legal": legal,
+            "base_value": int(inv.get("base_value") or unit_price),
+            "mass_each": float(inv.get("mass") or 0),
+            "description": inv.get("description") or "",
+            "source": inv.get("source") or "inventory",
+            "rarity": inv.get("rarity") or "",
+            "stack_size": int(inv.get("stack_size") or 9999),
+            "cargo_exempt": int(inv.get("cargo_exempt") or 0),
+            "usable": int(inv.get("usable") or 0),
+            "sellable": int(inv.get("sellable") if inv.get("sellable") is not None else 1),
+            "craftable_material": int(inv.get("craftable_material") or 0),
+            "equippable": int(inv.get("equippable") or 0),
+            "image_id": inv.get("image_id") or "",
+            "tier": int(inv.get("current_tier") or inv.get("base_tier") or 1),
+            "current_tier": int(inv.get("current_tier") or inv.get("base_tier") or 1),
+            "max_tier": int(inv.get("max_tier") or inv.get("current_tier") or inv.get("base_tier") or 1),
+            "tier_locked": int(inv.get("tier_locked") or 0),
+            "tier_source": inv.get("tier_source") or "inventory",
+            "item_stats_json": inv.get("item_stats_json") or "{}",
+        }
+        op = begin_cargo_operation(conn, pid, player["location_planet_id"], "sell_inventory_item", item_code, inv["name"], qty, mass, gross_revenue, sale_fee, revenue, legal, op_payload, god)
         return {**op, "revenue":revenue, "gross":gross_revenue, "fee":sale_fee, "risk": illicit.get("risk")}
 
     if t == "inspect_inventory_item":
@@ -25273,6 +25989,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         ship = row(conn, "SELECT * FROM ships WHERE id=?", (player["active_ship_id"],))
         if not ship or ship["destroyed"]:
             raise HTTPException(400, "No usable active ship")
+        player = interrupt_active_local_travel(conn, player, "mission landing")
         open_space_before_travel = get_player_open_space(conn, pid)
         origin_point = current_player_map_position(conn, player, "system")
         target_point = system_planet_map_point(conn, int(target["id"]))
@@ -25435,6 +26152,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message":f"Mining failed. {consequence}","outcome":outcome}
 
     if t == "salvage_site":
+        player = interrupt_active_local_travel(conn, player, "salvage operation")
         site_id = int(payload.get("site_id") or payload.get("salvageSiteId") or 0)
         caps = player_tool_capabilities(conn, player)
         if not caps.get("can_salvage") and not god:
@@ -25989,6 +26707,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         return {"message": f"Base established: {name}. Research first, then build modules.", "baseId": base_id}
 
     if t == "dock_player_base":
+        player = interrupt_active_local_travel(conn, player, "base docking")
         base_id = int(payload.get("base_id") or payload.get("baseId") or 0)
         base = row(conn, "SELECT * FROM player_bases WHERE id=? AND player_id=? AND status='active'", (base_id, pid))
         if not base:

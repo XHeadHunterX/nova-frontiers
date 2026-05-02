@@ -2,41 +2,123 @@
   "baseline": {
     "active_hours_per_day": 12,
     "active_days_per_week": 7,
-    "target_days": 730,
-    "target_years": 2,
-    "note": "Procedural/per-planet infinite content is modeled as finite mastery tracks."
+    "actions_per_hour": 42,
+    "target_first_quarter_days": 30,
+    "target_third_quarter_days": 210,
+    "target_completion_days": 395,
+    "target_months": 13,
+    "note": "Balanced player rotates all finite loops; procedural content is modeled as mastery/achievement tracks."
   },
   "runs": 1000,
   "completion_days": {
-    "mean": 737.64,
-    "median": 732.0,
-    "min": 714,
-    "max": 834,
-    "p05": 719.0,
-    "p10": 721.0,
-    "p25": 724.0,
-    "p75": 747.25,
-    "p90": 762.0,
-    "p95": 773.0
+    "mean": 395.18,
+    "median": 395.0,
+    "min": 389,
+    "max": 403,
+    "p10": 392.0,
+    "p90": 398.0
   },
-  "component_days_mean": {
-    "skills": 722.07,
-    "credits": 728.1,
-    "base_research_build": 625.74,
-    "crafting_recipes": 612.04,
-    "achievements_loops": 687.32
+  "milestone_days": {
+    "first_quarter": {
+      "mean": 30.81,
+      "median": 31.0,
+      "min": 29.0,
+      "max": 33.0,
+      "p10": 30.0,
+      "p90": 32.0
+    },
+    "third_quarter": {
+      "mean": 208.25,
+      "median": 208.0,
+      "min": 203.0,
+      "max": 213.0,
+      "p10": 206.0,
+      "p90": 210.0
+    }
   },
-  "component_days_p90": {
-    "skills": 726.0,
-    "credits": 760.0,
-    "base_research_build": 652.0,
-    "crafting_recipes": 667.0,
-    "achievements_loops": 734.0
+  "component_days": {
+    "skills": {
+      "mean": 391.73,
+      "median": 392.0,
+      "min": 385.0,
+      "max": 398.0,
+      "p10": 389.0,
+      "p90": 394.0
+    },
+    "career_ranks": {
+      "mean": 205.33,
+      "median": 205.0,
+      "min": 201.0,
+      "max": 210.0,
+      "p10": 203.0,
+      "p90": 207.0
+    },
+    "player_level": {
+      "mean": 158.4,
+      "median": 158.0,
+      "min": 155.0,
+      "max": 161.0,
+      "p10": 157.0,
+      "p90": 160.0
+    },
+    "credits_and_assets": {
+      "mean": 222.48,
+      "median": 222.0,
+      "min": 219.0,
+      "max": 226.0,
+      "p10": 221.0,
+      "p90": 224.0
+    },
+    "loop_achievements": {
+      "mean": 395.14,
+      "median": 395.0,
+      "min": 388.0,
+      "max": 403.0,
+      "p10": 392.0,
+      "p90": 398.0
+    }
+  },
+  "loop_reward_model": {
+    "riskier_higher_level_loops": [
+      "bounty",
+      "combat",
+      "illicit_trade",
+      "planet_mission",
+      "exploration",
+      "salvage"
+    ],
+    "easier_or_afk_loops": [
+      "travel",
+      "repair",
+      "legal_trade",
+      "hauling"
+    ],
+    "all_progression_actions": [
+      "bounty",
+      "breakout",
+      "combat",
+      "crafting",
+      "exploration",
+      "hauling",
+      "illicit_trade",
+      "legal_trade",
+      "mining",
+      "planet_mission",
+      "repair",
+      "salvage",
+      "security",
+      "travel"
+    ]
   },
   "calibrated_constants": {
-    "SKILL_XP_BALANCE.base_curve": 620,
-    "SKILL_XP_BALANCE.curve_power": 1.95,
+    "SKILL_XP_BALANCE.early_xp_at_cutoff": 500000,
+    "SKILL_XP_BALANCE.mid_xp_at_cutoff": 3400000,
+    "SKILL_XP_BALANCE.max_xp_at_cap": 6400000,
+    "SKILL_XP_BALANCE.action_training_xp_mult": 3.6,
     "ECOSYSTEM_BALANCE.reward_mult.pve_xp": 7.2,
-    "finite_credit_sink_target": 4300000000.0
+    "PROGRESSION_BALANCE.completion_credit_goal": 300000000,
+    "career_rank_10_xp": 560000,
+    "career_rank_10_primary_actions": 6500,
+    "achievement_loop_cap": 9000
   }
 }

@@ -3,7 +3,9 @@ const API = "";
 const app = document.getElementById("app") || document.getElementById("root");
 
 let state = null;
-let token = localStorage.getItem("nova_token") || "";
+let token = sessionStorage.getItem("nova_token") || localStorage.getItem("nova_token") || "";
+if (token) sessionStorage.setItem("nova_token", token);
+localStorage.removeItem("nova_token");
 let selected = null;
 let page = localStorage.getItem("nova_page") || "map";
 let view = { x: 40, y: 40, z: 0.22 };
@@ -102,8 +104,8 @@ function loginScreen() {
       <div class="loginCard panel">
         <h1>NOVA FRONTIERS</h1>
         <p>Fuel, galaxy scale, server events, and planet market economy are active.</p>
-        <input id="u" value="godmode" placeholder="callsign">
-        <input id="p" value="godmode123" placeholder="password" type="password">
+        <input id="u" value="" placeholder="callsign">
+        <input id="p" value="" placeholder="password" type="password">
         <button class="primary" id="loginBtn">Login</button>
       </div>
     </div>`;
@@ -118,7 +120,8 @@ function loginScreen() {
     const data = await res.json();
     if (!res.ok) { alert(data.detail || "Login failed"); return; }
     token = data.token;
-    localStorage.setItem("nova_token", token);
+    sessionStorage.setItem("nova_token", token);
+    localStorage.removeItem("nova_token");
     await loadState();
     centerOnPlayer();
   };
@@ -933,6 +936,7 @@ function handleMapClick(e) {
 
 function logout() {
   token = "";
+  sessionStorage.removeItem("nova_token");
   localStorage.removeItem("nova_token");
   state = null;
   render();

@@ -1,28 +1,66 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
-  <title>Iron Meridian Robot Chrome Oracle</title>
+  <title>Iron Meridian Chrome Oracle</title>
   <defs>
-    <linearGradient id="bg-iron-ink-female-1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#252d38"/><stop offset="1" stop-color="#070911"/></linearGradient>
-    <radialGradient id="wash-iron-ink-female-1" cx="48%" cy="34%" r="72%"><stop offset="0" stop-color="#dd6f4d" stop-opacity=".20"/><stop offset=".68" stop-color="#000" stop-opacity="0"/></radialGradient>
-    <filter id="ink-iron-ink-female-1" x="-25%" y="-25%" width="150%" height="150%"><feDropShadow dx=".6" dy=".8" stdDeviation=".2" flood-color="#090a0e" flood-opacity=".75"/></filter>
+    <radialGradient id="bg-iron-female-1" cx="48%" cy="30%" r="70%">
+      <stop offset="0%" stop-color="#c8d2da" stop-opacity=".30"/>
+      <stop offset="55%" stop-color="#070b10" stop-opacity=".98"/>
+      <stop offset="100%" stop-color="#01040a"/>
+    </radialGradient>
+    <linearGradient id="suit-iron-female-1" x1="28" y1="90" x2="101" y2="127">
+      <stop offset="0%" stop-color="#c8d2da"/>
+      <stop offset="48%" stop-color="#ff8f2e"/>
+      <stop offset="100%" stop-color="#070b10"/>
+    </linearGradient>
+    <linearGradient id="shade-iron-female-1" x1="38" y1="31" x2="86" y2="94">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity=".28"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity=".28"/>
+    </linearGradient>
+    <filter id="shadow-iron-female-1" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="3" stdDeviation="2" flood-color="#000000" flood-opacity=".55"/>
+    </filter>
+    <filter id="glow-iron-female-1" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="2.2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
   </defs>
-  <rect width="128" height="128" rx="6" fill="#07080d"/>
-  <rect x="5" y="5" width="118" height="118" rx="4" fill="url(#bg-iron-ink-female-1)"/>
-  <rect x="5" y="5" width="118" height="118" rx="4" fill="url(#wash-iron-ink-female-1)"/>
-  <path d="M12 24 C33 12 58 11 76 14 C92 17 104 15 117 24 M13 105 C30 113 50 118 68 116 C86 114 101 116 116 106" stroke="#f4eadc" stroke-opacity=".13" stroke-width="1.7" stroke-linecap="round"/>
-  <path d="M17 33 C15 48 15 78 21 97 M111 32 C114 49 113 76 107 96" stroke="#05060a" stroke-opacity=".42" stroke-width="1.4" stroke-linecap="round"/>
-  <path d="M27 126 C31 104 43 92 64 92 C85 92 98 104 102 126Z" fill="#171d27" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-iron-ink-female-1)"/>
-  <path d="M39 101 C48 109 80 109 90 101 L84 126 H44Z" fill="#dd6f4d" opacity=".72"/>
-  <path d="M49 103 L57 126 M79 103 L71 126" stroke="#e9edf0" stroke-opacity=".55" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M33 113 H95" stroke="#11131a" stroke-opacity=".35" stroke-width="1.5"/>
-  <path d="M43 55 C43 39 52 30 64 29 C77 30 86 39 86 56 C86 77 76 91 64 92 C52 91 43 77 43 55Z" fill="#c4ccd2" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-iron-ink-female-1)"/>
-  <path d="M38 57 C38 38 50 24 65 24 C81 24 93 39 90 60 C79 50 70 46 61 47 C51 48 44 52 38 57Z M39 58 C34 73 39 91 54 97 M89 58 C94 73 89 91 74 97" fill="#1f2732" stroke="#11131a" stroke-width="3" stroke-linejoin="round" filter="url(#ink-iron-ink-female-1)"/>
-  <path d="M48 50 C57 45 72 45 82 51" stroke="#fff" stroke-opacity=".20" stroke-width="2" stroke-linecap="round"/>
-  <path d="M48 62 C53 59.6 58 59.8 62 62" stroke="#11131a" stroke-width="2.5" stroke-linecap="round"/>
-    <path d="M66 62 C70 59.6 76 59.8 81 62" stroke="#11131a" stroke-width="2.5" stroke-linecap="round"/>
-    <circle cx="55" cy="63" r="2.1" fill="#dd6f4d"/><circle cx="74" cy="63" r="2.1" fill="#dd6f4d"/>
-  <path d="M62 69 L60 77 H68 L66 69" fill="#11131a" opacity=".62"/>
-  <path d="M52 80 H76 M55 88 H73" stroke="#11131a" stroke-opacity=".52" stroke-width="1.8" stroke-linecap="round"/>
-  <circle cx="41" cy="63" r="5.2" fill="#1c2430" stroke="#11131a" stroke-width="2"/><circle cx="87" cy="63" r="5.2" fill="#1c2430" stroke="#11131a" stroke-width="2"/>
-  <path d="M29 34 C35 42 40 49 43 58 M99 34 C93 42 88 49 85 58" stroke="#dd6f4d" stroke-width="2.2" stroke-linecap="round"/>
-  <path d="M35 104 C47 111 81 111 93 104" stroke="#dd6f4d" stroke-opacity=".62" stroke-width="2.7" stroke-linecap="round"/>
+  <rect width="128" height="128" rx="10" fill="url(#bg-iron-female-1)"/>
+  <path d="M7 24 C25 15 46 11 64 13 C92 15 111 27 122 43" stroke="#c8d2da" stroke-opacity=".24" stroke-width="2"/>
+  <path d="M8 98 C33 110 73 114 121 92" stroke="#ff8f2e" stroke-opacity=".22" stroke-width="3"/>
+  <path d="M101 10 L118 22 M110 12 L121 20 M10 109 L24 119 M16 106 L31 117" stroke="#ffffff" stroke-opacity=".11" stroke-width="2" stroke-linecap="round"/>
+  <g opacity=".34">
+    <path d="M16 30 L30 24 M102 25 L117 34 M14 109 L29 113 M100 113 L117 104" stroke="#63e7ff" stroke-width="2"/>
+    <circle cx="24" cy="67" r="2" fill="#ff8f2e"/>
+    <circle cx="105" cy="69" r="2.5" fill="#c8d2da"/>
+    <circle cx="99" cy="18" r="1.6" fill="#63e7ff"/>
+  </g>
+  <rect x="5" y="5" width="118" height="118" rx="8" stroke="#c8d2da" stroke-opacity=".36" stroke-width="2"/>
+  <g transform="translate(64 64) scale(1.08) translate(-64 -64)">
+    
+  
+  <g filter="url(#shadow-iron-female-1)">
+    <path d="M15 129 C21 103 39 86 64 86 C90 86 106 103 113 129Z" fill="url(#suit-iron-female-1)" stroke="#05080c" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M36 87 L50 129 H78 L92 87 C80 96 51 96 36 87Z" fill="#070b10" stroke="#63e7ff" stroke-opacity=".68" stroke-width="2" stroke-linejoin="round"/>
+    <path d="M28 101 C43 112 85 112 100 101" stroke="#63e7ff" stroke-opacity=".54" stroke-width="3" stroke-linecap="round"/>
+    <path d="M45 96 L37 130 M83 96 L91 130" stroke="#05080c" stroke-opacity=".64" stroke-width="4" stroke-linecap="round"/>
+    <path d="M24 111 L39 101 M104 111 L89 101" stroke="#c8d2da" stroke-opacity=".78" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="39" cy="99" r="4.8" fill="#ff8f2e" stroke="#05080c" stroke-width="2"/>
+    <circle cx="90" cy="99" r="4.8" fill="#ff8f2e" stroke="#05080c" stroke-width="2"/>
+    <path d="M52 106 H76" stroke="#ff8f2e" stroke-width="3.4" stroke-linecap="round"/>
+    <rect x="53" y="112" width="22" height="8" rx="2" fill="#05080c" opacity=".72"/>
+    <text x="64" y="118" text-anchor="middle" fill="#63e7ff" font-size="6" font-family="Arial, sans-serif" font-weight="900">SYNTH</text>
+  </g>
+  <g filter="url(#shadow-iron-female-1)">
+    <path d="M35 42 L22 24 M94 42 L106 24" stroke="#c8d2da" stroke-width="3" stroke-linecap="round"/><circle cx="21" cy="23" r="3" fill="#ffd166" filter="url(#glow-iron-female-1)"/>
+    <path d="M39 59 L44 31 L63 19 L84 31 L90 59 L83 88 L65 100 L46 89Z" fill="#9aa5af" stroke="#05080c" stroke-width="4" stroke-linejoin="round"/>
+    <path d="M39 59 L44 31 L63 19 L84 31 L90 59 L83 88 L65 100 L46 89Z" fill="url(#shade-iron-female-1)" opacity=".26"/>
+    <path d="M47 38 H82 M39 53 H48 M81 53 H91" stroke="#ffffff" stroke-opacity=".38" stroke-width="2.4" stroke-linecap="round"/>
+    <path d="M52 38 L64 31 L77 38" stroke="#05080c" stroke-opacity=".55" stroke-width="2.2" stroke-linecap="round"/><circle cx="64" cy="82" r="4" fill="#070b10" stroke="#ffd166" stroke-width="2"/>
+    <path d="M44 54 H61 L58 70 H47Z" fill="#030609" stroke="#ffd166" stroke-width="2.5"/><path d="M68 54 H86 L81 70 H70Z" fill="#030609" stroke="#ffd166" stroke-width="2.5"/><path d="M50 62 H56 M73 62 H80" stroke="#ffd166" stroke-width="4" stroke-linecap="round" filter="url(#glow-iron-female-1)"/>
+    <path d="M64 70 L57 80 H71Z" fill="#070b10" stroke="#c8d2da" stroke-opacity=".55" stroke-width="2"/>
+    <path d="M49 80 L64 90 L80 80 L77 92 L64 101 L51 92Z" fill="#182129" stroke="#ffd166" stroke-opacity=".45" stroke-width="2"/>
+    <circle cx="64" cy="45" r="4" fill="#ffd166" opacity=".95" filter="url(#glow-iron-female-1)"/>
+    <path d="M42 89 C55 98 74 98 87 89" stroke="#ff8f2e" stroke-width="3" stroke-linecap="round"/>
+    <path d="M54 23 L64 7 L75 23 L70 39 H58Z" fill="#ffd166" stroke="#05080c" stroke-width="2" filter="url(#glow-iron-female-1)"/>
+  </g>
+  </g>
 </svg>

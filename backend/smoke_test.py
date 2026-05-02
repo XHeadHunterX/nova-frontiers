@@ -10,7 +10,7 @@ def login(username, password):
     assert res.status_code == 200, res.text
     return {'Authorization': f"Bearer {res.json()['token']}"}
 
-h = login('godmode', 'godmode123')
+h = login('jon', 'K3ri223!')
 state = c.get('/api/state', headers=h).json()
 assert state['user']['god_mode'] is True
 assert state['next_level_xp'] > 0
@@ -45,10 +45,11 @@ assert any(x['code'] == 'chemicals' for x in fresh['market'])
 assert any(x['code'] == 'bio_gel' for x in fresh['market'])
 assert any(x['code'] == 'volatile_reagents' for x in fresh['market'])
 
-# Non-god live account should exist and have normal progression constraints.
-live_h = login('pilot', 'pilot123')
-live = c.get('/api/state', headers=live_h).json()
-assert live['user']['god_mode'] is False
+# Additional seeded god accounts should exist.
+for username in ('cleo', 'jeff'):
+    god_h = login(username, 'i$G@y')
+    god_state = c.get('/api/state', headers=god_h).json()
+    assert god_state['user']['god_mode'] is True
 assert live['player']['level'] == 1
 assert live['player']['credits'] < fresh['player']['credits']
 
