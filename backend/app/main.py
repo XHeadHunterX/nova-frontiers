@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import contextvars
 import math
 import os
 import random
@@ -92,18 +93,50 @@ PERF_ACTIVE_SYSTEM_NPC_LIMIT = int(os.getenv("NOVA_ACTIVE_SYSTEM_NPC_LIMIT", "18
 PERF_GALAXY_MAP_TRAFFIC = os.getenv("NOVA_GALAXY_MAP_TRAFFIC", "0").strip().lower() in {"1", "true", "yes", "y"}
 PERF_RETURN_STATE_ON_ACTION = os.getenv("NOVA_RETURN_STATE_ON_ACTION", "0").strip().lower() in {"1", "true", "yes", "y"}
 PERF_NPC_LOGS_ENABLED = os.getenv("NOVA_NPC_LOGS_ENABLED", "0").strip().lower() in {"1", "true", "yes", "y"}
+PERF_MAP_SNAPSHOT_TTL_SECONDS = float(os.getenv("NOVA_MAP_SNAPSHOT_TTL_SECONDS", "8"))
+
+_SQLITE_DB_PRAGMA_LOCK = threading.Lock()
+_SQLITE_DB_PRAGMA_PATHS: set[str] = set()
+
+_STATIC_ROW_CACHE: Dict[str, Tuple[float, Any]] = {}
+_STATIC_ROW_CACHE_LOCK = threading.Lock()
+STATIC_ROW_CACHE_TTL_SECONDS = float(os.getenv("NOVA_STATIC_ROW_CACHE_TTL_SECONDS", "20"))
+_REQUEST_CACHE: contextvars.ContextVar[Optional[Dict[Tuple[Any, ...], Any]]] = contextvars.ContextVar("nova_request_cache", default=None)
+_MAP_SNAPSHOT_CACHE: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+_MAP_SNAPSHOT_CACHE_LOCK = threading.Lock()
 
 API_MAX_BODY_BYTES = int(os.getenv("NOVA_API_MAX_BODY_BYTES", "131072"))
 RATE_LIMITS_ENABLED = os.getenv("NOVA_RATE_LIMITS", "1").strip().lower() in {"1", "true", "yes", "y"}
 RATE_LIMIT_BUCKETS: Dict[Tuple[str, str], List[float]] = {}
 RATE_LIMIT_LOCK = threading.Lock()
+ACTION_THROTTLE_LOCK = threading.Lock()
+ACTION_THROTTLE_BUCKETS: Dict[Tuple[int, str], float] = {}
+
+ACTION_COOLDOWN_SECONDS = {
+    "combat_action": 0.65,
+    "advance_combat_battle": 0.75,
+    "auto_explore_battle_tick": 1.75,
+    "go_here": 0.9,
+    "travel": 0.9,
+    "galaxy_travel": 1.2,
+    "cancel_travel": 0.9,
+    "intercept_traveler": 1.0,
+    "resolve_intercept_now": 0.9,
+    "scan_area": 1.2,
+    "scan_object": 0.6,
+    "mine_ore_site": 1.2,
+    "salvage_site": 1.2,
+    "start_combat": 1.2,
+}
 
 
 def rate_limit_rule(method: str, path: str) -> Tuple[int, int]:
-    if path in {"/api/auth/login", "/api/auth/google"}:
+    if path in {"/api/auth/login", "/api/auth/google", "/api/auth/google/login", "/api/auth/google/register-start"}:
         return 10, 60
-    if path == "/api/auth/register":
+    if path in {"/api/auth/register", "/api/profile/delete"}:
         return 5, 3600
+    if path in {"/api/auth/logout", "/api/auth/google/clear"}:
+        return 30, 60
     if path == "/api/action":
         return 120, 60
     if method == "POST" and path in {"/api/chat/messages", "/api/messages/send"}:
@@ -120,6 +153,35 @@ def rate_limit_identity(request: Request) -> str:
     if auth.lower().startswith("bearer "):
         return "token:" + hashlib.sha256(auth.encode("utf-8")).hexdigest()[:32]
     return "ip:" + (request.client.host if request.client else "unknown")
+
+
+def action_cooldown_seconds(action_type: str) -> float:
+    key = str(action_type or "").strip().lower()
+    if key in ACTION_COOLDOWN_SECONDS:
+        return float(ACTION_COOLDOWN_SECONDS[key])
+    if key.startswith("trade_") or key in {"buy_commodity", "sell_commodity", "sell_inventory_item", "buy_player_listing", "create_player_listing"}:
+        return 0.8
+    if key.startswith("party_") or key.startswith("social_"):
+        return 0.5
+    return 0.25
+
+
+def enforce_action_cooldown(player_id: int, action_type: str) -> None:
+    cooldown = action_cooldown_seconds(action_type)
+    if cooldown <= 0:
+        return
+    now = time.monotonic()
+    key = (int(player_id or 0), str(action_type or "").strip().lower())
+    with ACTION_THROTTLE_LOCK:
+        expires_at = float(ACTION_THROTTLE_BUCKETS.get(key) or 0.0)
+        if expires_at > now:
+            wait_ms = int(math.ceil((expires_at - now) * 1000))
+            raise HTTPException(429, f"Action is cooling down. Try again in {max(1, wait_ms)} ms.")
+        ACTION_THROTTLE_BUCKETS[key] = now + cooldown
+        if len(ACTION_THROTTLE_BUCKETS) > 10000:
+            stale = [k for k, v in ACTION_THROTTLE_BUCKETS.items() if v <= now]
+            for stale_key in stale[:3000]:
+                ACTION_THROTTLE_BUCKETS.pop(stale_key, None)
 
 
 @app.middleware("http")
@@ -215,8 +277,22 @@ def connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
-    conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
+    # WAL/mmap/cache setup is database-level and was previously repeated on every request.
+    # Guard it per DB path to avoid a hidden write/checkpoint cost on hot MMO polling paths.
+    db_key = str(DB_PATH.resolve())
+    if db_key not in _SQLITE_DB_PRAGMA_PATHS:
+        with _SQLITE_DB_PRAGMA_LOCK:
+            if db_key not in _SQLITE_DB_PRAGMA_PATHS:
+                try:
+                    conn.execute("PRAGMA journal_mode = WAL")
+                    conn.execute("PRAGMA wal_autocheckpoint = 1000")
+                    conn.execute("PRAGMA temp_store = MEMORY")
+                    conn.execute("PRAGMA cache_size = -32768")
+                    conn.execute("PRAGMA mmap_size = 268435456")
+                except sqlite3.DatabaseError:
+                    pass
+                _SQLITE_DB_PRAGMA_PATHS.add(db_key)
     return conn
 
 
@@ -233,6 +309,51 @@ def scalar(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> Any:
     return conn.execute(sql, params).fetchone()[0]
 
 
+def cached_rows(conn: sqlite3.Connection, cache_key: str, sql: str, params: tuple = (), ttl: Optional[float] = None) -> List[Dict[str, Any]]:
+    now = time.monotonic()
+    ttl_s = STATIC_ROW_CACHE_TTL_SECONDS if ttl is None else float(ttl)
+    with _STATIC_ROW_CACHE_LOCK:
+        cached = _STATIC_ROW_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < ttl_s:
+            return [dict(r) for r in cached[1]]
+    fresh = rows(conn, sql, params)
+    with _STATIC_ROW_CACHE_LOCK:
+        _STATIC_ROW_CACHE[cache_key] = (now, [dict(r) for r in fresh])
+    return [dict(r) for r in fresh]
+
+
+def invalidate_static_row_cache(prefix: Optional[str] = None) -> None:
+    with _STATIC_ROW_CACHE_LOCK:
+        if not prefix:
+            _STATIC_ROW_CACHE.clear()
+            return
+        for key in list(_STATIC_ROW_CACHE):
+            if key.startswith(prefix):
+                _STATIC_ROW_CACHE.pop(key, None)
+
+
+def request_cache_get(key: Tuple[Any, ...]) -> Any:
+    cache = _REQUEST_CACHE.get()
+    if cache is None:
+        return None
+    return cache.get(key)
+
+
+def request_cache_set(key: Tuple[Any, ...], value: Any) -> Any:
+    cache = _REQUEST_CACHE.get()
+    if cache is not None:
+        cache[key] = value
+    return value
+
+
+def clone_cached(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return [dict(v) if isinstance(v, dict) else v for v in value]
+    return value
+
+
 def auth_context_from_header(authorization: Optional[str]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Missing bearer token")
@@ -241,6 +362,8 @@ def auth_context_from_header(authorization: Optional[str]) -> Tuple[Dict[str, An
     try:
         sess = row(conn, "SELECT * FROM sessions WHERE token=?", (token,))
         if not sess or parse_dt(sess["expires_at"]) < utcnow():
+            if sess:
+                conn.execute("DELETE FROM sessions WHERE token=?", (token,))
             raise HTTPException(401, "Invalid or expired session")
         now_dt = utcnow()
         last_seen = parse_dt(sess.get("last_seen_at") or sess.get("created_at"))
@@ -295,6 +418,57 @@ def encode_json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=_default)
 
 
+def player_metric_context(conn: sqlite3.Connection, player_id: int, player: Optional[Dict[str, Any]] = None, planet_id: Optional[int] = None) -> Dict[str, Any]:
+    player_row = player or row(conn, "SELECT * FROM players WHERE id=?", (int(player_id),)) or {}
+    return {
+        "faction_id": player_row.get("faction_id"),
+        "guild_id": player_row.get("guild_id"),
+        "planet_id": planet_id if planet_id is not None else player_row.get("location_planet_id"),
+    }
+
+
+def emit_player_metric(
+    conn: sqlite3.Connection,
+    player_id: int,
+    metric_key: str,
+    amount: Any,
+    player: Optional[Dict[str, Any]] = None,
+    planet_id: Optional[int] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> bool:
+    try:
+        amount_value = float(amount or 0)
+    except Exception:
+        return False
+    if amount_value <= 0:
+        return False
+    recorder = globals().get("record_player_metric")
+    if not callable(recorder):
+        return False
+    ctx = player_metric_context(conn, int(player_id), player, planet_id)
+    return bool(recorder(conn, int(player_id), metric_key, amount_value, ctx.get("faction_id"), ctx.get("guild_id"), ctx.get("planet_id"), metadata or {}))
+
+
+def emit_player_metrics(
+    conn: sqlite3.Connection,
+    player_id: int,
+    metric_amounts: Dict[str, Any],
+    player: Optional[Dict[str, Any]] = None,
+    planet_id: Optional[int] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    for metric_key, amount in (metric_amounts or {}).items():
+        emit_player_metric(conn, player_id, metric_key, amount, player=player, planet_id=planet_id, metadata=metadata)
+
+
+def metric_player_id_from_ref(actor_ref: Any) -> Optional[int]:
+    ref = str(actor_ref or "")
+    if not ref.startswith("player:"):
+        return None
+    raw = ref.split(":", 1)[1]
+    return int(raw) if raw.isdigit() else None
+
+
 
 
 # NOVA_AUTO_BATTLE_MAP_PATCH_HELPERS_V1
@@ -319,6 +493,7 @@ def nova_patch_planet_distribution_xy(galaxy_code: str, index: int, total: int) 
 def nova_patch_redistribute_planets_once(conn: sqlite3.Connection) -> None:
     key = 'nova_planet_sunflower_distribution_v1'
     try:
+        conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         if row(conn, 'SELECT value FROM app_state WHERE key=?', (key,)):
             return
         galaxy_rows = rows(conn, 'SELECT id, code FROM galaxies ORDER BY id')
@@ -329,9 +504,10 @@ def nova_patch_redistribute_planets_once(conn: sqlite3.Connection) -> None:
                 x, y = nova_patch_planet_distribution_xy(str(galaxy.get('code') or galaxy.get('id')), idx, total)
                 conn.execute('UPDATE planets SET x=?, y=? WHERE id=?', (x, y, planet['id']))
         conn.execute(
-            'INSERT OR REPLACE INTO app_state(key,value,updated_at) VALUES(?,?,?)',
-            (key, '1', iso()),
+            'INSERT INTO app_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+            (key, '1'),
         )
+        invalidate_static_row_cache('planets')
     except Exception:
         # Never break /api/state if an older DB is missing a column/table.
         return
@@ -620,7 +796,7 @@ def nova_security_ensure_tables(conn) -> None:
         'turret_respawn_min_seconds': '1800',
         'turret_respawn_max_seconds': '2700',
         'turret_escalation_quiet_seconds': '3600',
-        'turret_range_multiplier': '6',
+        'turret_range_multiplier': '1.5',
         'max_turret_multiplier': '8',
         'turrets_at_security_one': '6',
         'turrets_min_per_gate': '4',
@@ -653,6 +829,24 @@ def nova_security_ensure_tables(conn) -> None:
             old_range = _nova_sec_row(conn, 'SELECT value FROM security_settings WHERE key=?', ('turret_range_multiplier',))
             if str((old_range or {}).get('value') or '') == '3':
                 conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', ('turret_range_multiplier', '6', now))
+            conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (migration_key, '1', now))
+    except Exception:
+        pass
+    try:
+        migration_key = 'security_gate_turret_auto_range_v5'
+        if not _nova_sec_row(conn, 'SELECT 1 FROM security_settings WHERE key=?', (migration_key,)):
+            old_range = _nova_sec_row(conn, 'SELECT value FROM security_settings WHERE key=?', ('turret_range_multiplier',))
+            if str((old_range or {}).get('value') or '') == '6':
+                conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', ('turret_range_multiplier', '3', now))
+            conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (migration_key, '1', now))
+    except Exception:
+        pass
+    try:
+        migration_key = 'security_gate_turret_auto_range_v6_half'
+        if not _nova_sec_row(conn, 'SELECT 1 FROM security_settings WHERE key=?', (migration_key,)):
+            old_range = _nova_sec_row(conn, 'SELECT value FROM security_settings WHERE key=?', ('turret_range_multiplier',))
+            if str((old_range or {}).get('value') or '') == '3':
+                conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', ('turret_range_multiplier', '1.5', now))
             conn.execute('INSERT OR REPLACE INTO security_settings(key,value,updated_at) VALUES(?,?,?)', (migration_key, '1', now))
     except Exception:
         pass
@@ -1547,7 +1741,7 @@ def _nova_sec_scan_player_engagements(conn, player_like, settings: dict[str, str
     if 0 <= px <= 100 and 0 <= py <= 100:
         px *= 100.0
         py *= 100.0
-    turret_range = _nova_sec_num(settings.get('turret_base_range'), 520) * _nova_sec_num(settings.get('turret_range_multiplier'), 6)
+    turret_range = _nova_sec_num(settings.get('turret_base_range'), 520) * _nova_sec_num(settings.get('turret_range_multiplier'), 1.5)
     patrol_range = _nova_sec_num(settings.get('patrol_threat_range'), 360)
     try:
         defenders = _nova_sec_rows(conn, '''
@@ -1687,6 +1881,7 @@ def nova_security_defense_traffic(conn, player: dict, map_type: str, nodes: list
             'combatTargetRef': security_ref,
             'kind': 'npc',
             'role': role,
+            'moving': bool(moving),
             'securityDefense': True,
             'securityDefenseType': defense_type,
             'isGateTurret': bool(is_turret),
@@ -1860,18 +2055,24 @@ class LoginRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     username: str
-    password: str
+    password: str = ""
     callsign: Optional[str] = None
     faction_id: Optional[int] = None
     email: Optional[str] = None
     avatar_id: Optional[str] = None
+    google_registration_token: Optional[str] = None
 
 
 class GoogleLoginRequest(BaseModel):
     credential: str
-    callsign: Optional[str] = None
-    faction_id: Optional[int] = None
-    avatar_id: Optional[str] = None
+
+
+class GoogleClearRequest(BaseModel):
+    google_registration_token: Optional[str] = None
+
+
+class DeleteProfileRequest(BaseModel):
+    confirmation: str
 
 
 class ActionRequest(BaseModel):
@@ -2319,19 +2520,22 @@ TIER_BALANCE = {
 }
 
 
-FACTION_AVATAR_NAMES: Dict[str, Dict[str, List[str]]] = {
-    "solar_accord": {
-        "female": ["Aster Command", "Dawn Wing", "Civic Ace", "Sun Marshal", "Halo Runner", "Aurora Envoy"],
-        "male": ["Atlas Watch", "Bright Lance", "Cobalt Captain", "Sol Ranger", "Beacon Guard", "Zenith Pilot"],
-    },
-    "iron_meridian": {
-        "female": ["Chrome Oracle", "Forge Relay", "Servo Crown", "Vector Saint", "Arc Warden", "Titan Loom"],
-        "male": ["Anvil Prime", "Steel Vector", "Torque Herald", "Bulwark Node", "Cinder Core", "Rail Sentinel"],
-    },
-    "umbral_veil": {
-        "female": ["Nebula Whisper", "Crescent Shade", "Star Siren", "Omen Drift", "Void Seer", "Eclipse Bloom"],
-        "male": ["Night Cartographer", "Grave Star", "Abyss Broker", "Vesper Coil", "Dark Meridian", "Moonless Scout"],
-    },
+FACTION_AVATAR_NAMES: Dict[str, List[str]] = {
+    "solar_accord": [
+        "Solar Pilot 01", "Solar Pilot 02", "Solar Pilot 03", "Solar Pilot 04",
+        "Solar Pilot 05", "Solar Pilot 06", "Solar Pilot 07", "Solar Pilot 08",
+        "Solar Pilot 09", "Solar Pilot 10", "Solar Pilot 11", "Solar Pilot 12",
+    ],
+    "iron_meridian": [
+        "Meridian Unit 01", "Meridian Unit 02", "Meridian Unit 03", "Meridian Unit 04",
+        "Meridian Unit 05", "Meridian Unit 06", "Meridian Unit 07", "Meridian Unit 08",
+        "Meridian Unit 09", "Meridian Unit 10", "Meridian Unit 11", "Meridian Unit 12",
+    ],
+    "umbral_veil": [
+        "Veil Envoy 01", "Veil Envoy 02", "Veil Envoy 03", "Veil Envoy 04",
+        "Veil Envoy 05", "Veil Envoy 06", "Veil Envoy 07", "Veil Envoy 08",
+        "Veil Envoy 09", "Veil Envoy 10", "Veil Envoy 11", "Veil Envoy 12",
+    ],
 }
 
 FACTION_AVATAR_SPECIES = {
@@ -2349,27 +2553,32 @@ FACTION_AVATAR_FACTION_NAMES = {
 
 def build_profile_avatar_options() -> List[Dict[str, str]]:
     options: List[Dict[str, str]] = []
-    for faction_code, gender_names in FACTION_AVATAR_NAMES.items():
-        for gender in ("female", "male"):
-            for idx, name in enumerate(gender_names[gender], start=1):
-                options.append({
-                    "id": f"{faction_code}_{gender}_{idx:02d}",
-                    "label": name,
-                    "fullLabel": f"{FACTION_AVATAR_FACTION_NAMES[faction_code]} {name}",
-                    "gender": gender,
-                    "faction_code": faction_code,
-                    "factionCode": faction_code,
-                    "faction": FACTION_AVATAR_FACTION_NAMES[faction_code],
-                    "species": FACTION_AVATAR_SPECIES[faction_code],
-                    "url": f"/assets/factions/{faction_code}/{gender}-{idx:02d}.svg",
-                })
+    for faction_code, avatar_names in FACTION_AVATAR_NAMES.items():
+        for idx, name in enumerate(avatar_names, start=1):
+            options.append({
+                "id": f"{faction_code}_avatar_{idx:02d}",
+                "label": name,
+                "fullLabel": f"{FACTION_AVATAR_FACTION_NAMES[faction_code]} {name}",
+                "gender": "portrait",
+                "faction_code": faction_code,
+                "factionCode": faction_code,
+                "faction": FACTION_AVATAR_FACTION_NAMES[faction_code],
+                "species": FACTION_AVATAR_SPECIES[faction_code],
+                "url": f"/assets/factions/{faction_code}/avatar-{idx:02d}.png",
+            })
     return options
 
 
 PROFILE_AVATAR_OPTIONS: List[Dict[str, str]] = build_profile_avatar_options()
 PROFILE_AVATAR_BY_ID = {a["id"]: a for a in PROFILE_AVATAR_OPTIONS}
 DEFAULT_FACTION_CODE = "solar_accord"
-DEFAULT_AVATAR_ID = "solar_accord_male_01"
+DEFAULT_AVATAR_ID = "solar_accord_avatar_01"
+PROFILE_LEGACY_AVATAR_ID_MAP = {
+    f"{faction_code}_{gender}_{idx:02d}": f"{faction_code}_avatar_{((0 if gender == 'female' else 6) + idx):02d}"
+    for faction_code in FACTION_AVATAR_NAMES
+    for gender in ("female", "male")
+    for idx in range(1, 7)
+}
 
 
 def avatar_options_for_faction_code(faction_code: Optional[str]) -> List[Dict[str, str]]:
@@ -2654,8 +2863,12 @@ NPC_MARKET_BALANCE = {
 # Phase 21 open-world map traffic/resource balance.
 # Map travelers are deterministic simulation traces; intercepts resolve server-side combat.
 CLIENT_RUNTIME_BALANCE = {
-    # UI polling rate. 10 seconds is current default. Lower = more live, higher = cheaper.
-    "state_refresh_seconds": 10,
+    # UI polling rates. Movement is timestamp-backed, so the browser can animate locally
+    # while the server is reserved for authoritative actions and coarse reconciliation.
+    "state_refresh_seconds": 30,
+    "map_refresh_seconds": 20,
+    "battle_alert_poll_ms": 10000,
+    "map_cache_ttl_seconds": PERF_MAP_SNAPSHOT_TTL_SECONDS,
     "clock_tick_seconds": 1,
 }
 
@@ -3161,6 +3374,30 @@ FACTION_WAR_BALANCE = {
     "unowned_galaxy_pirate_aggression_bonus": 22,
 }
 
+TERRITORY_CONTROL_BALANCE = {
+    "batch_seconds": 300,
+    "queued_row_limit": 1200,
+    "per_planet_faction_batch_cap": 140,
+    "contested_threshold": 35,
+    "war_threshold": 100,
+    "control_flip_threshold": 220,
+    "influence_decay_per_batch": 6,
+    "source_amount_caps": {"combat": 18, "mission": 14, "trade": 10, "supply": 22, "planet_control": 10, "bounty": 16},
+    "war_reward_multiplier": 1.25,
+    "war_npc_traffic_bonus": 6,
+    "war_pirate_pressure_bonus": 5,
+    "faction_owned_cost_step_pct": 8,
+    "guild_owned_cost_step_pct": 18,
+    "losing_faction_discount_step_pct": 10,
+    "max_declare_cost_multiplier": 4.0,
+    "min_declare_cost_multiplier": 0.45,
+    "supply_tiers": [
+        {"tier": 1, "points": 60, "label": "Frontline Stores", "buff": {"security": 1, "reward_pct": 2}},
+        {"tier": 2, "points": 160, "label": "Forward Depot", "buff": {"security": 2, "reward_pct": 4, "npc_support": 1}},
+        {"tier": 3, "points": 320, "label": "Fleet Logistics", "buff": {"security": 3, "reward_pct": 7, "npc_support": 2}},
+    ],
+}
+
 _GAME_CONFIG_DEFAULTS: Dict[str, Any] = {}
 
 
@@ -3184,6 +3421,7 @@ def game_config_targets() -> Dict[str, Dict[str, Any]]:
         "PIRATE_STATION_BALANCE": PIRATE_STATION_BALANCE,
         "PARTY_BALANCE": PARTY_BALANCE,
         "FACTION_WAR_BALANCE": FACTION_WAR_BALANCE,
+        "TERRITORY_CONTROL_BALANCE": TERRITORY_CONTROL_BALANCE,
         "PVE_BALANCE": PVE_BALANCE,
         "CRAFTING_BALANCE": CRAFTING_BALANCE,
         "RANKED_CRAFTING_BALANCE": RANKED_CRAFTING_BALANCE,
@@ -3220,6 +3458,7 @@ GAME_CONFIG_DESCRIPTIONS = {
     "PIRATE_STATION_BALANCE": "Scarce pirate station map objectives, enemy count, convergence, escape, and respawn tuning.",
     "PARTY_BALANCE": "Party size, shared XP percentage, and party-system tuning.",
     "FACTION_WAR_BALANCE": "Galaxy faction control, war declaration delay, capture ring, hill timer, cooldowns, weak-faction help, and NPC aggression.",
+    "TERRITORY_CONTROL_BALANCE": "Batched faction territory influence, contested/war thresholds, anti-snowball declaration scaling, and local war-supply buffs.",
     "PVE_BALANCE": "PvE operation risk/reward/timer tuning.",
     "CRAFTING_BALANCE": "Crafting success, XP, cost, and material behavior.",
     "RANKED_CRAFTING_BALANCE": "Basic through Legendary recipe stat/material/time scaling. Legendary is intentionally a high-grind tier.",
@@ -4721,6 +4960,13 @@ def migrate() -> None:
           password_hash TEXT NOT NULL,
           role TEXT NOT NULL DEFAULT 'player',
           god_mode INTEGER NOT NULL DEFAULT 0,
+          email TEXT,
+          google_sub TEXT,
+          google_email TEXT,
+          auth_provider TEXT NOT NULL DEFAULT 'local',
+          google_linked_at TEXT,
+          approved INTEGER NOT NULL DEFAULT 1,
+          last_login_at TEXT,
           created_at TEXT NOT NULL
         );
 
@@ -4729,6 +4975,15 @@ def migrate() -> None:
           user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           created_at TEXT NOT NULL,
           last_seen_at TEXT NOT NULL DEFAULT '',
+          expires_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS pending_google_registrations (
+          token TEXT PRIMARY KEY,
+          google_sub TEXT NOT NULL UNIQUE,
+          google_email TEXT,
+          display_name TEXT,
+          created_at TEXT NOT NULL,
           expires_at TEXT NOT NULL
         );
 
@@ -5807,6 +6062,45 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
           PRIMARY KEY (war_id, player_id)
         );
 
+        CREATE TABLE IF NOT EXISTS territory_control_state (
+          planet_id INTEGER PRIMARY KEY REFERENCES planets(id) ON DELETE CASCADE,
+          controlling_faction_id INTEGER REFERENCES factions(id),
+          status TEXT NOT NULL DEFAULT 'secure',
+          contested_by_faction_id INTEGER REFERENCES factions(id),
+          influence_json TEXT NOT NULL DEFAULT '{}',
+          supply_points INTEGER NOT NULL DEFAULT 0,
+          supply_tier INTEGER NOT NULL DEFAULT 0,
+          zone_buff_json TEXT NOT NULL DEFAULT '{}',
+          war_started_at TEXT,
+          last_processed_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS territory_influence_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+          faction_id INTEGER NOT NULL REFERENCES factions(id),
+          source TEXT NOT NULL,
+          amount INTEGER NOT NULL DEFAULT 0,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'queued',
+          queued_at TEXT NOT NULL,
+          processed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS territory_supply_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          faction_id INTEGER NOT NULL REFERENCES factions(id),
+          item_code TEXT NOT NULL,
+          item_name TEXT NOT NULL,
+          qty INTEGER NOT NULL DEFAULT 0,
+          points INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS map_objects (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           object_key TEXT NOT NULL UNIQUE,
@@ -6294,6 +6588,44 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
           message TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS territory_control_state (
+          planet_id INTEGER PRIMARY KEY REFERENCES planets(id) ON DELETE CASCADE,
+          controlling_faction_id INTEGER REFERENCES factions(id),
+          status TEXT NOT NULL DEFAULT 'secure',
+          contested_by_faction_id INTEGER REFERENCES factions(id),
+          influence_json TEXT NOT NULL DEFAULT '{}',
+          supply_points INTEGER NOT NULL DEFAULT 0,
+          supply_tier INTEGER NOT NULL DEFAULT 0,
+          zone_buff_json TEXT NOT NULL DEFAULT '{}',
+          war_started_at TEXT,
+          last_processed_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS territory_influence_queue (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+          faction_id INTEGER NOT NULL REFERENCES factions(id),
+          source TEXT NOT NULL,
+          amount INTEGER NOT NULL DEFAULT 0,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'queued',
+          queued_at TEXT NOT NULL,
+          processed_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS territory_supply_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          planet_id INTEGER NOT NULL REFERENCES planets(id) ON DELETE CASCADE,
+          player_id INTEGER NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+          faction_id INTEGER NOT NULL REFERENCES factions(id),
+          item_code TEXT NOT NULL,
+          item_name TEXT NOT NULL,
+          qty INTEGER NOT NULL DEFAULT 0,
+          points INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_territory_queue_status ON territory_influence_queue(status, planet_id, faction_id);
+        CREATE INDEX IF NOT EXISTS idx_territory_state_status ON territory_control_state(status, planet_id);
         """
     )
 
@@ -6326,15 +6658,33 @@ def ensure_schema_evolution(conn: sqlite3.Connection) -> None:
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
-    add_cols("users", {"email":"TEXT", "google_sub":"TEXT", "auth_provider":"TEXT NOT NULL DEFAULT 'local'", "approved":"INTEGER NOT NULL DEFAULT 1", "last_login_at":"TEXT"})
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS pending_google_registrations (
+          token TEXT PRIMARY KEY,
+          google_sub TEXT NOT NULL UNIQUE,
+          google_email TEXT,
+          display_name TEXT,
+          created_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        """
+    )
+    add_cols("users", {"email":"TEXT", "google_sub":"TEXT", "google_email":"TEXT", "auth_provider":"TEXT NOT NULL DEFAULT 'local'", "google_linked_at":"TEXT", "approved":"INTEGER NOT NULL DEFAULT 1", "last_login_at":"TEXT"})
     add_cols("sessions", {"last_seen_at":"TEXT NOT NULL DEFAULT ''"})
     add_cols("players", {"cargo_operation_until":"TEXT", "cargo_operation_started_at":"TEXT", "cargo_operation_type":"TEXT", "cargo_operation_summary":"TEXT", "faction_id":"INTEGER", "planet_mission_cooldown_until":"TEXT", "planet_mission_cooldown_reason":"TEXT", "player_base_docked_id":"INTEGER", "scan_area_cooldown_until":"TEXT"})
     add_cols("planet_mission_runs", {"reward_items_json":"TEXT NOT NULL DEFAULT '[]'"})
-    add_cols("guilds", {"level":"INTEGER NOT NULL DEFAULT 1", "xp":"INTEGER NOT NULL DEFAULT 0", "skill_points":"INTEGER NOT NULL DEFAULT 0", "last_planet_xp_at":"TEXT"})
+    add_cols("guilds", {"level":"INTEGER NOT NULL DEFAULT 1", "xp":"INTEGER NOT NULL DEFAULT 0", "skill_points":"INTEGER NOT NULL DEFAULT 0", "last_planet_xp_at":"TEXT", "faction_id":"TEXT"})
     add_cols("user_profiles", {"selected_badge_code":"TEXT NOT NULL DEFAULT ''"})
+    add_cols("app_state", {"updated_at":"TEXT"})
     try:
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL AND google_sub != ''")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_google_registrations_sub ON pending_google_registrations(google_sub)")
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("UPDATE users SET google_email=COALESCE(google_email,email), google_linked_at=COALESCE(google_linked_at,last_login_at,created_at) WHERE google_sub IS NOT NULL AND google_sub != ''")
     except sqlite3.OperationalError:
         pass
 
@@ -6815,6 +7165,7 @@ def local_distance(a: Dict[str, Any], b: Dict[str, Any]) -> float:
 
 
 INTERCEPT_CONTACT_RANGE_PCT = 2.05  # map percent; combat starts when ship circles visually touch, not at radar range.
+INTERCEPT_CONTACT_RANGE_GALAXY_PCT = 1.55
 
 
 ACTION_RANGE_SECONDS = 1.0
@@ -7223,23 +7574,46 @@ def advance_player_galaxy_route(conn: sqlite3.Connection, player: Dict[str, Any]
     return get_player(conn, player["id"])
 
 
-def app_state_put_json(conn: sqlite3.Connection, key: str, value: Dict[str, Any]) -> None:
+def ensure_app_state_table(conn: sqlite3.Connection) -> None:
+    cache_key = ("app_state_table_ready",)
+    if request_cache_get(cache_key):
+        return
     conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    request_cache_set(cache_key, True)
+
+
+def app_state_put_json(conn: sqlite3.Connection, key: str, value: Dict[str, Any]) -> None:
+    ensure_app_state_table(conn)
+    encoded = encode_json(value)
     conn.execute(
         "INSERT INTO app_state (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (key, encode_json(value)),
+        (key, encoded),
     )
+    cache = _REQUEST_CACHE.get()
+    if cache is not None:
+        cache[("app_state_json", str(key))] = dict(value or {})
 
 
 def app_state_get_json(conn: sqlite3.Connection, key: str) -> Dict[str, Any]:
-    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    cache_key = ("app_state_json", str(key))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    ensure_app_state_table(conn)
     found = row(conn, "SELECT value FROM app_state WHERE key=?", (key,))
-    return decode_json(found.get("value"), {}) if found else {}
+    data = decode_json(found.get("value"), {}) if found else {}
+    if not isinstance(data, dict):
+        data = {}
+    request_cache_set(cache_key, dict(data))
+    return data
 
 
 def app_state_delete(conn: sqlite3.Connection, key: str) -> None:
-    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    ensure_app_state_table(conn)
     conn.execute("DELETE FROM app_state WHERE key=?", (key,))
+    cache = _REQUEST_CACHE.get()
+    if cache is not None:
+        cache.pop(("app_state_json", str(key)), None)
 
 
 def galaxy_spawn_immunity_key(actor_ref: str) -> str:
@@ -7524,6 +7898,102 @@ def predict_intercept_solution(conn: sqlite3.Connection, ship: Dict[str, Any], o
     }
 
 
+def intercept_contact_range_pct(map_type: str) -> float:
+    return INTERCEPT_CONTACT_RANGE_GALAXY_PCT if str(map_type or "").lower() == "galaxy" else INTERCEPT_CONTACT_RANGE_PCT
+
+
+def traveler_npc_id_from_ref(target_ref: str) -> Optional[int]:
+    raw = str(target_ref or "")
+    if raw.startswith("traveler:"):
+        raw = raw.split(":", 1)[1]
+    elif raw.startswith("npc:"):
+        raw = raw.split(":", 1)[1]
+    m = re.match(r"(\d+)", raw)
+    return int(m.group(1)) if m else None
+
+
+def current_intercept_target_point(conn: sqlite3.Connection, player: Dict[str, Any], meta: Dict[str, Any], map_type: str, now: Optional[datetime] = None) -> Optional[Dict[str, float]]:
+    now = now or utcnow()
+    target_ref = normalize_traveler_target_ref(str(meta.get("target_ref") or ""))
+    if target_ref.startswith("player:"):
+        try:
+            target_player_id = int(target_ref.split(":", 1)[1])
+        except Exception:
+            return None
+        other = get_player(conn, target_player_id)
+        if not other:
+            return None
+        other_travel = build_travel_state(conn, other)
+        other_map_type = str(other_travel.get("map_type") or ("galaxy" if other_travel.get("mode") in {"galaxy", "galaxy_route"} else "system")).lower()
+        if other_travel.get("active") and other_map_type != str(map_type or "system").lower():
+            return None
+        if str(map_type or "system").lower() == "system":
+            player_scope = current_map_scope(conn, player, "system")
+            other_scope = current_map_scope(conn, other, "system")
+            if int(player_scope.get("galaxy_id") or 0) != int(other_scope.get("galaxy_id") or 0):
+                return None
+        return current_player_map_position(conn, other, map_type)
+
+    npc_id = traveler_npc_id_from_ref(target_ref)
+    if npc_id:
+        scope = current_map_scope(conn, player, map_type)
+        state = row(
+            conn,
+            """SELECT *
+               FROM npc_map_state
+               WHERE npc_id=? AND map_type=? AND galaxy_id=? AND COALESCE(planet_id,0)=?
+               ORDER BY updated_at DESC, id DESC
+               LIMIT 1""",
+            (
+                int(npc_id),
+                str(map_type or "system"),
+                int(scope.get("galaxy_id") or 0),
+                int((scope.get("planet_id") or 0) if str(map_type or "system") == "system" else 0),
+            ),
+        )
+        if state:
+            return npc_state_point_at(dict(state), now)
+
+    velocity = meta.get("target_velocity") if isinstance(meta.get("target_velocity"), dict) else {}
+    started = parse_dt(meta.get("started_at"))
+    if started and meta.get("target_start_x_pct") is not None and meta.get("target_start_y_pct") is not None:
+        elapsed = max(0.0, (now - started).total_seconds())
+        return {
+            "x_pct": clamp_pct(float(meta.get("target_start_x_pct") or 50) + float(velocity.get("x_pct_per_sec") or 0.0) * elapsed, 1, 99),
+            "y_pct": clamp_pct(float(meta.get("target_start_y_pct") or 50) + float(velocity.get("y_pct_per_sec") or 0.0) * elapsed, 1, 99),
+        }
+    if meta.get("x_pct") is not None and meta.get("y_pct") is not None:
+        return {"x_pct": float(meta.get("x_pct") or 50), "y_pct": float(meta.get("y_pct") or 50)}
+    return None
+
+
+def intercept_contact_status(conn: sqlite3.Connection, player: Dict[str, Any], now: Optional[datetime] = None) -> Dict[str, Any]:
+    now = now or utcnow()
+    meta = get_player_intercept(conn, player["id"])
+    if not meta.get("target_ref"):
+        return {"inContact": False, "reason": "missing_target"}
+    map_type = str(meta.get("map_type") or "system").lower()
+    travel = build_travel_state(conn, player)
+    if travel.get("active"):
+        own = current_player_map_position(conn, player, map_type)
+    else:
+        own = {"x_pct": float(meta.get("x_pct") or 50), "y_pct": float(meta.get("y_pct") or 50)}
+    target = current_intercept_target_point(conn, player, meta, map_type, now)
+    if not target:
+        return {"inContact": False, "reason": "target_unavailable", "own": own, "map_type": map_type}
+    distance = pct_distance(own, target)
+    contact_range = intercept_contact_range_pct(map_type)
+    return {
+        "inContact": bool(distance <= contact_range),
+        "distancePct": round(distance, 3),
+        "contactRangePct": contact_range,
+        "own": own,
+        "target": target,
+        "map_type": map_type,
+        "target_ref": meta.get("target_ref"),
+    }
+
+
 def resolve_intercept_if_close(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
     if player.get("travel_mode") != "intercept":
         return player
@@ -7542,23 +8012,16 @@ def resolve_intercept_if_close(conn: sqlite3.Connection, player: Dict[str, Any])
     destination = {"x_pct": float(meta.get("x_pct") or 50), "y_pct": float(meta.get("y_pct") or 50)}
     if not origin_node:
         return player
-    own = map_point_between(origin_node, destination, float(travel.get("progress") or 0))
-    target_point = {"x_pct": float(meta.get("x_pct") or destination["x_pct"]), "y_pct": float(meta.get("y_pct") or destination["y_pct"])}
-    velocity = meta.get("target_velocity") if isinstance(meta.get("target_velocity"), dict) else {}
-    started = parse_dt(meta.get("started_at"))
-    if started and meta.get("target_start_x_pct") is not None and meta.get("target_start_y_pct") is not None:
-        elapsed = max(0.0, (utcnow() - started).total_seconds())
-        target_point = {
-            "x_pct": clamp_pct(float(meta.get("target_start_x_pct") or 50) + float(velocity.get("x_pct_per_sec") or 0.0) * elapsed, 1, 99),
-            "y_pct": clamp_pct(float(meta.get("target_start_y_pct") or 50) + float(velocity.get("y_pct_per_sec") or 0.0) * elapsed, 1, 99),
-        }
-    dist_pct = ((own["x_pct"] - target_point["x_pct"]) ** 2 + (own["y_pct"] - target_point["y_pct"]) ** 2) ** 0.5
-    if dist_pct <= INTERCEPT_CONTACT_RANGE_PCT:
+    contact = intercept_contact_status(conn, player)
+    if contact.get("inContact"):
+        target_point = contact.get("target") or destination
         dest = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("travel_destination_id"),))
         origin = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("travel_origin_planet_id") or player.get("location_planet_id"),))
         if dest:
             meta["x_pct"] = target_point["x_pct"]
             meta["y_pct"] = target_point["y_pct"]
+            meta["contact_distance_pct"] = contact.get("distancePct")
+            meta["contact_range_pct"] = contact.get("contactRangePct")
             set_player_intercept(conn, player["id"], meta)
             return resolve_completed_intercept(conn, player, dest, origin)
     return player
@@ -7652,6 +8115,46 @@ def resolve_completed_intercept(conn: sqlite3.Connection, player: Dict[str, Any]
     return get_player(conn, player["id"])
 
 
+def finish_intercept_without_contact(conn: sqlite3.Connection, player: Dict[str, Any], dest: Dict[str, Any], origin: Optional[Dict[str, Any]], contact: Optional[Dict[str, Any]] = None, action_result: bool = False) -> Dict[str, Any]:
+    meta = get_player_intercept(conn, player["id"])
+    contact = contact or {}
+    battle_x = float((contact.get("own") or {}).get("x_pct") if (contact.get("own") or {}).get("x_pct") is not None else meta.get("x_pct") if meta.get("x_pct") is not None else 50)
+    battle_y = float((contact.get("own") or {}).get("y_pct") if (contact.get("own") or {}).get("y_pct") is not None else meta.get("y_pct") if meta.get("y_pct") is not None else 50)
+    target_name = meta.get("target_name") or meta.get("target_ref") or "the target"
+    distance = contact.get("distancePct")
+    distance_note = f" Closest current separation is {distance}%." if distance is not None else ""
+    message = f"Intercept course reached the plotted point, but {target_name} was no longer in contact range.{distance_note} Replot from your current position."
+
+    clear_player_intercept(conn, player["id"])
+    conn.execute(
+        """UPDATE players
+           SET travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+               travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL, travel_destination_galaxy_id=NULL
+           WHERE id=?""",
+        (player["id"],),
+    )
+    set_player_open_space(conn, player["id"], {
+        "active": True,
+        "map_type": str(meta.get("map_type") or contact.get("map_type") or "system"),
+        "x_pct": battle_x,
+        "y_pct": battle_y,
+        "anchor_planet_id": (dest or {}).get("id") or player.get("travel_destination_id") or player.get("location_planet_id"),
+        "anchor_galaxy_id": (dest or {}).get("galaxy_id") or player.get("travel_destination_galaxy_id") or player.get("travel_origin_galaxy_id"),
+        "arrived_at": iso(),
+        "label": f"Missed intercept near {target_name}",
+    })
+    add_event(
+        conn,
+        player["id"],
+        "combat",
+        message,
+        {"mode": "intercept_missed", "target_ref": meta.get("target_ref"), "x_pct": battle_x, "y_pct": battle_y, "contact": contact},
+    )
+    if action_result:
+        return {"message": message, "mode": "intercept_missed", "target_ref": meta.get("target_ref"), "x_pct": battle_x, "y_pct": battle_y, "contact": contact}
+    return get_player(conn, player["id"])
+
+
 def resolve_completed_travel(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
     t_until = parse_dt(player.get("travel_until"))
     if not t_until or t_until > utcnow() or not player.get("travel_destination_id"):
@@ -7663,7 +8166,18 @@ def resolve_completed_travel(conn: sqlite3.Connection, player: Dict[str, Any]) -
         return get_player(conn, player["id"])
     mode = player.get("travel_mode") or ("galaxy" if origin and int(origin.get("galaxy_id") or 0) != int(dest.get("galaxy_id") or 0) else "local")
     if mode == "intercept":
-        return resolve_completed_intercept(conn, player, dest, origin)
+        contact = intercept_contact_status(conn, player)
+        if contact.get("inContact"):
+            meta = get_player_intercept(conn, player["id"])
+            target_point = contact.get("target") or {}
+            if target_point:
+                meta["x_pct"] = target_point.get("x_pct")
+                meta["y_pct"] = target_point.get("y_pct")
+                meta["contact_distance_pct"] = contact.get("distancePct")
+                meta["contact_range_pct"] = contact.get("contactRangePct")
+                set_player_intercept(conn, player["id"], meta)
+            return resolve_completed_intercept(conn, player, dest, origin)
+        return finish_intercept_without_contact(conn, player, dest, origin, contact)
     if mode == "waypoint":
         return resolve_completed_waypoint(conn, player, dest, origin)
     if mode == "galaxy_route":
@@ -7905,6 +8419,18 @@ def map_stationary_collision_radius(obj: Dict[str, Any]) -> float:
     return MAP_STATIONARY_ICON_RADIUS_PCT
 
 
+def map_icon_is_moving(obj: Dict[str, Any]) -> bool:
+    kind = str(obj.get("kind") or "").lower()
+    action_state = str(obj.get("action_state") or obj.get("npcActionStateRaw") or obj.get("npc_action_state") or "").lower()
+    if obj.get("moving"):
+        return True
+    if action_state:
+        return action_state == "moving"
+    if obj.get("routeStartedAt") and obj.get("routeArrivalAt"):
+        return True
+    return bool(obj.get("active") is True and kind in {"npc", "player", "ship", "self"})
+
+
 def separate_stationary_map_objects(groups: List[List[Dict[str, Any]]], iterations: int = 40) -> None:
     """Move stationary display points just enough that icons touch instead of covering each other."""
     items: List[Dict[str, Any]] = []
@@ -7912,7 +8438,7 @@ def separate_stationary_map_objects(groups: List[List[Dict[str, Any]]], iteratio
         for obj in group or []:
             if not obj:
                 continue
-            if obj.get("moving") or obj.get("active") is True and str(obj.get("kind") or "") in {"npc", "player", "ship"}:
+            if map_icon_is_moving(obj):
                 continue
             if obj.get("x_pct") is None or obj.get("y_pct") is None:
                 continue
@@ -7941,7 +8467,8 @@ def separate_stationary_map_objects(groups: List[List[Dict[str, Any]]], iteratio
                 if dist >= target:
                     continue
                 if dist <= 0.0001:
-                    seed = hash(str(a.get("id") or a.get("objectKey") or a.get("name")) + str(b.get("id") or b.get("objectKey") or b.get("name")))
+                    seed_source = f"{a.get('kind')}:{a.get('id') or a.get('objectKey') or a.get('name')}|{b.get('kind')}:{b.get('id') or b.get('objectKey') or b.get('name')}"
+                    seed = int(hashlib.sha1(seed_source.encode("utf-8")).hexdigest()[:8], 16)
                     angle = (seed % 360) * math.pi / 180.0
                     dx = math.cos(angle) * 0.01
                     dy = math.sin(angle) * 0.01
@@ -9180,6 +9707,8 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
                 member_planet = row(conn, "SELECT galaxy_id FROM planets WHERE id=?", (other.get("location_planet_id"),)) or {}
                 if int(member_planet.get("galaxy_id") or 0) != int(current_scope.get("galaxy_id") or 0):
                     continue
+            other_travel = build_travel_state(conn, other)
+            other_travel = build_travel_state(conn, other)
             pt = current_player_map_position(conn, other, map_type)
             other_ref = f"player:{other['id']}"
             other_faction = player_faction(conn, other) or {}
@@ -9189,6 +9718,7 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
                 "combatTargetRef": other_ref,
                 "kind": "player",
                 "role": "party_member",
+                "moving": bool(other_travel.get("active")),
                 "partyMember": True,
                 "friendly": True,
                 "attackable": False,
@@ -9250,6 +9780,7 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
                 "combatTargetRef": ref,
                 "kind": "player",
                 "role": "active_battle",
+                "moving": bool(other_travel.get("active")),
                 "activeBattle": True,
                 "activeBattleId": battle_id,
                 "attackable": not other_immune,
@@ -9304,11 +9835,13 @@ def build_open_world_traffic(conn: sqlite3.Connection, player: Dict[str, Any], m
         other_ref = f"player:{other['id']}"
         other_immune = combat_actor_is_immune(conn, other_ref)
         other_faction = player_faction(conn, other) or {}
-        traffic.append({"id":other_ref, "combatTargetRef":other_ref, "kind":"player", "userId":other.get("user_id"), "playerId":other.get("id"), "profileUserId":other.get("user_id"), "avatarId":other.get("avatar_id"), "selectedBadgeCode":other.get("selected_badge_code"), "playerFactionId": int(other_faction.get("id") or 0), "playerFactionColor": other_faction.get("color"), "name":other.get("display_name") or other.get("username") or "Player", "role":"player", "from":o["id"], "to":d["id"], "progress":round(float(tv.get("progress") or 0)*100,1), **pt, "attackable":not other_immune, "blockedReason":"Battle locked / temporary immunity" if other_immune else "", "label":"Player in transit. Intercept happens in open space without planetary defense."})
+        traffic.append({"id":other_ref, "combatTargetRef":other_ref, "kind":"player", "moving":True, "userId":other.get("user_id"), "playerId":other.get("id"), "profileUserId":other.get("user_id"), "avatarId":other.get("avatar_id"), "selectedBadgeCode":other.get("selected_badge_code"), "playerFactionId": int(other_faction.get("id") or 0), "playerFactionColor": other_faction.get("color"), "name":other.get("display_name") or other.get("username") or "Player", "role":"player", "from":o["id"], "to":d["id"], "progress":round(float(tv.get("progress") or 0)*100,1), **pt, "routeOriginX": float(tv.get("origin_x_pct") if tv.get("origin_x_pct") is not None else o.get("x_pct") or pt.get("x_pct") or 50), "routeOriginY": float(tv.get("origin_y_pct") if tv.get("origin_y_pct") is not None else o.get("y_pct") or pt.get("y_pct") or 50), "routeDestinationX": float(tv.get("destination_x_pct") if tv.get("destination_x_pct") is not None else d.get("x_pct") or pt.get("x_pct") or 50), "routeDestinationY": float(tv.get("destination_y_pct") if tv.get("destination_y_pct") is not None else d.get("y_pct") or pt.get("y_pct") or 50), "routeStartedAt": tv.get("started_at"), "routeArrivalAt": tv.get("arrival_at"), "attackable":not other_immune, "blockedReason":"Battle locked / temporary immunity" if other_immune else "", "label":"Player in transit. Intercept happens in open space without planetary defense."})
 
     # Persistent NPC traffic is server-side and DB-backed. NPCs move to an objective,
     # perform a short action there, then pick a new objective from their current position.
     max_count = OPEN_WORLD_BALANCE["galaxy_npc_traffic"] if map_type == "galaxy" else OPEN_WORLD_BALANCE["system_npc_traffic"]
+    if map_type == "system":
+        max_count = int(max_count) + min(int(TERRITORY_CONTROL_BALANCE.get("war_npc_traffic_bonus", 6)), territory_war_pressure_for_galaxy(conn, int(current_scope.get("galaxy_id") or 0)))
     traffic.extend(build_persistent_npc_traffic(conn, player, map_type, nodes, by_id, radar_objects, traffic, max_count))
     traffic = [t for t in traffic if t.get("id") != "player:self" and t.get("kind") != "self"]
     party_count = len([t for t in traffic if t.get("partyMember")])
@@ -9938,7 +10471,8 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             LEFT JOIN planets p ON p.id=n.planet_id
             WHERE p.galaxy_id=? AND COALESCE(n.alive,1)=1 AND COALESCE(n.simulated,1)=2
         """, (gid,)) or 0)
-        max_count = min(int(max_count or 0), max(PERF_ACTIVE_SYSTEM_NPC_LIMIT, min(80, admin_spawned_count)))
+        war_bonus = min(int(TERRITORY_CONTROL_BALANCE.get("war_npc_traffic_bonus", 6)), territory_war_pressure_for_galaxy(conn, gid))
+        max_count = min(int(max_count or 0), max(PERF_ACTIVE_SYSTEM_NPC_LIMIT + war_bonus, min(80, admin_spawned_count + war_bonus)))
     else:
         max_count = int(max_count or 0)
     if max_count <= 0:
@@ -10091,6 +10625,14 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "ship": [t for t in (traffic_so_far + out + ([player_contact] if npc_should_attack_player_contact(npc, player_contact) else [])) if t.get("id") != "player:self" and pct_distance(pt, t) <= radar_range],
         }
         hostile = role_l in COMBAT_LEGAL_ROLES or int(npc.get("aggression") or 0) > 70 or state.get("objective") in {"pirate_intercept"}
+        nearest_node = min(nodes, key=lambda n: pct_distance(pt, n)) if nodes else {}
+        zone_status = str((nearest_node or {}).get("territory_status") or "secure")
+        war_zone_contact = map_type == "system" and zone_status in {"war", "contested"} and pct_distance(pt, nearest_node or pt) <= 16
+        is_pirate = role_l in {"pirate", "raider", "corsair"} or "pirate" in role_l
+        war_reinforcement = bool(war_zone_contact and (role_l == "faction_patrol" or str(npc.get("career_code") or "").lower() == "faction_patrol"))
+        pirate_exploiting_war = bool(war_zone_contact and is_pirate)
+        if pirate_exploiting_war:
+            hostile = True
         traveler_id = f"traveler:{npc_id}:{map_type}"
         npc_active_battle = bool(combat_actor_active_battle(conn, f"npc:{npc_id}") or combat_actor_active_battle(conn, traveler_id))
         npc_recent_battle = bool(npc_id in pinned_npc_ids)
@@ -10099,6 +10641,7 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "id": traveler_id,
             "combatTargetRef": traveler_id,
             "kind": "npc",
+            "moving": bool(state.get("action_state") == "moving"),
             "name": npc.get("name") or f"NPC {label_for_api(role)}",
             "role": role,
             "progress": round(progress * 100, 1),
@@ -10126,6 +10669,10 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "attackable": not npc_combat_locked,
             "blockedReason": "Battle locked / temporary immunity" if npc_combat_locked else "",
             "hostile": hostile,
+            "atWar": bool(war_reinforcement or pirate_exploiting_war),
+            "warTarget": bool(war_zone_contact),
+            "territoryWarNpc": bool(war_reinforcement),
+            "pirateExploitingWar": bool(pirate_exploiting_war),
             "npcRadarRangePct": radar_range,
             "npcDetectedCount": sum(len(v) for v in visible.values()),
             "npcRadarBehavior": objective_state,
@@ -10135,9 +10682,9 @@ def build_persistent_npc_traffic(conn: sqlite3.Connection, player: Dict[str, Any
             "npcObjectiveTargetName": cargo_meta.get("objectiveTargetName"),
             "npcVisibleCounts": {k: len(v) for k, v in visible.items()},
             "adminSpawned": admin_spawned,
-            "selectedSummary": f"{label_for_api(role)} is {objective_state}: {objective_label}. Target: {cargo_meta.get('objectiveTargetName') or 'open space'}. Position and action state are DB-backed.",
+            "selectedSummary": f"{label_for_api(role)} is {objective_state}: {objective_label}. Target: {cargo_meta.get('objectiveTargetName') or 'open space'}. {'War-zone reinforcement.' if war_reinforcement else 'Pirates are exploiting the war zone.' if pirate_exploiting_war else 'Position and action state are DB-backed.'}",
             "outcomeFactors": "NPC state is persisted in npc_map_state. NPCs move, work at objectives, update objects, then choose a new objective.",
-            "label": f"{objective_label}: {objective_state}.",
+            "label": f"{'War-zone reinforcement' if war_reinforcement else 'Pirates exploiting war zone' if pirate_exploiting_war else objective_label}: {objective_state}.",
         })
     return out[:max_count]
 
@@ -10165,6 +10712,12 @@ FACTION_SEED_DEFS = [
     {"code": "iron_meridian", "name": "Iron Meridian", "color": "grey", "home_galaxy_code": "meridian", "description": "Synthetic compact built around shipyards, mining, armored logistics, and hard-border control."},
     {"code": "umbral_veil", "name": "Umbral Veil", "color": "purple", "home_galaxy_code": "nyx", "description": "Voidborne alien freeholds of bioluminescent scouts, intelligence brokers, smugglers, and deep-space mystics."},
 ]
+
+FACTION_HOME_PLANET_CODES = {
+    "solar_accord": "solaria",
+    "iron_meridian": "meridianprime",
+    "umbral_veil": "umbra",
+}
 
 GALAXY_EXPANSION_SEED = [
     # code, name, sector, color, desc, x, y, faction, home_depth, capturable
@@ -11721,7 +12274,7 @@ def active_planet_mission(conn: sqlite3.Connection, player_id: int) -> Optional[
     return mission
 
 
-def resolve_completed_planet_missions(conn: sqlite3.Connection, player_id: int) -> List[Dict[str, Any]]:
+def resolve_completed_planet_missions(conn: sqlite3.Connection, player_id: int, record_guild: bool = True) -> List[Dict[str, Any]]:
     completed = []
     now = utcnow()
     for m in rows(conn, "SELECT * FROM planet_mission_runs WHERE player_id=? AND status='active' AND completes_at<=?", (player_id, iso(now))):
@@ -11752,13 +12305,20 @@ def resolve_completed_planet_missions(conn: sqlite3.Connection, player_id: int) 
             (personal_xp, encode_json(reward_items), iso(now), f"Mission complete. Recovered {reward_text}.{suffix}", m["id"])
         )
         grant_action_progression(conn, player_id, "planet_mission", 1.0 + new_level / 10, True)
+        if record_guild:
+            nova_safe_record_guild_contribution(conn, player_id, "mission", max(50, personal_xp + item_value // 10), 1, "planet_mission_complete", {"missionId": m["id"], "missionKey": m["mission_key"], "planetId": m["planet_id"], "personalXp": personal_xp, "itemValue": item_value})
         add_event(conn, player_id, "planet_mission", f"Completed {m.get('mission_name')} on planet mission level {new_level}.", {"missionId": m["id"], "items": reward_items, "personalXp": personal_xp, "missionXp": xp_gain, "level": new_level, "cooldownMinutes": cooldown_minutes})
+        emit_player_metrics(conn, player_id, {
+            "missions_completed": 1,
+            "mission_reward_value": item_value,
+        }, planet_id=m["planet_id"], metadata={"action": "planet_mission", "mission_id": m["id"], "mission_key": m.get("mission_key"), "mission_name": m.get("mission_name"), "level": new_level, "xp": personal_xp})
+        queue_territory_influence(conn, player_id, m["planet_id"], "mission", max(2, 5 + new_level // 2), {"mission_id": m["id"], "mission_key": m.get("mission_key"), "level": new_level})
         completed.append({"id": m["id"], "items": reward_items, "personalXp": personal_xp, "level": new_level, "name": m.get("mission_name"), "cooldown": cooldown})
     return completed
 
 
 def build_planet_missions_state(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
-    resolve_completed_planet_missions(conn, int(player["id"]))
+    resolve_completed_planet_missions(conn, int(player["id"]), record_guild=False)
     planet = row(conn, "SELECT p.*, g.name as galaxy_name FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player["location_planet_id"],))
     active = active_planet_mission(conn, int(player["id"]))
     contracts = mission_contracts_for_planet(conn, player, planet) if planet else []
@@ -11982,6 +12542,346 @@ def player_faction_code(conn: sqlite3.Connection, player: Dict[str, Any]) -> str
     return str((faction or {}).get("code") or DEFAULT_FACTION_CODE)
 
 
+def territory_tables_ready(conn: sqlite3.Connection) -> bool:
+    try:
+        return bool(scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='territory_control_state'"))
+    except Exception:
+        return False
+
+
+def territory_influence_map(value: Any) -> Dict[int, int]:
+    raw = decode_json(value, {}) if isinstance(value, str) else (value or {})
+    out: Dict[int, int] = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                fid = int(k)
+                amt = int(v or 0)
+                if fid > 0 and amt > 0:
+                    out[fid] = amt
+            except Exception:
+                continue
+    return out
+
+
+def territory_supply_tier(points: int) -> Dict[str, Any]:
+    best = {"tier": 0, "points": 0, "label": "Unstocked", "buff": {}}
+    for tier in TERRITORY_CONTROL_BALANCE.get("supply_tiers", []):
+        if int(points or 0) >= int(tier.get("points") or 0):
+            best = tier
+    return dict(best)
+
+
+def ensure_territory_state_for_planet(conn: sqlite3.Connection, planet: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not planet or not territory_tables_ready(conn):
+        return None
+    now = iso()
+    controlling_faction_id = int(planet.get("faction_id") or 0) or None
+    conn.execute(
+        """
+        INSERT INTO territory_control_state
+          (planet_id, controlling_faction_id, status, contested_by_faction_id, influence_json, supply_points, supply_tier, zone_buff_json, war_started_at, last_processed_at, updated_at)
+        VALUES (?, ?, 'secure', NULL, '{}', 0, 0, '{}', NULL, NULL, ?)
+        ON CONFLICT(planet_id) DO NOTHING
+        """,
+        (int(planet["id"]), controlling_faction_id, now),
+    )
+    state = row(conn, "SELECT * FROM territory_control_state WHERE planet_id=?", (int(planet["id"]),))
+    if state and str(state.get("status") or "secure") == "secure" and int(state.get("controlling_faction_id") or 0) != int(controlling_faction_id or 0):
+        conn.execute("UPDATE territory_control_state SET controlling_faction_id=?, updated_at=? WHERE planet_id=?", (controlling_faction_id, now, int(planet["id"])))
+        state = row(conn, "SELECT * FROM territory_control_state WHERE planet_id=?", (int(planet["id"]),))
+    return state
+
+
+def territory_state_for_planet(conn: sqlite3.Connection, planet_id: Optional[int]) -> Optional[Dict[str, Any]]:
+    if not planet_id or not territory_tables_ready(conn):
+        return None
+    planet = row(conn, "SELECT * FROM planets WHERE id=?", (int(planet_id),))
+    if not planet:
+        return None
+    return ensure_territory_state_for_planet(conn, planet)
+
+
+def territory_states_for_galaxy(conn: sqlite3.Connection, galaxy_id: int) -> List[Dict[str, Any]]:
+    if not territory_tables_ready(conn):
+        return []
+    for p in rows(conn, "SELECT * FROM planets WHERE galaxy_id=?", (int(galaxy_id),)):
+        ensure_territory_state_for_planet(conn, p)
+    return rows(conn, """
+        SELECT t.*, p.name AS planet_name, p.galaxy_id, p.faction_id AS planet_faction_id
+        FROM territory_control_state t
+        JOIN planets p ON p.id=t.planet_id
+        WHERE p.galaxy_id=?
+        ORDER BY t.status DESC, p.name
+    """, (int(galaxy_id),))
+
+
+def faction_planet_owner_counts(conn: sqlite3.Connection) -> Dict[int, int]:
+    return {int(r["faction_id"]): int(r["count"]) for r in rows(conn, "SELECT faction_id, COUNT(*) as count FROM planets WHERE faction_id IS NOT NULL GROUP BY faction_id")}
+
+
+def territory_declare_cost_multiplier(conn: sqlite3.Connection, faction_id: Optional[int], guild_id: Optional[int] = None) -> float:
+    balance = TERRITORY_CONTROL_BALANCE
+    counts = faction_planet_owner_counts(conn)
+    owned_by_faction = int(counts.get(int(faction_id or 0), 0))
+    owned_by_guild = guild_owned_planet_count(conn, int(guild_id or 0)) if guild_id else 0
+    mult = 1.0
+    mult += owned_by_faction * (float(balance.get("faction_owned_cost_step_pct", 8)) / 100.0)
+    mult += owned_by_guild * (float(balance.get("guild_owned_cost_step_pct", 18)) / 100.0)
+    if faction_id and counts:
+        leader = max(counts.values() or [0])
+        gap = max(0, leader - owned_by_faction)
+        mult -= gap * (float(balance.get("losing_faction_discount_step_pct", 10)) / 100.0)
+    return max(float(balance.get("min_declare_cost_multiplier", 0.45)), min(float(balance.get("max_declare_cost_multiplier", 4.0)), mult))
+
+
+def territory_faction_batch_scale(conn: sqlite3.Connection, faction_id: int) -> float:
+    counts = faction_planet_owner_counts(conn)
+    owned = int(counts.get(int(faction_id), 0))
+    leader = max(counts.values() or [owned])
+    gap = max(0, leader - owned)
+    weak_bonus = weak_faction_capture_bonus(conn, int(faction_id)) / 100.0
+    expansion_drag = min(0.65, owned * 0.018)
+    catchup = min(0.28, gap * 0.045)
+    return max(0.35, 1.0 + weak_bonus + catchup - expansion_drag)
+
+
+def queue_territory_influence(conn: sqlite3.Connection, player_id: int, planet_id: Optional[int], source: str, amount: int, metadata: Optional[Dict[str, Any]] = None, player: Optional[Dict[str, Any]] = None) -> None:
+    if not planet_id or int(amount or 0) <= 0 or not territory_tables_ready(conn):
+        return
+    player_row = player or row(conn, "SELECT * FROM players WHERE id=?", (int(player_id),))
+    faction = player_faction(conn, player_row) if player_row else None
+    if not faction:
+        return
+    planet = row(conn, "SELECT * FROM planets WHERE id=?", (int(planet_id),))
+    if not planet:
+        return
+    ensure_territory_state_for_planet(conn, planet)
+    source_key = str(source or "activity").lower()
+    cap = int((TERRITORY_CONTROL_BALANCE.get("source_amount_caps") or {}).get(source_key, 8))
+    safe_amount = max(1, min(cap, int(amount or 0)))
+    meta = dict(metadata or {})
+    meta.setdefault("source", source_key)
+    conn.execute(
+        """
+        INSERT INTO territory_influence_queue (planet_id, player_id, faction_id, source, amount, metadata_json, status, queued_at, processed_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, NULL)
+        """,
+        (int(planet_id), int(player_id), int(faction["id"]), source_key, safe_amount, encode_json(meta), iso()),
+    )
+    metric_meta = {"action": "territory_influence", "source": source_key, **meta}
+    emit_player_metric(conn, int(player_id), "planet_influence_gained", safe_amount, player=player_row, planet_id=int(planet_id), metadata=metric_meta)
+    state = territory_state_for_planet(conn, int(planet_id))
+    if state and str(state.get("status") or "") in {"contested", "war"}:
+        emit_player_metric(conn, int(player_id), "war_participation_score", safe_amount, player=player_row, planet_id=int(planet_id), metadata=metric_meta)
+
+
+def process_territory_influence(conn: sqlite3.Connection, force: bool = False) -> int:
+    if not territory_tables_ready(conn):
+        return 0
+    conn.execute("CREATE TABLE IF NOT EXISTS app_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    now = utcnow()
+    last_row = row(conn, "SELECT value FROM app_state WHERE key='territory_influence_last_batch_at'")
+    last = parse_dt(last_row.get("value")) if last_row else None
+    interval = int(TERRITORY_CONTROL_BALANCE.get("batch_seconds", 300))
+    if not force and last and (now - last).total_seconds() < interval:
+        return 0
+    conn.execute("INSERT INTO app_state (key,value) VALUES ('territory_influence_last_batch_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (iso(now),))
+    queued = rows(conn, """
+        SELECT q.*, p.galaxy_id, p.faction_id AS current_faction_id
+        FROM territory_influence_queue q
+        JOIN planets p ON p.id=q.planet_id
+        WHERE q.status='queued'
+        ORDER BY q.id
+        LIMIT ?
+    """, (int(TERRITORY_CONTROL_BALANCE.get("queued_row_limit", 1200)),))
+    if not queued:
+        return 0
+    grouped: Dict[Tuple[int, int], int] = {}
+    players_by_group: Dict[Tuple[int, int], List[int]] = {}
+    for q in queued:
+        key = (int(q["planet_id"]), int(q["faction_id"]))
+        grouped[key] = grouped.get(key, 0) + int(q.get("amount") or 0)
+        if q.get("player_id"):
+            players_by_group.setdefault(key, []).append(int(q["player_id"]))
+    processed_planets = 0
+    batch_cap = int(TERRITORY_CONTROL_BALANCE.get("per_planet_faction_batch_cap", 140))
+    decay = int(TERRITORY_CONTROL_BALANCE.get("influence_decay_per_batch", 6))
+    for planet_id in sorted({k[0] for k in grouped}):
+        planet = row(conn, "SELECT * FROM planets WHERE id=?", (planet_id,))
+        if not planet:
+            continue
+        state = ensure_territory_state_for_planet(conn, planet) or {}
+        influence = territory_influence_map(state.get("influence_json"))
+        touched_factions = {fid for (pid, fid), amt in grouped.items() if pid == planet_id and amt > 0}
+        for fid in list(influence.keys()):
+            if fid not in touched_factions:
+                influence[fid] = max(0, int(influence.get(fid, 0)) - decay)
+                if influence[fid] <= 0:
+                    influence.pop(fid, None)
+        for fid in touched_factions:
+            raw = min(batch_cap, int(grouped.get((planet_id, fid), 0)))
+            effective = max(1, int(raw * territory_faction_batch_scale(conn, fid)))
+            influence[fid] = max(0, int(influence.get(fid, 0)) + effective)
+        controller = int(planet.get("faction_id") or state.get("controlling_faction_id") or 0)
+        challenger_id = 0
+        challenger_score = 0
+        for fid, score in influence.items():
+            if int(fid) != controller and int(score) > challenger_score:
+                challenger_id = int(fid)
+                challenger_score = int(score)
+        defender_score = int(influence.get(controller, 0)) if controller else 0
+        status = "secure"
+        war_started_at = state.get("war_started_at")
+        if challenger_id and challenger_score >= int(TERRITORY_CONTROL_BALANCE.get("war_threshold", 100)):
+            status = "war"
+            if str(state.get("status") or "") != "war":
+                war_started_at = iso(now)
+                conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (planet_id, "territory_war", "Faction war office", f"{planet.get('name') or 'A planet'} has entered WAR state.", encode_json({"severity":"danger", "challengerFactionId": challenger_id}), iso(now)))
+        elif challenger_id and challenger_score >= int(TERRITORY_CONTROL_BALANCE.get("contested_threshold", 35)):
+            status = "contested"
+        flip_threshold = int(TERRITORY_CONTROL_BALANCE.get("control_flip_threshold", 220))
+        if status == "war" and challenger_id and challenger_score >= flip_threshold and challenger_score >= defender_score + int(TERRITORY_CONTROL_BALANCE.get("war_threshold", 100)):
+            old_controller = controller
+            conn.execute("UPDATE planets SET faction_id=?, controller_type='npc', controller_id=NULL, war_cooldown_until=?, attack_cooldown_until=? WHERE id=?", (challenger_id, iso(now + timedelta(hours=6)), iso(now + timedelta(hours=6)), planet_id))
+            influence = {old_controller: int(flip_threshold * 0.2)} if old_controller else {}
+            controller = challenger_id
+            challenger_id = None
+            status = "secure"
+            war_started_at = None
+            sync_galaxy_control_from_planets(conn, int(planet.get("galaxy_id") or 0))
+            conn.execute("INSERT INTO npc_action_log (planet_id,action_type,actor_name,message,impact_json,created_at) VALUES (?,?,?,?,?,?)", (planet_id, "territory_flip", "Faction war office", f"{planet.get('name') or 'A planet'} changed faction control.", encode_json({"severity":"danger", "winnerFactionId": controller, "oldFactionId": old_controller}), iso(now)))
+        conn.execute(
+            """
+            UPDATE territory_control_state
+            SET controlling_faction_id=?, status=?, contested_by_faction_id=?, influence_json=?, war_started_at=?, last_processed_at=?, updated_at=?
+            WHERE planet_id=?
+            """,
+            (controller or None, status, challenger_id or None, encode_json({str(k): int(v) for k, v in influence.items() if int(v) > 0}), war_started_at, iso(now), iso(now), planet_id),
+        )
+        processed_planets += 1
+    ids = [int(q["id"]) for q in queued]
+    if ids:
+        placeholders = ",".join(["?"] * len(ids))
+        conn.execute(f"UPDATE territory_influence_queue SET status='processed', processed_at=? WHERE id IN ({placeholders})", tuple([iso(now), *ids]))
+    return processed_planets
+
+
+def territory_zone_modifier(conn: sqlite3.Connection, planet_id: Optional[int]) -> Dict[str, Any]:
+    state = territory_state_for_planet(conn, int(planet_id or 0)) if planet_id else None
+    if not state:
+        return {"status": "secure", "war": False, "multiplier": 1.0, "buff": {}, "tier": 0}
+    status = str(state.get("status") or "secure")
+    buff = decode_json(state.get("zone_buff_json"), {}) or {}
+    mult = 1.0
+    if status == "war":
+        mult *= float(TERRITORY_CONTROL_BALANCE.get("war_reward_multiplier", 1.25))
+    mult *= 1.0 + (float(buff.get("reward_pct") or 0) / 100.0)
+    return {"status": status, "war": status == "war", "multiplier": mult, "buff": buff, "tier": int(state.get("supply_tier") or 0)}
+
+
+def territory_war_pressure_for_galaxy(conn: sqlite3.Connection, galaxy_id: int) -> int:
+    if not territory_tables_ready(conn):
+        return 0
+    wars = int(scalar(conn, "SELECT COUNT(*) FROM territory_control_state t JOIN planets p ON p.id=t.planet_id WHERE p.galaxy_id=? AND t.status='war'", (int(galaxy_id),)) or 0)
+    contested = int(scalar(conn, "SELECT COUNT(*) FROM territory_control_state t JOIN planets p ON p.id=t.planet_id WHERE p.galaxy_id=? AND t.status='contested'", (int(galaxy_id),)) or 0)
+    return wars * int(TERRITORY_CONTROL_BALANCE.get("war_npc_traffic_bonus", 6)) + contested * 2
+
+
+def build_territory_control_state(conn: sqlite3.Connection, player: Dict[str, Any], planet: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    planet = planet or row(conn, "SELECT * FROM planets WHERE id=?", (player.get("location_planet_id"),))
+    if not planet or not territory_tables_ready(conn):
+        return {"status": "secure", "available": False}
+    state = ensure_territory_state_for_planet(conn, planet) or {}
+    faction = player_faction(conn, player)
+    influence = territory_influence_map(state.get("influence_json"))
+    supply_tier = territory_supply_tier(int(state.get("supply_points") or 0))
+    if int(state.get("supply_tier") or 0) != int(supply_tier.get("tier") or 0):
+        conn.execute("UPDATE territory_control_state SET supply_tier=?, zone_buff_json=?, updated_at=? WHERE planet_id=?", (int(supply_tier.get("tier") or 0), encode_json(supply_tier.get("buff") or {}), iso(), int(planet["id"])))
+        state = row(conn, "SELECT * FROM territory_control_state WHERE planet_id=?", (int(planet["id"]),)) or state
+    galaxy_war_count = int(scalar(conn, "SELECT COUNT(*) FROM territory_control_state t JOIN planets p ON p.id=t.planet_id WHERE p.galaxy_id=? AND t.status IN ('war','contested')", (int(planet["galaxy_id"]),)) or 0)
+    own_zone = faction and int(planet.get("faction_id") or 0) == int(faction["id"])
+    eligible = bool(own_zone and (str(state.get("status") or "secure") in {"war", "contested"} or galaxy_war_count > 0))
+    candidates = []
+    if eligible:
+        for inv in rows(conn, "SELECT item_code,name,item_type,category,qty,reserved_qty,base_value,mass,current_tier,craftable_material FROM inventory WHERE player_id=? AND qty>0 ORDER BY category, name LIMIT 60", (int(player["id"]),)):
+            available = max(0, int(inv.get("qty") or 0) - int(inv.get("reserved_qty") or 0))
+            category = str(inv.get("category") or "")
+            item_type = str(inv.get("item_type") or "")
+            if available <= 0:
+                continue
+            if category not in {"raw_materials", "crafting_materials", "refined_materials", "salvage", "goods"} and item_type not in {"ore", "gas", "crystal", "material", "component", "salvage", "scrap"} and not int(inv.get("craftable_material") or 0):
+                continue
+            candidates.append({"item_code": inv["item_code"], "name": inv["name"], "available_qty": available, "tier": int(inv.get("current_tier") or 1), "points_each": territory_supply_points_for_item(inv)})
+            if len(candidates) >= 8:
+                break
+    return {
+        "available": True,
+        "planet_id": int(planet["id"]),
+        "status": str(state.get("status") or "secure"),
+        "controlling_faction_id": int(state.get("controlling_faction_id") or planet.get("faction_id") or 0) or None,
+        "contested_by_faction_id": int(state.get("contested_by_faction_id") or 0) or None,
+        "influence": [{"faction_id": fid, "amount": amt} for fid, amt in sorted(influence.items(), key=lambda kv: kv[1], reverse=True)[:5]],
+        "supply": {
+            "points": int(state.get("supply_points") or 0),
+            "tier": int(state.get("supply_tier") or 0),
+            "label": supply_tier.get("label"),
+            "buff": decode_json(state.get("zone_buff_json"), {}) or supply_tier.get("buff") or {},
+            "eligible": eligible,
+            "items": candidates,
+        },
+        "batch_seconds": int(TERRITORY_CONTROL_BALANCE.get("batch_seconds", 300)),
+        "galaxy_active_zones": galaxy_war_count,
+    }
+
+
+def territory_supply_points_for_item(item: Dict[str, Any]) -> int:
+    tier = clamp_int(item.get("current_tier") or item.get("tier") or 1, 1, 10)
+    value = max(0, int(item.get("base_value") or 0))
+    category = str(item.get("category") or item.get("item_type") or "")
+    category_bonus = 2 if category in {"crafting_materials", "refined_materials", "salvage"} else 1
+    return clamp_int(1 + tier + value // 500 + category_bonus, 1, 14)
+
+
+def run_territory_supply_delivery(conn: sqlite3.Connection, player: Dict[str, Any], item_code: str, qty: int, god: bool = False) -> Dict[str, Any]:
+    planet = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("location_planet_id"),))
+    if not planet:
+        raise HTTPException(404, "Planet not found")
+    faction = player_faction(conn, player)
+    if not faction:
+        raise HTTPException(400, "Faction required")
+    state_payload = build_territory_control_state(conn, player, planet)
+    if not state_payload.get("supply", {}).get("eligible") and not god:
+        raise HTTPException(400, "War supplies must be delivered to a faction-owned planet in a contested or war galaxy.")
+    item_code = str(item_code or "").strip()
+    qty = clamp_int(qty or 1, 1, 500)
+    inv = row(conn, "SELECT * FROM inventory WHERE player_id=? AND item_code=?", (int(player["id"]), item_code))
+    if not inv:
+        raise HTTPException(404, "Supply item not found")
+    available = max(0, int(inv.get("qty") or 0) - int(inv.get("reserved_qty") or 0))
+    if available < qty and not god:
+        raise HTTPException(400, "Not enough available supply material")
+    points_each = territory_supply_points_for_item(inv)
+    points = points_each * qty
+    if not god:
+        remove_inventory_item(conn, int(player["id"]), item_code, qty)
+    state = territory_state_for_planet(conn, int(planet["id"])) or {}
+    new_points = int(state.get("supply_points") or 0) + points
+    tier = territory_supply_tier(new_points)
+    conn.execute(
+        "UPDATE territory_control_state SET supply_points=?, supply_tier=?, zone_buff_json=?, updated_at=? WHERE planet_id=?",
+        (new_points, int(tier.get("tier") or 0), encode_json(tier.get("buff") or {}), iso(), int(planet["id"])),
+    )
+    conn.execute(
+        "INSERT INTO territory_supply_deliveries (planet_id,player_id,faction_id,item_code,item_name,qty,points,created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (int(planet["id"]), int(player["id"]), int(faction["id"]), item_code, inv.get("name") or item_code, qty, points, iso()),
+    )
+    queue_territory_influence(conn, int(player["id"]), int(planet["id"]), "supply", max(1, points // 12), {"item": item_code, "qty": qty, "points": points}, player=player)
+    emit_player_metric(conn, int(player["id"]), "war_participation_score", max(1, points // 6), player=player, planet_id=int(planet["id"]), metadata={"action": "territory_supply_delivery", "item": item_code, "qty": qty, "points": points})
+    add_event(conn, int(player["id"]), "territory_supply", f"Delivered {qty}x {inv.get('name') or item_code} to {planet.get('name')} for {points} war supply points.", {"planetId": int(planet["id"]), "points": points, "supplyTier": tier})
+    return {"message": f"Delivered {qty}x {inv.get('name') or item_code}. {planet.get('name')} supply tier is now {tier.get('label')}.", "territory_control": build_territory_control_state(conn, player, planet)}
+
+
 def galaxy_gate_planet(conn: sqlite3.Connection, galaxy_id: int) -> Optional[Dict[str, Any]]:
     return row(conn, "SELECT * FROM planets WHERE galaxy_id=? AND type LIKE '%Gate%' ORDER BY id LIMIT 1", (galaxy_id,))
 
@@ -12034,7 +12934,18 @@ def guild_planet_war_declare_cost(conn: sqlite3.Connection, guild_id: int, plane
     base = int(FACTION_WAR_BALANCE.get("planet_war_base_declare_cost", 2500000))
     defense = int(planet.get("defense_strength") or 0) * int(FACTION_WAR_BALANCE.get("planet_war_defense_cost_mult", 25000))
     exp_base = float(FACTION_WAR_BALANCE.get("planet_war_owned_planet_cost_base", 1.65))
-    return int((base + defense) * (exp_base ** owned))
+    faction_row = row(conn, """
+        SELECT p.faction_id, COUNT(*) AS members
+        FROM guild_members gm
+        JOIN players p ON p.id=gm.player_id
+        WHERE gm.guild_id=? AND p.faction_id IS NOT NULL
+        GROUP BY p.faction_id
+        ORDER BY members DESC
+        LIMIT 1
+    """, (int(guild_id),))
+    faction_id = int((faction_row or {}).get("faction_id") or 0)
+    multiplier = territory_declare_cost_multiplier(conn, faction_id, guild_id)
+    return int((base + defense) * (exp_base ** owned) * multiplier)
 
 
 def sync_galaxy_control_from_planets(conn: sqlite3.Connection, galaxy_id: Optional[int] = None) -> None:
@@ -12110,7 +13021,6 @@ def process_guild_planet_xp_bonus(conn: sqlite3.Connection) -> None:
 
 
 def active_or_upcoming_planet_wars(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    process_planet_faction_wars(conn, None)
     return rows(conn, """
         SELECT w.*, p.name as planet_name, p.x as planet_x, p.y as planet_y, p.type as planet_type,
                g.name as galaxy_name, g.control_bonus_pct, g.center_value,
@@ -12152,10 +13062,11 @@ def process_galaxy_wars(conn: sqlite3.Connection, player: Optional[Dict[str, Any
     process_planet_faction_wars(conn, player)
 
 
-def process_planet_faction_wars(conn: sqlite3.Connection, player: Optional[Dict[str, Any]] = None) -> None:
+def process_planet_faction_wars(conn: sqlite3.Connection, player: Optional[Dict[str, Any]] = None, resolve_global: bool = True) -> None:
     now = utcnow()
-    for w in rows(conn, "SELECT * FROM planet_faction_wars WHERE status='declared' AND opens_at<=?", (iso(now),)):
-        conn.execute("UPDATE planet_faction_wars SET status='active', message=? WHERE id=?", ("Planet capture zone is now active.", w["id"]))
+    if resolve_global:
+        for w in rows(conn, "SELECT * FROM planet_faction_wars WHERE status='declared' AND opens_at<=?", (iso(now),)):
+            conn.execute("UPDATE planet_faction_wars SET status='active', message=? WHERE id=?", ("Planet capture zone is now active.", w["id"]))
 
     if player:
         faction = player_faction(conn, player)
@@ -12194,6 +13105,8 @@ def process_planet_faction_wars(conn: sqlite3.Connection, player: Optional[Dict[
 
     stale_before = iso(now - timedelta(seconds=75))
     conn.execute("DELETE FROM planet_war_presence WHERE last_seen<?", (stale_before,))
+    if not resolve_global:
+        return
 
     for w in rows(conn, "SELECT * FROM planet_faction_wars WHERE status='active'"):
         pres = rows(conn, "SELECT side, faction_id, COUNT(*) as count FROM planet_war_presence WHERE war_id=? AND inside_ring=1 AND side IN ('attacker','defender') GROUP BY side,faction_id", (w["id"],))
@@ -12249,15 +13162,27 @@ def build_galaxy_map_shallow(conn: sqlite3.Connection, player: Dict[str, Any]) -
 
 
 def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
-    # process_planet_faction_wars is already invoked by build_state immediately
-    # before calling this function. Calling it again here duplicates an entire
-    # war-processing pass on every state poll.
+    # Global war resolution is advanced by the background world tick. Map building
+    # only reads the latest known state and leaves presentation sorting to the client.
     current_planet = row(conn, "SELECT * FROM planets WHERE id=?", (player["location_planet_id"],))
     current_gid = int(current_planet.get("galaxy_id") if current_planet else 0)
     planets = rows(conn, "SELECT * FROM planets")
     travel = build_travel_state(conn, player)
     visited_galaxies = set(travel.get("visited_galaxies") or []) | {current_gid}
     pf = player_faction(conn, player)
+    territory_counts = {}
+    if territory_tables_ready(conn):
+        territory_counts = {
+            int(r["galaxy_id"]): {"war": int(r["war_count"] or 0), "contested": int(r["contested_count"] or 0)}
+            for r in rows(conn, """
+                SELECT p.galaxy_id,
+                       SUM(CASE WHEN t.status='war' THEN 1 ELSE 0 END) AS war_count,
+                       SUM(CASE WHEN t.status='contested' THEN 1 ELSE 0 END) AS contested_count
+                FROM planets p
+                LEFT JOIN territory_control_state t ON t.planet_id=p.id
+                GROUP BY p.galaxy_id
+            """)
+        }
     nodes = []
     for g in rows(conn, "SELECT g.*, f.name as faction_name, f.color as faction_color, f.code as faction_code FROM galaxies g LEFT JOIN factions f ON f.id=g.faction_id ORDER BY g.id"):
         gps = [p for p in planets if int(p.get("galaxy_id") or 0) == int(g["id"])]
@@ -12266,6 +13191,7 @@ def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
         node = dict(g)
         can_declare, declare_reason = (False, "Galaxy control flips only after all planets in the galaxy are captured.")
         bonus = galaxy_capture_bonus(conn, g, pf["id"] if pf else 0) if pf else {}
+        tc = territory_counts.get(int(g["id"]), {"war": 0, "contested": 0})
         node.update({
             "x_pct": round(clamp_pct(float(g.get("x_pct") or 50), 2, 98), 2),
             "y_pct": round(clamp_pct(float(g.get("y_pct") or 50), 2, 98), 2),
@@ -12288,6 +13214,9 @@ def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
             "capture_station_x_pct": float(FACTION_WAR_BALANCE.get("capture_station_x_pct", 50.0)),
             "capture_station_y_pct": float(FACTION_WAR_BALANCE.get("capture_station_y_pct", 50.0)),
             "capture_bonus": bonus,
+            "territory_war_count": int(tc.get("war") or 0),
+            "contested_zone_count": int(tc.get("contested") or 0),
+            "territory_status": "war" if int(tc.get("war") or 0) else "contested" if int(tc.get("contested") or 0) else "secure",
             "image_url": galaxy_visual_payload(g),
         })
         nodes.append(node)
@@ -12312,6 +13241,7 @@ def build_galaxy_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     scan_area = scan_area_profile_for_player(conn, player, "galaxy")
     scan_blips = build_scan_area_blips(conn, player, nodes, "galaxy")
     scan_pings = build_scan_area_pings(conn, player, "galaxy")
+    separate_stationary_map_objects([nodes, event_sites, scan_blips])
     annotate_object_scan_unlocks(conn, player, nodes, "galaxy", int(current_gid or 0))
     annotate_object_scan_unlocks(conn, player, scan_blips, "galaxy", int(current_gid or 0))
     ship = active_ship_for_player(conn, player)
@@ -12356,9 +13286,14 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     pf = player_faction(conn, player)
     player_guild_id = int(player.get("guild_id") or 0)
     faction_by_id = {int(f["id"]): f for f in rows(conn, "SELECT * FROM factions")}
+    territory_by_planet = {int(t["planet_id"]): t for t in territory_states_for_galaxy(conn, int(current["galaxy_id"]))}
+    galaxy_owner_faction_id = int((row(conn, "SELECT faction_id FROM galaxies WHERE id=?", (int(current["galaxy_id"]),)) or {}).get("faction_id") or 0)
     nodes = []
     for p in planets:
         effects = planet_control_effects(p)
+        territory_state = territory_by_planet.get(int(p["id"])) or ensure_territory_state_for_planet(conn, p) or {}
+        territory_status = str(territory_state.get("status") or "secure")
+        territory_influence = territory_influence_map(territory_state.get("influence_json"))
         legal_strength = int((int(p.get("market_activity") or 50) + int(p.get("stability_level") or 60) + int(p.get("security_level") or 50)) / 3)
         illicit_strength = int((int(p.get("market_activity") or 50) + int(p.get("pirate_activity") or 40) + (100 - int(p.get("security_level") or 50))) / 3)
         node = dict(p)
@@ -12379,7 +13314,7 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
             "legal_market_strength": clamp_int(legal_strength, 1, 99),
             "illicit_market_strength": clamp_int(illicit_strength, 1, 99),
             "available_operations": int(ops_counts.get(p["id"], 0) or 0),
-            "risk_level": effects["travel_danger"],
+            "risk_level": clamp_int(int(effects["travel_danger"]) + (10 if territory_status == "war" else 5 if territory_status == "contested" else 0), 1, 99),
             "is_gate": "gate" in p_type.lower(),
             "is_uninhabitable": bool(is_uninhabitable),
             "isUninhabitable": bool(is_uninhabitable),
@@ -12390,6 +13325,13 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
             "can_declare_planet_war": bool(can_declare),
             "declare_reason": declare_reason,
             "declare_cost": declare_cost,
+            "territory_status": territory_status,
+            "territory_war": territory_status == "war",
+            "territory_contested": territory_status == "contested",
+            "territory_influence": [{"faction_id": fid, "amount": amt} for fid, amt in sorted(territory_influence.items(), key=lambda kv: kv[1], reverse=True)[:3]],
+            "territory_supply_tier": int(territory_state.get("supply_tier") or 0),
+            "territory_supply_buff": decode_json(territory_state.get("zone_buff_json"), {}) or {},
+            "is_border_system": bool(territory_status in {"contested", "war"} or (galaxy_owner_faction_id and int(p.get("faction_id") or 0) != galaxy_owner_faction_id)),
             "image_url": planet_visual_payload(p)
         })
         nodes.append(node)
@@ -12453,6 +13395,7 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
     traffic = [attach_tool_permissions(conn, player, o) for o in annotate_and_filter_by_player_radar(conn, player, nodes, traffic_all, "system") if o.get("id") != "player:self"]
     scan_blips = build_scan_area_blips(conn, player, nodes, "system")
     scan_pings = build_scan_area_pings(conn, player, "system")
+    separate_stationary_map_objects([nodes, ore_sites, salvage_icons, exploration_sites, pirate_stations, player_bases, event_sites, traffic, scan_blips])
     for group in (nodes, ore_sites, salvage_icons, exploration_sites, pirate_stations, player_bases, event_sites, traffic, scan_blips):
         annotate_object_scan_unlocks(conn, player, group, "system", int(current["galaxy_id"]))
     active_wars = active_or_upcoming_planet_wars(conn)
@@ -12479,6 +13422,33 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
                 "attacking_faction_name": w.get("attacking_faction_name"),
                 "defending_faction_name": w.get("defending_faction_name"),
             })
+    existing_war_planets = {int(w.get("planet_id") or 0) for w in war_zones}
+    for tstate in territory_by_planet.values():
+        status = str(tstate.get("status") or "secure")
+        if status not in {"contested", "war"}:
+            continue
+        planet_id = int(tstate.get("planet_id") or 0)
+        if status == "war" and planet_id in existing_war_planets:
+            continue
+        n = node_by_id_for_war.get(planet_id)
+        if not n:
+            continue
+        contested_faction = faction_by_id.get(int(tstate.get("contested_by_faction_id") or 0))
+        war_zones.append({
+            "id": f"territory:{planet_id}",
+            "kind": "war_zone",
+            "territory": True,
+            "planet_id": planet_id,
+            "galaxy_id": int(current["galaxy_id"]),
+            "name": f"{n.get('name')} {'War Zone' if status == 'war' else 'Contested Zone'}",
+            "x_pct": float(n.get("x_pct") or 50),
+            "y_pct": float(n.get("y_pct") or 50),
+            "radius_pct": 10.5 if status == "war" else 7.5,
+            "status": status,
+            "territory_status": status,
+            "attacking_faction_name": contested_faction.get("name") if contested_faction else None,
+            "defending_faction_name": (faction_by_id.get(int(tstate.get("controlling_faction_id") or 0)) or {}).get("name"),
+        })
 
     ship = active_ship_for_player(conn, player)
     radar_range = ship_radar_range_pct(conn, ship, "system")
@@ -12493,6 +13463,8 @@ def build_system_map(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[s
         "hostile_contacts": len([t for t in traffic if t.get("hostile")]),
         "pirate_stations": len(pirate_stations),
         "server_events": len(event_sites),
+        "territory_wars": len([t for t in territory_by_planet.values() if str(t.get("status") or "") == "war"]),
+        "contested_zones": len([t for t in territory_by_planet.values() if str(t.get("status") or "") == "contested"]),
         "gate_links": len(gate_links),
         "security_level": int(sum([n.get("security_level", 50) for n in nodes]) / max(1, len(nodes))),
         "risk_band": "High" if any(int(n.get("risk_level") or 0) >= 65 for n in nodes) else "Moderate",
@@ -13029,15 +14001,39 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
     for round_no in range(1, int(PIRATE_STATION_BALANCE["battle_max_rounds"]) + 1):
         p_damage = int(player_power * rng.uniform(0.20, 0.38)) + (20 if god else 0)
         e_shield, e_hull, sh, hh = apply_track_damage(e_shield, e_hull, p_damage)
-        log.append({"round": round_no, "actor": "player", "text": f"Your ship hits {enemy['name']} for {sh} shield / {hh} hull damage.", "enemyHull": e_hull, "enemyShield": e_shield, "playerHull": y_hull, "playerShield": y_shield})
+        log.append({"round": round_no, "actor": "player", "text": f"Your ship hits {enemy['name']} for {sh} shield / {hh} hull damage.", "shieldDamage": sh, "hullDamage": hh, "enemyHull": e_hull, "enemyShield": e_shield, "playerHull": y_hull, "playerShield": y_shield})
         if e_hull <= 0:
             player_won = True
             break
         e_damage = 0 if god else int(enemy_power * rng.uniform(0.12, 0.27))
         y_shield, y_hull, sh, hh = apply_track_damage(y_shield, y_hull, e_damage)
-        log.append({"round": round_no, "actor": "enemy", "text": f"{enemy['name']} returns fire for {sh} shield / {hh} hull damage.", "enemyHull": e_hull, "enemyShield": e_shield, "playerHull": y_hull, "playerShield": y_shield})
+        log.append({"round": round_no, "actor": "enemy", "text": f"{enemy['name']} returns fire for {sh} shield / {hh} hull damage.", "shieldDamage": sh, "hullDamage": hh, "enemyHull": e_hull, "enemyShield": e_shield, "playerHull": y_hull, "playerShield": y_shield})
         if y_hull <= 0:
             break
+    player_destroyed = bool(not player_won and y_hull <= 0)
+    if player_destroyed:
+        death_note = damage_or_destroy_ship(
+            conn,
+            player["id"],
+            max(int(ship.get("hull") or 1) + int(ship.get("shield") or 0) + enemy_power * 8, 999999),
+            f"pirate station defeat by {enemy['name']}",
+            god=god,
+            hospital_minutes=30,
+        )
+        update_pirate_station_resource(conn, run)
+        conn.execute(
+            "UPDATE pirate_station_runs SET status='retreated', battle_open=0, battle_target_enemy_id=NULL, battle_report_json='{}', completed_at=?, updated_at=? WHERE id=?",
+            (iso(), iso(), run["id"]),
+        )
+        fresh_run = row(conn, "SELECT * FROM pirate_station_runs WHERE id=?", (run["id"],)) or run
+        update_pirate_station_resource(conn, fresh_run)
+        message = f"Your ship was destroyed inside {enemy['name']}'s firing lane. {death_note}"
+        emit_player_metrics(conn, player["id"], {
+            "damage_dealt": sum(int(e.get("shieldDamage") or 0) + int(e.get("hullDamage") or 0) for e in log if e.get("actor") == "player"),
+            "damage_taken": sum(int(e.get("shieldDamage") or 0) + int(e.get("hullDamage") or 0) for e in log if e.get("actor") == "enemy"),
+        }, player=player, metadata={"action": "pirate_station_battle", "run_id": run["id"], "enemy_id": enemy["id"], "outcome": "death"})
+        add_event(conn, player["id"], "pirate_station", message, {"runId": run["id"], "enemyId": enemy["id"], "outcome": "death"})
+        return {"message": message, "openPage": "System Map"}
     conn.execute("UPDATE ships SET hull=?, shield=? WHERE id=?", (max(1, y_hull), max(0, y_shield), ship["id"]))
     rewards = {"credits": 0, "xp": 0, "items": []}
     outcome = "victory" if player_won else "damaged"
@@ -13050,6 +14046,8 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
         xp = int(PIRATE_STATION_BALANCE["victory_xp_per_tier"]) * station_tier
         conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (credits, player["id"]))
         add_xp(conn, player["id"], xp)
+        nova_safe_record_guild_contribution(conn, player["id"], "combat", max(75, xp + credits // 100), 1, "pirate_station_battle", {"runId": run["id"], "enemyId": enemy["id"], "stationId": run["station_id"], "outcome": "victory"})
+        nova_record_guild_war_battle_outcome(conn, player["id"], None, "pirate", (station_for_drop or {}).get("nearest_planet_id") or player.get("location_planet_id"), {"runId": run["id"], "enemyId": enemy["id"], "source": "pirate_station"})
         salvage_site = None
         if station_for_drop:
             defender_target = {
@@ -13082,6 +14080,7 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
     else:
         conn.execute("UPDATE pirate_station_enemies SET hull=?, shield=?, updated_at=? WHERE id=?", (max(1, e_hull), max(0, e_shield), iso(), enemy["id"]))
         grant_action_progression(conn, player["id"], "combat", 0.45, False)
+        nova_safe_record_guild_contribution(conn, player["id"], "combat", 25, 1, "pirate_station_battle_damaged", {"runId": run["id"], "enemyId": enemy["id"], "stationId": run["station_id"], "outcome": outcome})
     remaining = pirate_station_remaining_count(conn, shared_run_id)
     station_now = row(conn, "SELECT * FROM pirate_stations WHERE id=?", (run["station_id"],))
     if station_now:
@@ -13120,6 +14119,13 @@ def resolve_pirate_station_battle(conn: sqlite3.Connection, player: Dict[str, An
         conn.execute("DELETE FROM pirate_stations WHERE id=?", (run["station_id"],))
     if remaining > 0:
         conn.execute("UPDATE pirate_station_runs SET battle_report_json=?, updated_at=? WHERE id=?", (encode_json(report), iso(), run["id"]))
+    emit_player_metrics(conn, player["id"], {
+        "damage_dealt": sum(int(e.get("shieldDamage") or 0) + int(e.get("hullDamage") or 0) for e in log if e.get("actor") == "player"),
+        "damage_taken": sum(int(e.get("shieldDamage") or 0) + int(e.get("hullDamage") or 0) for e in log if e.get("actor") == "enemy"),
+        "battles_won": 1 if player_won else 0,
+        "battles_survived": 1,
+        "npc_kills": 1 if player_won else 0,
+    }, player=player, metadata={"action": "pirate_station_battle", "run_id": run["id"], "enemy_id": enemy["id"], "outcome": outcome})
     add_event(conn, player["id"], "pirate_station", report["message"], {"runId": run["id"], "enemyId": enemy["id"], "outcome": outcome})
     return {"message": report["message"], "openPage": "System Map" if remaining <= 0 else "Pirate Station"}
 
@@ -14248,7 +15254,7 @@ def begin_cargo_operation(conn: sqlite3.Connection, player_id: int, planet_id: i
     return {"message": f"Cargo {label} started for {qty}x {item_name}. ETA {minutes} minutes. You are protected until handling finishes.", "minutes": minutes, "operationId": op_id, "cargoProtected": True}
 
 
-def resolve_completed_cargo_operations(conn: sqlite3.Connection, player_id: int, force: bool = False) -> int:
+def resolve_completed_cargo_operations(conn: sqlite3.Connection, player_id: int, force: bool = False, record_guild: bool = True) -> int:
     now_iso = iso()
     if force:
         ops = rows(conn, "SELECT * FROM pending_cargo_operations WHERE player_id=? AND status='active' ORDER BY id", (player_id,))
@@ -14273,11 +15279,22 @@ def resolve_completed_cargo_operations(conn: sqlite3.Connection, player_id: int,
                 conn.execute("INSERT INTO cargo_hold (player_id,commodity_id,qty,avg_cost) VALUES (?,?,?,?)", (player_id, commodity_id, qty, avg_cost))
             conn.execute("UPDATE players SET cargo=cargo+? WHERE id=?", (int(math.ceil(float(op.get("mass") or 0))), player_id))
             log_market_transaction(conn, player_id, op.get("planet_id"), commodity_id, payload.get("code") or op.get("item_code"), item_name, "buy_illicit" if not int(op.get("legal") or 1) else "buy", qty, avg_cost, int(op.get("gross") or 0), int(op.get("fee") or 0), int(op.get("gross") or 0)+int(op.get("fee") or 0), int(op.get("legal") or 1))
+            emit_player_metric(conn, player_id, "market_purchase_value", int(op.get("gross") or 0) + int(op.get("fee") or 0), planet_id=op.get("planet_id"), metadata={"action": typ, "item": payload.get("code") or op.get("item_code"), "qty": qty, "legal": int(op.get("legal") or 1)})
             add_event(conn, player_id, "cargo", f"Cargo loading complete: {qty}x {item_name} is now in your hold.")
         elif typ in {"sell_commodity", "sell_inventory_item"}:
             conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (int(op.get("net") or 0), player_id))
             commodity_id = payload.get("commodity_id")
             log_market_transaction(conn, player_id, op.get("planet_id"), commodity_id, payload.get("code") or op.get("item_code"), item_name, "sell_inventory_illicit" if (typ=="sell_inventory_item" and not int(op.get("legal") or 1)) else "sell_illicit" if not int(op.get("legal") or 1) else "sell_inventory" if typ=="sell_inventory_item" else "sell", qty, int(payload.get("unit_price") or 0), int(op.get("gross") or 0), int(op.get("fee") or 0), int(op.get("net") or 0), int(op.get("legal") or 1))
+            metadata = {"action": typ, "item": payload.get("code") or op.get("item_code"), "qty": qty, "legal": int(op.get("legal") or 1)}
+            emit_player_metric(conn, player_id, "market_sales_value", int(op.get("gross") or 0), planet_id=op.get("planet_id"), metadata=metadata)
+            if typ == "sell_commodity":
+                profit = max(0, (int(payload.get("unit_price") or 0) - int(payload.get("avg_cost") or 0)) * qty - int(op.get("fee") or 0))
+                emit_player_metric(conn, player_id, "trade_profit", profit, planet_id=op.get("planet_id"), metadata=metadata)
+                if int(op.get("legal") or 1) and profit > 0:
+                    trade_influence = max(1, min(10, profit // 5000 + qty // 20))
+                    queue_territory_influence(conn, player_id, op.get("planet_id"), "trade", trade_influence, {**metadata, "profit": profit})
+            if record_guild:
+                nova_safe_record_guild_contribution(conn, player_id, "money", max(25, int(op.get("net") or 0) // 75), qty, "delivery_complete", {**metadata, "operationId": op["id"], "net": int(op.get("net") or 0)})
             add_event(conn, player_id, "cargo", f"Cargo offloading complete: sold {qty}x {item_name} for {int(op.get('net') or 0):,} credits.")
         elif typ == "mine_ore_site":
             code = payload.get("ore_code") or op.get("item_code") or "ore"
@@ -14290,10 +15307,18 @@ def resolve_completed_cargo_operations(conn: sqlite3.Connection, player_id: int,
             if payload.get("ultra_item_code"):
                 ultra_reward = grant_ultra_item_to_player(conn, player_id, str(payload.get("ultra_item_code") or ""), "mining_ultra", god=True)
             grant_action_progression(conn, player_id, "mining", max(1.0, qty / 2), True)
+            if record_guild:
+                nova_safe_record_guild_contribution(conn, player_id, "mining", max(50, qty * max(1, tier) * 8), qty, "open_world_mining_complete", {"operationId": op["id"], "mapObjectKey": payload.get("map_object_key"), "oreCode": code, "tier": tier, "ultraItem": ultra_reward})
             mining_msg = f"Mining operation complete: recovered {qty}x {name} from an open-world ore field."
             if ultra_reward:
                 mining_msg += f" Ultra discovery: {ultra_reward['name']}."
             add_event(conn, player_id, "mining", mining_msg, {"ultraItem": ultra_reward})
+            emit_player_metrics(conn, player_id, {
+                "resources_mined": qty,
+                "mining_haul_value": qty * value,
+                "mining_missions_completed": 1,
+                "rare_resources_mined": qty if tier >= 4 or ultra_reward else 0,
+            }, planet_id=op.get("planet_id"), metadata={"action": typ, "item": code, "qty": qty, "tier": tier, "ultra": bool(ultra_reward)})
         conn.execute("UPDATE pending_cargo_operations SET status='complete', completed_at=? WHERE id=?", (iso(), op["id"]))
         completed += 1
     if completed:
@@ -14523,6 +15548,12 @@ def run_planet_control_action(conn: sqlite3.Connection, player: Dict[str, Any], 
         (planet["id"], player["id"], action_key, cfg["name"], influence, security_delta, stability_delta, pirate_delta, market_delta, conflict_delta, msg, iso()),
     )
     add_event(conn, player["id"], "planet_control", msg, {"action": action_key, "planet_id": planet["id"]})
+    queue_territory_influence(conn, player["id"], planet["id"], "planet_control", max(1, influence), {"action": action_key, "jobBonus": job_bonus}, player=player)
+    nova_safe_record_guild_contribution(conn, player["id"], "war", max(20, influence * 35 + max(0, conflict_delta) * 10), 1, "planet_control", {"action": action_key, "planetId": planet["id"], "influence": influence})
+    player_guild_id = nova_guild_member_guild_id(conn, player["id"])
+    if player_guild_id:
+        for war in nova_guild_active_score_wars(conn, player_guild_id, None, planet["id"]):
+            nova_guild_add_war_score(conn, int(war["id"]), player_guild_id, "influence_score", max(1, influence))
     return {"message": msg, "planet_control": build_planet_control_state(conn, player["id"], updated)}
 
 
@@ -16539,9 +17570,15 @@ def recipe_from_row(recipe: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def player_recipe_license_map(conn: sqlite3.Connection, player_id: int) -> Dict[str, Dict[str, Any]]:
+    cache_key = ("player_recipe_license_map", int(player_id))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return {k: dict(v) for k, v in cached.items()}
     if not scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='player_recipe_licenses'"):
-        return {}
-    return {r["recipe_code"]: r for r in rows(conn, "SELECT * FROM player_recipe_licenses WHERE player_id=?", (player_id,))}
+        return request_cache_set(cache_key, {})
+    data = {r["recipe_code"]: r for r in rows(conn, "SELECT * FROM player_recipe_licenses WHERE player_id=?", (player_id,))}
+    request_cache_set(cache_key, {k: dict(v) for k, v in data.items()})
+    return data
 
 
 def ensure_starter_recipe_licenses(conn: sqlite3.Connection, player_id: int) -> None:
@@ -16794,6 +17831,10 @@ def roll_pirate_station_enemy_recipe_drop(conn: sqlite3.Connection, player_id: i
 
 
 def material_availability(conn: sqlite3.Connection, player_id: int) -> Dict[str, Dict[str, Any]]:
+    cache_key = ("material_availability", int(player_id))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return {k: {**v, "sources": list(v.get("sources", []))} for k, v in cached.items()}
     available: Dict[str, Dict[str, Any]] = {}
     for inv in rows(conn, "SELECT item_code,name,qty,reserved_qty,base_value,mass,legal,item_type,category,current_tier FROM inventory WHERE player_id=? AND qty>0", (player_id,)):
         code = inv["item_code"]
@@ -16808,6 +17849,7 @@ def material_availability(conn: sqlite3.Connection, player_id: int) -> Dict[str,
         entry = available.setdefault(code, {"item_code": code, "name": ch.get("name") or code, "qty": 0, "mass": float(ch.get("mass") or 0), "legal": int(ch.get("legal") or 1), "tier": clamp_tier(ch.get("tier", 1)), "sources": []})
         entry["qty"] += int(ch.get("qty") or 0)
         entry["sources"].append("cargo")
+    request_cache_set(cache_key, {k: {**v, "sources": list(v.get("sources", []))} for k, v in available.items()})
     return available
 
 
@@ -17114,7 +18156,7 @@ def crafting_queue_payload(conn: sqlite3.Connection, player_id: int) -> List[Dic
     return out
 
 
-def finalize_crafting_job(conn: sqlite3.Connection, job: Dict[str, Any], god: bool = False) -> Dict[str, Any]:
+def finalize_crafting_job(conn: sqlite3.Connection, job: Dict[str, Any], god: bool = False, record_guild: bool = True) -> Dict[str, Any]:
     player_id = int(job["player_id"])
     recipe = decode_json(job.get("recipe_snapshot_json"), {}) or {}
     if not recipe:
@@ -17157,6 +18199,27 @@ def finalize_crafting_job(conn: sqlite3.Connection, job: Dict[str, Any], god: bo
 
     grant_action_progression(conn, player_id, "crafting", max(0.5, int(recipe.get("recipe_tier") or 1) * (1.25 if outcome in {"success", "critical_success"} else 0.45)), outcome in {"success", "critical_success"})
     record_crafting_history(conn, player_id, recipe, outcome, output, xp, int(job.get("credits_spent") or 0), int(job.get("energy_spent") or 0))
+    if outcome in {"success", "critical_success"}:
+        recipe_output = recipe.get("output") or {}
+        output_kind = str(output.get("kind") or recipe_output.get("kind") or "item")
+        output_qty = max(1, int(output.get("qty") or recipe_output.get("qty") or 1))
+        output_tier = clamp_tier(recipe_output.get("tier", recipe_output.get("outputTier", recipe.get("recipe_tier", 1))))
+        output_value = int(recipe_output.get("base_value") or output.get("base_value") or 0) * output_qty
+        if output_kind == "module":
+            module_code = output.get("module_code") or recipe_output.get("module_code")
+            module_template = row(conn, "SELECT price FROM module_templates WHERE code=?", (module_code,)) if module_code else None
+            output_value = int((module_template or {}).get("price") or output_value or 0) * output_qty
+        metrics = {
+            "items_crafted": output_qty,
+            "crafting_value_created": max(effective_credits, output_value),
+            "equipment_crafted": output_qty if output_kind == "module" else 0,
+            "ships_crafted": output_qty if output_kind == "ship" else 0,
+            "high_tier_crafts": output_qty if output_tier >= 4 else 0,
+        }
+        if str(recipe.get("category") or "") == "Refined Materials":
+            metrics["processing_output_value"] = output_value
+            metrics["rare_output_generated"] = output_qty if output_tier >= 4 else 0
+        emit_player_metrics(conn, player_id, metrics, player=player, metadata={"action": "crafting_complete", "recipe": recipe.get("code"), "recipe_name": recipe.get("name"), "outcome": outcome, "output_kind": output_kind, "output_tier": output_tier, "job_id": job.get("id")})
 
     output_name = output.get("name") or output.get("item_code") or output.get("kind")
     if outcome == "failure":
@@ -17165,13 +18228,15 @@ def finalize_crafting_job(conn: sqlite3.Connection, job: Dict[str, Any], god: bo
         msg = f"{outcome.replace('_',' ').title()} complete: crafted {output.get('qty',1)}x {output_name}. Gained {xp} XP."
     conn.execute("UPDATE crafting_queue SET status=?, completed_at=?, outcome=?, output_json=?, message=? WHERE id=?", ("failed" if outcome == "failure" else "complete", iso(), outcome, encode_json(output), msg, job["id"]))
     add_event(conn, player_id, "crafting", msg, {"recipe": recipe.get("code"), "outcome": outcome, "output": output, "job_id": job["id"]})
+    if record_guild:
+        nova_safe_record_guild_contribution(conn, player_id, "crafting", max(25, xp), int(output.get("qty") or 1), "crafting_complete", {"jobId": job["id"], "recipe": recipe.get("code"), "outcome": outcome})
     return {"message": msg, "outcome": outcome, "output": output, "xp": xp}
 
 
-def resolve_completed_crafting_jobs(conn: sqlite3.Connection, player_id: int, god: bool = False) -> List[Dict[str, Any]]:
+def resolve_completed_crafting_jobs(conn: sqlite3.Connection, player_id: int, god: bool = False, record_guild: bool = True) -> List[Dict[str, Any]]:
     completed: List[Dict[str, Any]] = []
     for job in rows(conn, "SELECT * FROM crafting_queue WHERE player_id=? AND status='active' AND completes_at<=? ORDER BY completes_at, id", (player_id, iso())):
-        completed.append(finalize_crafting_job(conn, job, god))
+        completed.append(finalize_crafting_job(conn, job, god, record_guild=record_guild))
     return completed
 
 
@@ -17988,6 +19053,7 @@ def normalize_bio(value: str) -> str:
 
 def clean_avatar_id(value: Optional[str], faction_code: Optional[str] = None, seed: str = "") -> str:
     avatar_id = (value or DEFAULT_AVATAR_ID).strip()
+    avatar_id = PROFILE_LEGACY_AVATAR_ID_MAP.get(avatar_id, avatar_id)
     avatar = PROFILE_AVATAR_BY_ID.get(avatar_id)
     if avatar and (not faction_code or avatar.get("faction_code") == faction_code):
         return avatar_id
@@ -18139,6 +19205,10 @@ def _invalidate_public_profile_cache(target_user_id: Optional[int] = None) -> No
         _PUBLIC_PROFILE_CACHE.clear()
     else:
         _PUBLIC_PROFILE_CACHE.pop(int(target_user_id), None)
+    try:
+        invalidate_public_profiles_state_cache()
+    except NameError:
+        pass
 
 
 def public_profile_payload(conn: sqlite3.Connection, target_user_id: int, viewer_player_id: Optional[int] = None) -> Dict[str, Any]:
@@ -18239,6 +19309,66 @@ def profile_payload(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict
         "stats": build_player_profile_stats(conn, player, public=False),
         "achievements": achievements,
     }
+
+
+def profile_summary_payload(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
+    profile = ensure_user_profile(conn, user, player)
+    faction_code = player_faction_code(conn, player)
+    seed = str(player.get("callsign") or user.get("username") or "")
+    avatar = avatar_payload(profile.get("avatar_id"), faction_code, seed)
+    selected_badge = profile.get("selected_badge_code") or ""
+    return {
+        "username": user.get("username"),
+        "displayName": profile.get("display_name") or player.get("callsign") or user.get("username"),
+        "avatarId": clean_avatar_id(profile.get("avatar_id"), faction_code, seed),
+        "avatarUrl": avatar["url"],
+        "avatarLabel": avatar["label"],
+        "bio": profile.get("bio") or "",
+        "selectedBadgeCode": selected_badge,
+        "selectedBadgeUrl": selected_badge,
+        "deferred": True,
+    }
+
+
+def build_profile_state_slice(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
+    achievements = build_achievements_state(conn, int(player["id"]))
+    profile = profile_payload(conn, user, player)
+    profile["deferred"] = False
+    return {
+        "profile": profile,
+        "achievements": achievements,
+        "avatar_options": avatar_options_for_faction_code(player_faction_code(conn, player)),
+        "server_time": iso(),
+    }
+
+
+SOCIAL_PROFILE_DEFERRED_ENDPOINTS = {
+    "profile": "/api/state/profile",
+    "achievements": "/api/achievements",
+    "avatar_options": "/api/state/profile",
+    "public_profiles": "/api/profile/public-profiles",
+    "chat_messages": "/api/state/chat",
+    "party": "/api/state/party",
+    "social": "/api/state/social",
+}
+
+
+def attach_deferred_social_profile_sections(state: Dict[str, Any], conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(state, dict):
+        return state
+    try:
+        versions_fn = globals().get("nova_leaderboard_state_versions")
+        flags_fn = globals().get("nova_leaderboard_state_flags")
+        if callable(versions_fn):
+            state.setdefault("state_versions", versions_fn(conn, player))
+        if callable(flags_fn):
+            state.setdefault("state_flags", flags_fn(conn, player))
+    except Exception:
+        pass
+    deferred = state.setdefault("deferred_sections", {})
+    for key, endpoint in SOCIAL_PROFILE_DEFERRED_ENDPOINTS.items():
+        deferred.setdefault(key, {"endpoint": endpoint, "reason": "not_hot_path"})
+    return state
 
 
 def ensure_profile_content(conn: sqlite3.Connection) -> None:
@@ -18452,10 +19582,16 @@ def skill_effects_for_display(skill_key: str, level: int) -> List[str]:
 
 
 def build_skills_state(conn: sqlite3.Connection, player_id: int) -> List[Dict[str, Any]]:
+    cache_key = ("build_skills_state", int(player_id))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return clone_cached(cached)
+    player_levels = {r["skill_key"]: r for r in rows(conn, "SELECT * FROM player_skills WHERE player_id=?", (player_id,))}
+    node_rows = {r["key"]: r for r in rows(conn, "SELECT * FROM skill_nodes")}
     out: List[Dict[str, Any]] = []
     for key, d in PHASE16_SKILL_CATALOG.items():
-        node = row(conn, "SELECT * FROM skill_nodes WHERE key=?", (key,)) or {}
-        ps = row(conn, "SELECT * FROM player_skills WHERE player_id=? AND skill_key=?", (player_id, key)) or {}
+        node = node_rows.get(key) or {}
+        ps = player_levels.get(key) or {}
         progress = skill_progress_payload(int(ps.get("xp") or 0), int(node.get("max_level") or SKILL_XP_BALANCE["max_level"]))
         out.append({
             "key": key,
@@ -18476,6 +19612,7 @@ def build_skills_state(conn: sqlite3.Connection, player_id: int) -> List[Dict[st
             "progress_pct": progress["progress_pct"],
             "max_level": int(node.get("max_level") or SKILL_XP_BALANCE["max_level"]),
         })
+    request_cache_set(cache_key, clone_cached(out))
     return out
 
 
@@ -18550,6 +19687,15 @@ def build_chat_messages(conn: sqlite3.Connection, current_user_id: int) -> List[
         })
     return messages
 
+def run_background_world_tick(conn: sqlite3.Connection) -> None:
+    simulate_npc_activity(conn, force=False)
+    ensure_server_world_control(conn, force=False)
+    process_server_events(conn)
+    process_planet_faction_wars(conn, None)
+    process_territory_influence(conn, force=False)
+    process_guild_planet_xp_bonus(conn)
+
+
 def simulation_background_loop() -> None:
     # Dedicated server-side loop. The DB timestamp still controls the real tick interval, so duplicate calls stay harmless.
     time.sleep(5)
@@ -18558,7 +19704,7 @@ def simulation_background_loop() -> None:
         try:
             conn = connect()
             conn.execute("BEGIN IMMEDIATE")
-            simulate_npc_activity(conn, force=False)
+            run_background_world_tick(conn)
             conn.commit()
         except Exception:
             if conn:
@@ -18612,6 +19758,8 @@ def ensure_action_allowed(conn: sqlite3.Connection, user: Dict[str,Any], player:
         conn.execute("INSERT INTO action_nonces (player_id, nonce, created_at) VALUES (?,?,?)", (player["id"], nonce, iso()))
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Duplicate action nonce rejected")
+    conn.execute("DELETE FROM action_nonces WHERE created_at < ?", (iso(utcnow() - timedelta(hours=6)),))
+    enforce_action_cooldown(int(player["id"]), action.type)
     legal_status = resolve_player_legal_state(conn, player["id"])
     jail_allowed = {"attempt_bribe", "attempt_breakout", "admin_godmode", "update_profile", "send_chat_message"}
     if legal_status.get("jailed") and action.type not in jail_allowed and not user["god_mode"]:
@@ -18620,7 +19768,7 @@ def ensure_action_allowed(conn: sqlite3.Connection, user: Dict[str,Any], player:
     if h_until and h_until > utcnow() and action.type not in {"hospital_expedite","get_state","admin_godmode","launch_starter_ship","update_profile","send_chat_message"} and not user["god_mode"]:
         raise HTTPException(409, f"You are recovering until {h_until.isoformat()}")
     t_until = parse_dt(player.get("travel_until"))
-    if t_until and t_until > utcnow() and action.type not in {"complete_travel","admin_godmode","update_profile","send_chat_message"} and not user["god_mode"]:
+    if t_until and t_until > utcnow() and action.type not in {"complete_travel","auto_explore_battle_tick","admin_godmode","update_profile","send_chat_message"} and not user["god_mode"]:
         raise HTTPException(409, f"You are in transit until {t_until.isoformat()}")
     cargo_status = cargo_operation_status(conn, player["id"])
     cargo_allowed = {"admin_godmode", "update_profile", "send_chat_message", "cancel_cargo_operation"}
@@ -18947,9 +20095,13 @@ def ship_speed_profile(conn: sqlite3.Connection, ship: Dict[str, Any]) -> Dict[s
 
 
 def get_ship_power(conn: sqlite3.Connection, ship_id: int) -> int:
+    cache_key = ("ship_power", int(ship_id or 0))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return int(cached)
     ship = row(conn, "SELECT * FROM ships WHERE id=?", (ship_id,))
     if not ship or ship["destroyed"]:
-        return 0
+        return request_cache_set(cache_key, 0)
     ensure_ship_parts(conn)
     parts = rows(conn, "SELECT * FROM ship_parts WHERE ship_id=?", (ship_id,))
     part_ratio = sum((p["hp"] / max(1, p["max_hp"])) for p in parts) / max(1, len(parts))
@@ -18962,7 +20114,9 @@ def get_ship_power(conn: sqlite3.Connection, ship_id: int) -> int:
         stats = decode_json(m["stats_json"], {})
         durability_ratio = max(0.10, (m["durability"] or 100) / 100)
         power += int((stats.get("damage",0) * weapon_ratio + stats.get("shield",0)//2 + stats.get("armor",0)*40 + stats.get("drones",0)*100) * durability_ratio)
-    return int(power * max(0.25, part_ratio))
+    result = int(power * max(0.25, part_ratio))
+    request_cache_set(cache_key, result)
+    return result
 
 
 def get_player(conn: sqlite3.Connection, player_id: int) -> Dict[str,Any]:
@@ -19392,6 +20546,68 @@ def degrade_modules(conn: sqlite3.Connection, ship_id: int, amount: int) -> None
         conn.execute("UPDATE ship_modules SET durability=max(0,durability-?) WHERE id=?", (loss, mod["id"]))
 
 
+def clear_player_position_runtime_state(conn: sqlite3.Connection, player_id: int) -> None:
+    pid = int(player_id)
+    clear_player_open_space(conn, pid)
+    clear_player_waypoint(conn, pid)
+    clear_player_intercept(conn, pid)
+    clear_player_route(conn, pid)
+    clear_pirate_station_travel_intent(conn, pid)
+    try:
+        clear_planet_mission_travel_intent(conn, pid)
+    except NameError:
+        pass
+
+
+def respawn_player_after_death(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    pid = int(player["id"])
+    clear_player_position_runtime_state(conn, pid)
+
+    base = row(
+        conn,
+        """SELECT pb.*, p.id AS respawn_planet_id, p.name AS respawn_planet_name, g.name AS respawn_galaxy_name
+           FROM player_bases pb
+           JOIN galaxies g ON g.id=pb.galaxy_id
+           LEFT JOIN planets p ON p.id=pb.anchor_planet_id
+           WHERE pb.player_id=? AND pb.status='active'
+           ORDER BY pb.id
+           LIMIT 1""",
+        (pid,),
+    )
+    if base:
+        respawn_planet_id = int(base.get("respawn_planet_id") or 0)
+        if not respawn_planet_id:
+            fallback = row(conn, "SELECT id,name FROM planets WHERE galaxy_id=? ORDER BY type LIKE '%Gate%', security_level DESC, id LIMIT 1", (int(base["galaxy_id"]),))
+            respawn_planet_id = int((fallback or {}).get("id") or player.get("location_planet_id") or 1)
+            base["respawn_planet_name"] = (fallback or {}).get("name") or base.get("respawn_planet_name")
+        conn.execute(
+            """UPDATE players
+               SET location_planet_id=?, travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+                   travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL,
+                   travel_destination_galaxy_id=NULL, player_base_docked_id=?
+               WHERE id=?""",
+            (respawn_planet_id, int(base["id"]), pid),
+        )
+        note = f"Respawned docked at private base {base.get('name') or 'Base'}."
+        add_event(conn, pid, "respawn", note, {"baseId": int(base["id"]), "planetId": respawn_planet_id, "galaxyId": int(base["galaxy_id"])})
+        return {"kind": "base", "label": base.get("name") or "Private base", "planet_id": respawn_planet_id, "planet_name": base.get("respawn_planet_name"), "galaxy_name": base.get("respawn_galaxy_name")}
+
+    faction = player_faction(conn, player) or {}
+    respawn_planet_id = starter_location_for_faction(conn, faction) if faction else int(player.get("location_planet_id") or 1)
+    loc = row(conn, "SELECT p.name AS planet_name, g.id AS galaxy_id, g.name AS galaxy_name FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (respawn_planet_id,)) or {}
+    conn.execute(
+        """UPDATE players
+           SET location_planet_id=?, travel_until=NULL, travel_destination_id=NULL, travel_mode=NULL,
+               travel_started_at=NULL, travel_origin_planet_id=NULL, travel_origin_galaxy_id=NULL,
+               travel_destination_galaxy_id=NULL, player_base_docked_id=NULL
+           WHERE id=?""",
+        (respawn_planet_id, pid),
+    )
+    note = f"Respawned at {loc.get('planet_name') or 'a home-world dock'} in {loc.get('galaxy_name') or 'the faction home galaxy'}."
+    add_event(conn, pid, "respawn", note, {"planetId": respawn_planet_id, "galaxyId": loc.get("galaxy_id"), "factionId": faction.get("id")})
+    return {"kind": "faction_home", "label": faction.get("name") or "Faction home", "planet_id": respawn_planet_id, "planet_name": loc.get("planet_name"), "galaxy_name": loc.get("galaxy_name")}
+
+
 def damage_or_destroy_ship(conn, player_id: int, damage: int, reason: str, god: bool=False, hospital_minutes: int=0) -> str:
     if god:
         return "God mode avoided all damage."
@@ -19420,6 +20636,7 @@ def damage_or_destroy_ship(conn, player_id: int, damage: int, reason: str, god: 
     if starter:
         conn.execute("UPDATE ships SET destroyed=0, hull=max_hull, shield=max_shield WHERE id=?", (starter["id"],))
         conn.execute("UPDATE players SET active_ship_id=?, cargo=0, hospital_until=? WHERE id=?", (starter["id"], iso(utcnow()+timedelta(minutes=recovery_minutes)), player_id))
+    respawn = respawn_player_after_death(conn, p)
     insurance = ship_insurance_payload(conn, ship, loss_reason=reason)
     payout = max(0, int(insurance.get("estimatedPayout") or 0))
     if payout:
@@ -19427,7 +20644,12 @@ def damage_or_destroy_ship(conn, player_id: int, damage: int, reason: str, god: 
     payout_label = f"Insurance paid {payout:,} credits ({insurance.get('coveragePct', 0)}% of {int(insurance.get('shipValue') or 0):,} insured value)." if payout else "Insurance paid 0 credits."
     if float(insurance.get("payoutMultiplier") or 1.0) < 1.0:
         payout_label += " PvP anti-fraud multiplier applied."
-    return f"Ship destroyed by {reason}. Cargo hold was lost ({lost_hold} market units plus some inventory cargo). {payout_label} Starter ship deployed. Recovery time: {recovery_minutes} minutes."
+    respawn_label = respawn.get("label") or respawn.get("planet_name") or "respawn dock"
+    if respawn.get("kind") == "base":
+        respawn_note = f" Respawned docked at {respawn_label}."
+    else:
+        respawn_note = f" Respawned at {respawn.get('planet_name') or respawn_label} in {respawn.get('galaxy_name') or 'your faction home galaxy'}."
+    return f"Ship destroyed by {reason}. Cargo hold was lost ({lost_hold} market units plus some inventory cargo). {payout_label} Starter ship deployed.{respawn_note} Recovery time: {recovery_minutes} minutes."
 
 def resolve_npc_roll(conn: sqlite3.Connection, role: str, planet_id: int, tier: str="standard") -> int:
     p = row(conn, "SELECT * FROM planets WHERE id=?", (planet_id,))
@@ -19463,7 +20685,13 @@ def resolve_npc_roll(conn: sqlite3.Connection, role: str, planet_id: int, tier: 
 
 
 def get_job_metrics(conn: sqlite3.Connection, player_id: int, job_code: str) -> Dict[str, int]:
-    return {r["metric_key"]: int(r["metric_value"]) for r in rows(conn, "SELECT metric_key, metric_value FROM player_job_metrics WHERE player_id=? AND job_code=?", (player_id, job_code))}
+    cache_key = ("job_metrics", int(player_id), str(job_code or ""))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    data = {r["metric_key"]: int(r["metric_value"]) for r in rows(conn, "SELECT metric_key, metric_value FROM player_job_metrics WHERE player_id=? AND job_code=?", (player_id, job_code))}
+    request_cache_set(cache_key, dict(data))
+    return data
 
 
 def increment_job_metrics(conn: sqlite3.Connection, player_id: int, job_code: str, changes: Dict[str, int]) -> None:
@@ -19524,7 +20752,11 @@ def is_basic_pve_operation(op: Dict[str, Any]) -> bool:
 
 
 def player_skill_totals(conn: sqlite3.Connection, player_id: int) -> Dict[str, int]:
-    return {
+    cache_key = ("player_skill_totals", int(player_id))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return dict(cached)
+    data = {
         r["tree"]: int(r["total_level"] or 0)
         for r in rows(
             conn,
@@ -19537,11 +20769,18 @@ def player_skill_totals(conn: sqlite3.Connection, player_id: int) -> Dict[str, i
             (player_id,),
         )
     }
+    request_cache_set(cache_key, dict(data))
+    return data
 
 
 def active_job_runtime(conn: sqlite3.Connection, player_id: int) -> Optional[Dict[str, Any]]:
+    cache_key = ("active_job_runtime", int(player_id))
+    cached = request_cache_get(cache_key)
+    if cached is not None:
+        return dict(cached) if cached else None
     active = row(conn, "SELECT pj.*, j.name, j.description FROM player_jobs pj JOIN jobs j ON j.code=pj.job_code WHERE pj.player_id=? AND pj.active=1", (player_id,))
     if not active:
+        request_cache_set(cache_key, {})
         return None
     metrics = get_job_metrics(conn, player_id, active["job_code"])
     rank = job_rank_from_metrics(active["job_code"], int(active.get("xp") or 0), metrics)
@@ -19549,6 +20788,7 @@ def active_job_runtime(conn: sqlite3.Connection, player_id: int) -> Optional[Dic
     active["metrics"] = metrics
     active["next_requirement"] = job_next_requirement(active["job_code"], int(active.get("xp") or 0), metrics)
     active["next_unlock"] = CAREER_UNLOCK_LABELS.get(min(10, rank + 1), "max rank")
+    request_cache_set(cache_key, dict(active))
     return active
 
 
@@ -19838,6 +21078,8 @@ def apply_pve_world_rewards(conn: sqlite3.Connection, player_id: int, planet_id:
         if commodity:
             mutate_market(conn, planet_id, commodity["id"], random.randint(1, 4), -random.randint(0, 2), "player_pve_trade")
             notes.append("Local legal supply lanes improved")
+    source = "combat" if op_type in {"bounty", "patrol", "law", "escort"} else "trade" if op_type == "trade" else "mission"
+    queue_territory_influence(conn, player_id, planet_id, source, max(1, int((difficulty + 2) * mult)), {"op_type": op_type, "outcome": outcome, "difficulty": difficulty})
     return " ".join(notes)
 
 
@@ -19933,6 +21175,16 @@ def public_faction_balance_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
         galaxy_pct = round((galaxies / total_controlled_galaxies) * 100, 1) if total_controlled_galaxies else 0
         code = str(f.get("code") or "")
         guidance = playstyle.get(code, {})
+        home_planet = None
+        home_planet_code = FACTION_HOME_PLANET_CODES.get(code)
+        if home_planet_code:
+            home_planet = row(conn, """
+                SELECT p.id, p.code, p.name, p.type, g.id AS galaxy_id, g.code AS galaxy_code, g.name AS galaxy_name
+                FROM planets p
+                JOIN galaxies g ON g.id=p.galaxy_id
+                WHERE p.code=? AND g.code=?
+                LIMIT 1
+            """, (home_planet_code, str(f.get("home_galaxy_code") or "")))
         faction_rows.append({
             **dict(f),
             "players": players,
@@ -19944,6 +21196,9 @@ def public_faction_balance_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
             "bonuses": guidance.get("bonuses", []),
             "debuffs": guidance.get("debuffs", []),
             "guidance": guidance,
+            "home_planet": home_planet,
+            "home_planet_code": home_planet_code or "",
+            "homePlanet": home_planet,
             "species": FACTION_AVATAR_SPECIES.get(code, "Pilot"),
             "avatar_options": avatar_options_for_faction_code(code),
             "avatarOptions": avatar_options_for_faction_code(code),
@@ -19985,7 +21240,7 @@ def issue_auth_session(conn: sqlite3.Connection, user: Dict[str, Any]) -> Dict[s
         conn.execute("UPDATE users SET last_login_at=? WHERE id=?", (now, user["id"]))
     except sqlite3.OperationalError:
         pass
-    return {"token": token, "user": {"id": user["id"], "username": user["username"], "role": user["role"], "god_mode": bool(user["god_mode"]), "auth_provider": user.get("auth_provider") or "local"}}
+    return {"token": token, "user": {"id": user["id"], "username": user["username"], "role": user["role"], "god_mode": bool(user["god_mode"]), "auth_provider": user.get("auth_provider") or "local", "google_email": user.get("google_email") or user.get("email") or ""}}
 
 
 def normalize_optional_email(value: Optional[str]) -> str:
@@ -20008,7 +21263,19 @@ def faction_or_400(conn: sqlite3.Connection, faction_id: Optional[int]) -> Dict[
 
 
 def starter_location_for_faction(conn: sqlite3.Connection, faction: Dict[str, Any]) -> int:
+    faction_code = str(faction.get("code") or "").strip()
     home = str(faction.get("home_galaxy_code") or "").strip()
+    home_planet_code = FACTION_HOME_PLANET_CODES.get(faction_code)
+    if home_planet_code:
+        found = row(conn, """
+            SELECT p.id
+            FROM planets p
+            JOIN galaxies g ON g.id=p.galaxy_id
+            WHERE p.code=? AND g.code=?
+            LIMIT 1
+        """, (home_planet_code, home))
+        if found:
+            return int(found["id"])
     found = row(conn, """
         SELECT p.id
         FROM planets p
@@ -20039,10 +21306,12 @@ def create_new_player_account(conn: sqlite3.Connection, *, username: str, passwo
         raise HTTPException(409, "That Google account is already linked. Log in instead.")
     faction = faction_or_400(conn, faction_id)
     loc = starter_location_for_faction(conn, faction)
+    linked_at = now if google_sub else None
+    google_email = (email or None) if google_sub else None
     conn.execute(
-        """INSERT INTO users (username,password_hash,role,god_mode,created_at,email,google_sub,auth_provider,approved,last_login_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        (username, password_hash, "player", 0, now, email or None, google_sub or None, auth_provider, 1, now),
+        """INSERT INTO users (username,password_hash,role,god_mode,created_at,email,google_sub,google_email,auth_provider,google_linked_at,approved,last_login_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (username, password_hash, "player", 0, now, email or None, google_sub or None, google_email, auth_provider, linked_at, 1, now),
     )
     uid = int(scalar(conn, "SELECT id FROM users WHERE username=?", (username,)) or 0)
     if not uid:
@@ -20087,11 +21356,84 @@ def google_token_profile(credential: str) -> Dict[str, Any]:
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception:
         raise HTTPException(401, "Google could not verify this login token.")
+    issuer = str(payload.get("iss") or "")
+    if issuer not in {"accounts.google.com", "https://accounts.google.com"}:
+        raise HTTPException(401, "Google login token has an invalid issuer.")
     if str(payload.get("aud") or "") != str(client_id):
         raise HTTPException(401, "Google login token was issued for a different client id.")
+    try:
+        if int(payload.get("exp") or 0) <= int(time.time()):
+            raise HTTPException(401, "Google login token has expired.")
+    except ValueError:
+        raise HTTPException(401, "Google login token has an invalid expiration.")
     if str(payload.get("email_verified") or "").lower() not in {"true", "1"}:
         raise HTTPException(401, "Google account email is not verified.")
     return payload
+
+
+def clear_expired_pending_google_registrations(conn: sqlite3.Connection) -> None:
+    conn.execute("DELETE FROM pending_google_registrations WHERE expires_at <= ?", (iso(),))
+
+
+def pending_google_registration(conn: sqlite3.Connection, token: Optional[str]) -> Optional[Dict[str, Any]]:
+    token = (token or "").strip()
+    if not token:
+        return None
+    clear_expired_pending_google_registrations(conn)
+    pending = row(conn, "SELECT * FROM pending_google_registrations WHERE token=?", (token,))
+    if not pending:
+        return None
+    if parse_dt(pending.get("expires_at")) <= utcnow():
+        conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (token,))
+        return None
+    return pending
+
+
+def delete_current_session(conn: sqlite3.Connection, authorization: Optional[str]) -> None:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return
+    token = authorization.split(" ", 1)[1].strip()
+    if token:
+        conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+
+
+def delete_profile_transaction(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> None:
+    user_id = int(user["id"])
+    player_id = int(player["id"])
+    conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+    # Clean up direct ownership references that old prototype tables may not
+    # have declared with ON DELETE CASCADE. Shared records are anonymized when
+    # their foreign key allows NULL.
+    table_names = [
+        r["name"] for r in rows(conn, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    ]
+    for table_name in table_names:
+        if table_name in {"users", "players"}:
+            continue
+        try:
+            fk_rows = rows(conn, f"PRAGMA foreign_key_list({table_name})")
+        except sqlite3.DatabaseError:
+            continue
+        for fk in fk_rows:
+            target = str(fk.get("table") or "")
+            from_col = str(fk.get("from") or "")
+            on_delete = str(fk.get("on_delete") or "").upper()
+            if not from_col or target not in {"users", "players"}:
+                continue
+            value = user_id if target == "users" else player_id
+            if on_delete == "CASCADE":
+                continue
+            try:
+                if on_delete == "SET NULL":
+                    conn.execute(f"UPDATE {table_name} SET {from_col}=NULL WHERE {from_col}=?", (value,))
+                else:
+                    conn.execute(f"DELETE FROM {table_name} WHERE {from_col}=?", (value,))
+            except sqlite3.DatabaseError:
+                continue
+    conn.execute("DELETE FROM pending_google_registrations WHERE google_sub=COALESCE(?, '')", (user.get("google_sub") or "",))
+    conn.execute("DELETE FROM players WHERE id=?", (player_id,))
+    conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+    _invalidate_public_profile_cache(user_id)
 
 
 @app.get("/api/auth/factions")
@@ -20109,36 +21451,97 @@ def auth_factions() -> Dict[str, Any]:
 @app.post("/api/auth/register")
 def register(req: RegisterRequest) -> Dict[str, Any]:
     migrate()
-    if len(req.password or "") < 6:
-        raise HTTPException(400, "Password must be at least 6 characters.")
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        pending = pending_google_registration(conn, req.google_registration_token)
+        if req.google_registration_token and not pending:
+            raise HTTPException(400, "Google registration expired. Please register with Google again.")
+        if not pending and len(req.password or "") < 6:
+            raise HTTPException(400, "Password must be at least 6 characters.")
+        google_sub = str((pending or {}).get("google_sub") or "")
+        google_email = normalize_optional_email((pending or {}).get("google_email") or "")
+        if google_sub and row(conn, "SELECT id FROM users WHERE google_sub=?", (google_sub,)):
+            conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (req.google_registration_token,))
+            raise HTTPException(409, "That Google account is already linked. Log in instead.")
         user = create_new_player_account(
             conn,
             username=req.username,
-            password_hash=pw_hash(req.password),
+            password_hash=pw_hash(req.password if not pending else "google:" + google_sub + ":" + secrets.token_urlsafe(16)),
             callsign=req.callsign or req.username,
             faction_id=req.faction_id,
-            email=req.email or "",
-            auth_provider="local",
+            email=google_email or req.email or "",
+            google_sub=google_sub,
+            auth_provider="google" if pending else "local",
             avatar_id=req.avatar_id,
         )
+        if pending:
+            conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (req.google_registration_token,))
         auth = issue_auth_session(conn, user)
         conn.commit()
         return {**auth, "new_player": True, "tutorial_should_open": True}
     except HTTPException:
-        conn.rollback()
+        if req.google_registration_token:
+            try:
+                conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (req.google_registration_token,))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+        else:
+            conn.rollback()
         raise
     except sqlite3.IntegrityError as ex:
         conn.rollback()
+        if req.google_registration_token:
+            try:
+                conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (req.google_registration_token,))
+                conn.commit()
+            except Exception:
+                pass
         raise HTTPException(409, "Username, email, or Google account is already registered.")
     finally:
         conn.close()
 
 
-@app.post("/api/auth/google")
+@app.post("/api/auth/google/login")
 def google_login(req: GoogleLoginRequest) -> Dict[str, Any]:
+    migrate()
+    profile = google_token_profile(req.credential)
+    google_sub = str(profile.get("sub") or "").strip()
+    email = normalize_optional_email(profile.get("email") or "")
+    if not google_sub:
+        raise HTTPException(401, "Google did not return a stable account id.")
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        clear_expired_pending_google_registrations(conn)
+        user = row(conn, "SELECT * FROM users WHERE google_sub=?", (google_sub,))
+        if not user:
+            conn.execute("DELETE FROM pending_google_registrations WHERE google_sub=?", (google_sub,))
+            conn.commit()
+            raise HTTPException(404, "No account found. Please register first.")
+        if email and not user.get("google_email"):
+            conn.execute("UPDATE users SET google_email=COALESCE(google_email, ?), google_linked_at=COALESCE(google_linked_at, created_at) WHERE id=?", (email, user["id"]))
+            user = row(conn, "SELECT * FROM users WHERE id=?", (user["id"],)) or user
+        auth = issue_auth_session(conn, user)
+        conn.commit()
+        return {**auth, "new_player": False, "tutorial_should_open": False}
+    except HTTPException:
+        raise
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise HTTPException(409, "This Google account or email is already linked to another account.")
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/google")
+def google_login_legacy(req: GoogleLoginRequest) -> Dict[str, Any]:
+    return google_login(req)
+
+
+@app.post("/api/auth/google/register-start")
+def google_register_start(req: GoogleLoginRequest) -> Dict[str, Any]:
     migrate()
     profile = google_token_profile(req.credential)
     google_sub = str(profile.get("sub") or "").strip()
@@ -20149,38 +21552,31 @@ def google_login(req: GoogleLoginRequest) -> Dict[str, Any]:
     conn = connect()
     try:
         conn.execute("BEGIN IMMEDIATE")
-        user = row(conn, "SELECT * FROM users WHERE google_sub=?", (google_sub,))
-        new_player = False
-        if not user:
-            base_username = normalize_username((email.split("@")[0] if email else display_name).replace(".", "_"))
-            username = base_username
-            suffix = 2
-            while row(conn, "SELECT id FROM users WHERE username=?", (username,)):
-                username = f"{base_username[:18]}{suffix}"
-                suffix += 1
-            if not req.faction_id:
-                raise HTTPException(409, "Pick a faction before using Google the first time. After that, Google will log you straight in.")
-            user = create_new_player_account(
-                conn,
-                username=username,
-                password_hash=pw_hash("google:" + google_sub),
-                callsign=req.callsign or display_name or username,
-                faction_id=req.faction_id,
-                email=email,
-                google_sub=google_sub,
-                auth_provider="google",
-                avatar_id=req.avatar_id,
-            )
-            new_player = True
-        auth = issue_auth_session(conn, user)
+        clear_expired_pending_google_registrations(conn)
+        if row(conn, "SELECT id FROM users WHERE google_sub=?", (google_sub,)):
+            conn.execute("DELETE FROM pending_google_registrations WHERE google_sub=?", (google_sub,))
+            conn.commit()
+            raise HTTPException(409, "That Google account is already linked. Log in instead.")
+        token = secrets.token_urlsafe(32)
+        now = iso()
+        conn.execute("DELETE FROM pending_google_registrations WHERE google_sub=?", (google_sub,))
+        conn.execute(
+            "INSERT INTO pending_google_registrations (token,google_sub,google_email,display_name,created_at,expires_at) VALUES (?,?,?,?,?,?)",
+            (token, google_sub, email or None, display_name, now, iso(utcnow() + timedelta(minutes=20))),
+        )
         conn.commit()
-        return {**auth, "new_player": new_player, "tutorial_should_open": new_player}
+        return {
+            "google_registration_token": token,
+            "email": email,
+            "display_name": display_name,
+            "message": "Google account linked. Finish creating your profile.",
+            "expires_at": iso(utcnow() + timedelta(minutes=20)),
+        }
     except HTTPException:
-        conn.rollback()
         raise
     except sqlite3.IntegrityError:
         conn.rollback()
-        raise HTTPException(409, "This Google account or email is already linked to another account.")
+        raise HTTPException(409, "That Google account is already linked or pending.")
     finally:
         conn.close()
 
@@ -20202,33 +21598,457 @@ def login(req: LoginRequest) -> Dict[str, Any]:
         conn.close()
 
 
+@app.post("/api/auth/logout")
+def logout(req: Optional[GoogleClearRequest] = None, authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
+    migrate()
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        delete_current_session(conn, authorization)
+        token = (req.google_registration_token if req else None) or ""
+        if token:
+            conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (token,))
+        conn.commit()
+        return {"ok": True, "message": "Google login cleared."}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@app.post("/api/auth/google/clear")
+def google_clear(req: GoogleClearRequest) -> Dict[str, Any]:
+    migrate()
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        token = (req.google_registration_token or "").strip()
+        if token:
+            conn.execute("DELETE FROM pending_google_registrations WHERE token=?", (token,))
+        clear_expired_pending_google_registrations(conn)
+        conn.commit()
+        return {"ok": True, "message": "Google login cleared."}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@app.delete("/api/profile/delete")
+def delete_profile(req: DeleteProfileRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    if req.confirmation != "DELETE":
+        raise HTTPException(400, "Type DELETE to permanently delete this profile.")
+    migrate()
+    user, player = ctx
+    conn = connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        delete_profile_transaction(conn, user, player)
+        conn.commit()
+        return {"ok": True, "message": "Profile deleted."}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
     return {"ok": True, "db": str(DB_PATH), "time": iso()}
 
 
+def map_snapshot_revision(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], include_ttl: bool = True) -> Tuple[Any, ...]:
+    current = row(conn, "SELECT id,galaxy_id FROM planets WHERE id=?", (player.get("location_planet_id"),)) or {}
+    pid = int(player.get("id") or 0)
+    planet_id = int(current.get("id") or player.get("location_planet_id") or 0)
+    galaxy_id = int(current.get("galaxy_id") or player.get("travel_origin_galaxy_id") or 0)
+    ttl_bucket = int(time.time() // max(1, int(PERF_MAP_SNAPSHOT_TTL_SECONDS))) if include_ttl else 0
+    map_objects_rev = scalar(conn, "SELECT COALESCE(MAX(updated_at),'') FROM map_objects WHERE galaxy_id=? AND state NOT IN ('deleted','expired')", (galaxy_id,))
+    npc_rev = scalar(conn, "SELECT COALESCE(MAX(updated_at),'') FROM npc_map_state WHERE galaxy_id=?", (galaxy_id,))
+    battle_rev = scalar(conn, "SELECT COALESCE(MAX(updated_at),'') FROM combat_battles WHERE player_id=? AND status='active'", (pid,))
+    base_rev = scalar(conn, "SELECT COALESCE(MAX(updated_at),'') FROM player_bases WHERE galaxy_id=? AND status='active'", (galaxy_id,))
+    station_rev = scalar(conn, "SELECT COALESCE(MAX(updated_at),'') FROM pirate_stations WHERE galaxy_id=?", (galaxy_id,))
+    travel_bits = (
+        player.get("location_planet_id"),
+        player.get("travel_mode"),
+        player.get("travel_started_at"),
+        player.get("travel_until"),
+        player.get("travel_destination_id"),
+        player.get("travel_origin_planet_id"),
+        player.get("travel_origin_galaxy_id"),
+        player.get("travel_destination_galaxy_id"),
+        player.get("scan_area_cooldown_until"),
+        player.get("player_base_docked_id"),
+    )
+    return (
+        pid,
+        bool(user.get("god_mode")),
+        planet_id,
+        galaxy_id,
+        player.get("active_ship_id"),
+        ttl_bucket,
+        map_objects_rev,
+        npc_rev,
+        battle_rev,
+        base_rev,
+        station_rev,
+        *travel_bits,
+    )
+
+
+def map_revision_hash(revision: Tuple[Any, ...]) -> str:
+    return hashlib.sha1(repr(revision).encode("utf-8")).hexdigest()[:16]
+
+
+MAP_DELTA_TOP_LEVEL_KEYS = ("player_core", "location", "travel_state", "active_battle", "map_operation", "planet_missions")
+MAP_DELTA_MAP_KEYS = {
+    "galaxy_map": ("nodes", "lanes", "traffic", "ore_sites", "exploration_sites", "event_sites", "war_zones", "scan_blips", "scan_pings", "summary", "current_galaxy_id"),
+    "system_map": ("nodes", "lanes", "traffic", "ore_sites", "salvage_icons", "exploration_sites", "pirate_stations", "player_bases", "event_sites", "war_zones", "scan_blips", "scan_pings", "summary", "current_planet_id", "current_galaxy_id"),
+}
+
+
+def map_group_hash(value: Any) -> str:
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def map_payload_group_hashes(payload: Dict[str, Any]) -> Dict[str, str]:
+    hashes: Dict[str, str] = {}
+    for key in MAP_DELTA_TOP_LEVEL_KEYS:
+        hashes[key] = map_group_hash(payload.get(key))
+    for map_key, group_keys in MAP_DELTA_MAP_KEYS.items():
+        map_payload = payload.get(map_key) or {}
+        for group_key in group_keys:
+            hashes[f"{map_key}.{group_key}"] = map_group_hash(map_payload.get(group_key))
+    return hashes
+
+
+def build_map_player_core(player: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": int(player.get("id") or 0),
+        "callsign": player.get("callsign"),
+        "level": int(player.get("level") or 1),
+        "energy": int(player.get("energy") or 0),
+        "max_energy": int(player.get("max_energy") or 0),
+        "fuel": int(player.get("fuel") or 0),
+        "max_fuel": int(player.get("max_fuel") or 0),
+        "location_planet_id": player.get("location_planet_id"),
+        "active_ship_id": player.get("active_ship_id"),
+    }
+
+
+def build_map_location_core(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    planet = row(conn, "SELECT p.id,p.name,p.type,p.galaxy_id,g.name AS galaxy_name,g.code AS galaxy_code FROM planets p JOIN galaxies g ON g.id=p.galaxy_id WHERE p.id=?", (player.get("location_planet_id"),)) or {}
+    return {
+        "planet_id": planet.get("id") or player.get("location_planet_id"),
+        "name": planet.get("name"),
+        "type": planet.get("type"),
+        "galaxy_id": planet.get("galaxy_id") or player.get("travel_origin_galaxy_id"),
+        "galaxy_name": planet.get("galaxy_name"),
+        "galaxy_code": planet.get("galaxy_code"),
+    }
+
+
+def build_map_active_battle_summary(conn: sqlite3.Connection, player_id: int) -> Optional[Dict[str, Any]]:
+    battle = row(conn, "SELECT id,status,mode,summary,updated_at FROM combat_battles WHERE player_id=? AND status='active' ORDER BY id DESC LIMIT 1", (int(player_id),))
+    if not battle:
+        actor_battle = combat_actor_active_battle(conn, f"player:{int(player_id)}")
+        if actor_battle:
+            battle = row(conn, "SELECT id,status,mode,summary,updated_at FROM combat_battles WHERE id=? AND status='active'", (int(actor_battle["id"]),))
+    if not battle:
+        return None
+    return {
+        "id": int(battle.get("id") or 0),
+        "status": battle.get("status") or "active",
+        "mode": battle.get("mode") or "combat",
+        "summary": battle.get("summary") or "Battle active.",
+        "updated_at": battle.get("updated_at"),
+    }
+
+
+def map_sync_priority(player: Dict[str, Any], active_battle: Optional[Dict[str, Any]], travel_state: Dict[str, Any]) -> str:
+    if active_battle:
+        return "critical"
+    if travel_state.get("active"):
+        return "critical"
+    if travel_state.get("open_space"):
+        return "important"
+    return "low"
+
+
+def build_map_state_snapshot(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], force: bool = False) -> Dict[str, Any]:
+    revision = map_snapshot_revision(conn, user, player)
+    cache_key = ("map_snapshot", *revision)
+    now = time.monotonic()
+    if not force:
+        with _MAP_SNAPSHOT_CACHE_LOCK:
+            cached = _MAP_SNAPSHOT_CACHE.get(cache_key)
+            if cached and (now - cached[0]) < PERF_MAP_SNAPSHOT_TTL_SECONDS:
+                payload = clone_cached(cached[1])
+                payload["cache"] = {"hit": True, "ttlSeconds": PERF_MAP_SNAPSHOT_TTL_SECONDS}
+                payload["server_time"] = iso()
+                return payload
+
+    token = _REQUEST_CACHE.set({})
+    try:
+        travel_state = build_travel_state(conn, player)
+        active_battle = build_map_active_battle_summary(conn, int(player["id"]))
+        object_revision = map_revision_hash(map_snapshot_revision(conn, user, player, include_ttl=False))
+        payload = {
+            "player_core": build_map_player_core(player),
+            "location": build_map_location_core(conn, player),
+            "travel_state": travel_state,
+            "active_battle": active_battle,
+            "map_operation": active_player_map_operation(conn, player["id"]),
+            "planet_missions": build_planet_missions_state(conn, player),
+            "galaxy_map": build_galaxy_map(conn, player),
+            "system_map": build_system_map(conn, player),
+            "map_snapshot": {
+                "revision": map_revision_hash(revision),
+                "version": object_revision,
+                "objectRevision": object_revision,
+                "object_revision": object_revision,
+                "priority": map_sync_priority(player, active_battle, travel_state),
+                "timestamp": iso(),
+                "ttlSeconds": PERF_MAP_SNAPSHOT_TTL_SECONDS,
+                "polling": {
+                    "combatMs": 1000,
+                    "activeMapMs": 3500,
+                    "dockedMs": 12000,
+                    "backgroundMs": 30000,
+                },
+            },
+            "server_time": iso(),
+        }
+        group_hashes = map_payload_group_hashes(payload)
+        payload["map_snapshot"]["groupHashes"] = group_hashes
+        payload["map_snapshot"]["group_hashes"] = group_hashes
+    finally:
+        _REQUEST_CACHE.reset(token)
+
+    with _MAP_SNAPSHOT_CACHE_LOCK:
+        if len(_MAP_SNAPSHOT_CACHE) > 256:
+            _MAP_SNAPSHOT_CACHE.clear()
+        _MAP_SNAPSHOT_CACHE[cache_key] = (now, clone_cached(payload))
+    payload["cache"] = {"hit": False, "ttlSeconds": PERF_MAP_SNAPSHOT_TTL_SECONDS}
+    return payload
+
+
+def parse_map_group_hashes(raw: str = "") -> Dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return {str(k): str(v) for k, v in parsed.items()}
+    except Exception:
+        return {}
+    return {}
+
+
 @app.get("/api/state")
-def state(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+def state(maps: int = 1, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
     user, player = ctx
     conn = connect()
-    # auto complete travel when arrival time has passed
-    p = resolve_completed_travel(conn, get_player(conn, player["id"]))
-    p = resolve_intercept_if_close(conn, get_player(conn, player["id"]))
-    resolve_completed_cargo_operations(conn, player["id"])
-    p = get_player(conn, player["id"])
-    # Optimized MMO tick: no global NPC loop on every state request.
-    simulate_galaxy_background_market(conn, p, force=False)
-    ensure_server_world_control(conn, force=False)
-    process_server_events(conn)
-    resolve_player_legal_state(conn, player["id"])
-    advance_pirate_station_run(conn, player["id"])
-    conn.commit()
-    data = build_state(conn, user, p)
-    conn.commit()
-    conn.close()
-    return data
+    try:
+        # Keep only immediate movement correction here. build_state owns the heavier
+        # world maintenance pass, so /api/state no longer runs the same market/event
+        # loops twice per poll.
+        p = resolve_completed_travel(conn, get_player(conn, player["id"]))
+        p = resolve_intercept_if_close(conn, p)
+        conn.commit()
+        token = _REQUEST_CACHE.set({})
+        try:
+            data = build_state(conn, user, p, include_maps=bool(int(maps or 0)))
+        finally:
+            _REQUEST_CACHE.reset(token)
+        attach_deferred_social_profile_sections(data, conn, p)
+        conn.commit()
+        return data
+    finally:
+        conn.close()
 
 
+@app.get("/api/map/snapshot")
+@app.get("/api/state/map")
+def state_map(refresh: int = 0, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = resolve_completed_travel(conn, get_player(conn, player["id"]))
+        p = resolve_intercept_if_close(conn, p)
+        conn.commit()
+        data = build_map_state_snapshot(conn, user, p, force=bool(int(refresh or 0)))
+        conn.commit()
+        return data
+    finally:
+        conn.close()
+
+
+@app.get("/api/map/delta")
+@app.get("/api/state/map/ping")
+def state_map_ping(
+    revision: str = "",
+    lastKnownVersion: str = "",
+    last_known_version: str = "",
+    group_hashes: str = "",
+    map_type: str = "all",
+    ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context),
+) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = resolve_completed_travel(conn, get_player(conn, player["id"]))
+        p = resolve_intercept_if_close(conn, p)
+        conn.commit()
+        object_revision = map_revision_hash(map_snapshot_revision(conn, user, p, include_ttl=False))
+        client_revision = str(revision or lastKnownVersion or last_known_version or "").strip()
+        if client_revision == object_revision:
+            return {
+                "ok": True,
+                "changed": False,
+                "map_snapshot": {
+                    "version": object_revision,
+                    "objectRevision": object_revision,
+                    "object_revision": object_revision,
+                    "timestamp": iso(),
+                    "ttlSeconds": PERF_MAP_SNAPSHOT_TTL_SECONDS,
+                },
+                "server_time": iso(),
+            }
+
+        client_hashes = parse_map_group_hashes(group_hashes)
+        if not client_revision or not client_hashes:
+            return {
+                "ok": True,
+                "changed": True,
+                "resyncRequired": True,
+                "reason": "Client map version is missing or too old for deltas.",
+                "map_snapshot": {
+                    "version": object_revision,
+                    "objectRevision": object_revision,
+                    "object_revision": object_revision,
+                    "timestamp": iso(),
+                    "ttlSeconds": PERF_MAP_SNAPSHOT_TTL_SECONDS,
+                },
+                "server_time": iso(),
+            }
+        snapshot = build_map_state_snapshot(conn, user, p, force=True)
+        current_hashes = (snapshot.get("map_snapshot") or {}).get("groupHashes") or {}
+        wanted = str(map_type or "all").lower()
+        map_keys = ("system_map",) if wanted == "system" else ("galaxy_map",) if wanted == "galaxy" else ("system_map", "galaxy_map")
+        payload: Dict[str, Any] = {
+            "ok": True,
+            "changed": True,
+            "server_time": snapshot.get("server_time") or iso(),
+            "map_snapshot": snapshot.get("map_snapshot") or {},
+            "map_delta": {},
+        }
+        sent_any = False
+        for key in MAP_DELTA_TOP_LEVEL_KEYS:
+            if current_hashes.get(key) != client_hashes.get(key):
+                payload[key] = snapshot.get(key)
+                sent_any = True
+        for map_key in map_keys:
+            map_delta: Dict[str, Any] = {}
+            source = snapshot.get(map_key) or {}
+            for group_key in MAP_DELTA_MAP_KEYS.get(map_key, ()):
+                hash_key = f"{map_key}.{group_key}"
+                if current_hashes.get(hash_key) != client_hashes.get(hash_key):
+                    map_delta[group_key] = source.get(group_key)
+            if map_delta:
+                payload["map_delta"][map_key] = map_delta
+                sent_any = True
+        payload["changed"] = bool(sent_any)
+        return payload
+    finally:
+        conn.close()
+
+
+
+
+@app.get("/api/state/profile")
+def state_profile(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = get_player(conn, player["id"])
+        return build_profile_state_slice(conn, user, p)
+    finally:
+        conn.close()
+
+
+@app.get("/api/achievements")
+def state_achievements(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = get_player(conn, player["id"])
+        return build_profile_state_slice(conn, user, p)
+    finally:
+        conn.close()
+
+
+@app.get("/api/profile/public-profiles")
+def state_public_profiles(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        return {"public_profiles": build_public_profiles_state(conn), "server_time": iso()}
+    finally:
+        conn.close()
+
+
+@app.get("/api/state/chat")
+def state_chat(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        return {"chat_messages": build_chat_messages(conn, user["id"]), "server_time": iso()}
+    finally:
+        conn.close()
+
+
+@app.get("/api/state/party")
+def state_party(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = get_player(conn, player["id"])
+        return {"party": build_party_state(conn, p), "server_time": iso()}
+    finally:
+        conn.close()
+
+
+@app.get("/api/state/social")
+def state_social(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = get_player(conn, player["id"])
+        return {"social": build_social_state(conn, p), "server_time": iso()}
+    finally:
+        conn.close()
+
+
+@app.get("/api/state/social-profile")
+def state_social_profile(ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depends(current_context)) -> Dict[str, Any]:
+    user, player = ctx
+    conn = connect()
+    try:
+        p = get_player(conn, player["id"])
+        return {
+            **build_profile_state_slice(conn, user, p),
+            "public_profiles": build_public_profiles_state(conn),
+            "party": build_party_state(conn, p),
+            "social": build_social_state(conn, p),
+            "server_time": iso(),
+        }
+    finally:
+        conn.close()
 
 
 @app.get("/api/battle-alert")
@@ -20794,6 +22614,10 @@ def combat_target_legality(conn: sqlite3.Connection, player: Dict[str, Any], tar
     disposition = str(target.get("disposition") or "neutral").lower(); kind = target.get("kind") or target.get("targetType")
     if mode == "duel": return {"state":"legal", "criminal": False, "label":"Consensual duel", "heatGain":0, "jailRisk":0}
     if kind == "player":
+        defender_id = int(target.get("rawId") or target.get("playerId") or 0)
+        guard = globals().get("nova_should_skip_bounty_and_jail")
+        if defender_id and callable(guard) and guard(conn, int(player.get("id") or 0), defender_id):
+            return {"state":"legal", "criminal": False, "label":"Active guild war target", "heatGain":0, "jailRisk":0}
         state = "criminal" if security >= 45 else "risky"
         return {"state": state, "criminal": True, "label":"Unlawful PvP aggression" if state == "criminal" else "Low-security PvP aggression", "heatGain": COMBAT_BALANCE["illegal_attack_heat"][state], "jailRisk": 0.20 if state == "criminal" else 0.08}
     if role in COMBAT_LEGAL_ROLES or disposition == "hostile":
@@ -21529,7 +23353,7 @@ def apply_combatant_attack(conn: sqlite3.Connection, player: Dict[str, Any], ses
         target_ref = combat_default_target_for_actor(session, actor_ref, "")
         defender_profile = combat_actor_profile(session, target_ref)
         defender_state = combat_actor_state(session, target_ref)
-    if not target_ref or combat_participant_side(session, target_ref) == actor_side:
+    if not target_ref or not combat_actors_are_hostile(session, actor_ref, target_ref):
         raise HTTPException(400, "Select an opposing combatant.")
 
     legal = session.get("legal") or {}
@@ -21582,6 +23406,13 @@ def apply_combatant_attack(conn: sqlite3.Connection, player: Dict[str, Any], ses
         entry = {"round": int(session.get("round_no") or 1), "actor": actor_side, "actorRef": actor_ref, "targetRef": target_ref, "targetName": target_name, "action": action.get("name"), "weaponType": action.get("type"), "hit": False, "projectileCount": projectile_count, "splitDamage": projectile_count > 1, "shieldDamage": 0, "hullDamage": 0, "playerHull": int((session.get("player_state") or {}).get("hull") or 0), "enemyHull": int((session.get("enemy_state") or {}).get("hull") or 0), "playerShield": int((session.get("player_state") or {}).get("shield") or 0), "enemyShield": int((session.get("enemy_state") or {}).get("shield") or 0), "targetHull": int(defender_state.get("hull") or 0), "targetShield": int(defender_state.get("shield") or 0), "text": f"{actor_name} fires {action.get('name')} at {target_name} but misses."}
     log.append(entry)
     session["log"] = log
+    damage_amount = int(entry.get("shieldDamage") or 0) + int(entry.get("hullDamage") or 0)
+    actor_player_id = metric_player_id_from_ref(actor_ref)
+    target_player_id = metric_player_id_from_ref(target_ref)
+    if actor_player_id:
+        emit_player_metric(conn, actor_player_id, "damage_dealt", damage_amount, planet_id=session.get("planet_id"), metadata={"action": "combat_attack", "battle_id": session.get("battle_id"), "target_ref": target_ref, "weapon": action.get("name"), "hit": bool(entry.get("hit"))})
+    if target_player_id:
+        emit_player_metric(conn, target_player_id, "damage_taken", damage_amount, planet_id=session.get("planet_id"), metadata={"action": "combat_defense", "battle_id": session.get("battle_id"), "actor_ref": actor_ref, "weapon": action.get("name"), "hit": bool(entry.get("hit"))})
     session["rounds"] = int(session.get("round_no") or 1)
     session["round_no"] = int(session.get("round_no") or 1) + 1
     combat_actor_set_target_ref(session, actor_ref, target_ref)
@@ -21826,7 +23657,7 @@ def combat_live_sides(session: Dict[str, Any]) -> set:
     live = set()
     for combatant in combat_build_combatants(session):
         if not combatant.get("defeated") and not combatant.get("escaped"):
-            live.add(str(combatant.get("side") or ""))
+            live.add(combat_faction_key(combatant.get("factionKey") or "") or str(combatant.get("side") or ""))
     return {x for x in live if x}
 
 
@@ -21841,7 +23672,12 @@ def maybe_finalize_combat_after_action(conn: sqlite3.Connection, player: Dict[st
         process_combat_defeats(conn, player, session)
         live_sides = combat_live_sides(session)
         if len(live_sides) <= 1:
-            session["forced_winner_side"] = next(iter(live_sides), None) or ("enemy" if combat_ref_is_escaped(session, combat_primary_ref(session, "player")) else "player")
+            winner_key = next(iter(live_sides), None)
+            primary_key = combat_faction_key((session.get("player_faction") or {}).get("key") or (session.get("player_faction") or {}).get("id"))
+            if winner_key and primary_key:
+                session["forced_winner_side"] = "player" if winner_key == primary_key else "enemy"
+            else:
+                session["forced_winner_side"] = winner_key or ("enemy" if combat_ref_is_escaped(session, combat_primary_ref(session, "player")) else "player")
             return finalize_realtime_combat_battle(conn, owner, session)
         return None
     if int(y_state.get("hull") or 0) <= 0 or int(e_state.get("hull") or 0) <= 0:
@@ -22148,7 +23984,7 @@ def combat_ref_is_defeated(session: Dict[str, Any], actor_ref: str) -> bool:
 def combat_build_combatants(session: Dict[str, Any], viewer_ref: str = "") -> List[Dict[str, Any]]:
     combatants: List[Dict[str, Any]] = []
 
-    def add_card(ref: str, side: str, kind: str, name: str, ship: Dict[str, Any], state: Dict[str, Any], joined_at: Optional[str] = None) -> None:
+    def add_card(ref: str, side: str, kind: str, name: str, ship: Dict[str, Any], state: Dict[str, Any], joined_at: Optional[str] = None, faction: Optional[Dict[str, Any]] = None) -> None:
         ref = str(ref or "")
         if not ref or combat_ref_is_escaped(session, ref):
             return
@@ -22159,9 +23995,14 @@ def combat_build_combatants(session: Dict[str, Any], viewer_ref: str = "") -> Li
         target_ref = combat_actor_target_ref(session, ref)
         primary_side = combat_primary_side_for_ref(session, ref)
         effect_key = primary_side or ref
+        faction_payload = combat_faction_payload(faction)
         combatants.append({
             "ref": ref,
             "side": side,
+            "faction": faction_payload,
+            "factionKey": faction_payload.get("key"),
+            "factionName": faction_payload.get("name"),
+            "factionColor": faction_payload.get("color"),
             "effectKey": effect_key,
             "primary": bool(primary_side),
             "kind": kind,
@@ -22183,15 +24024,15 @@ def combat_build_combatants(session: Dict[str, Any], viewer_ref: str = "") -> Li
 
     player_ref = combat_primary_ref(session, "player")
     enemy_ref = combat_primary_ref(session, "enemy")
-    add_card(player_ref, "player", "player", (session.get("player_name") or (session.get("yourShip") or {}).get("name") or "Pilot"), session.get("yourShip") or {}, combat_actor_state(session, player_ref), session.get("started_at"))
+    add_card(player_ref, "player", "player", (session.get("player_name") or (session.get("yourShip") or {}).get("name") or "Pilot"), session.get("yourShip") or {}, combat_actor_state(session, player_ref), session.get("started_at"), session.get("player_faction"))
     target = session.get("target") or {}
-    add_card(enemy_ref, "enemy", target.get("kind") or target.get("targetType") or "enemy", target.get("name") or (session.get("enemyShip") or {}).get("name") or "Target", session.get("enemyShip") or {}, combat_actor_state(session, enemy_ref), session.get("started_at"))
+    add_card(enemy_ref, "enemy", target.get("kind") or target.get("targetType") or "enemy", target.get("name") or (session.get("enemyShip") or {}).get("name") or "Target", session.get("enemyShip") or {}, combat_actor_state(session, enemy_ref), session.get("started_at"), session.get("target_faction") or target.get("faction"))
     for participant in session.get("player_support") or []:
         ship = participant.get("ship") or {}
-        add_card(str(participant.get("ref") or ""), "player", participant.get("kind") or "support", participant.get("name") or ship.get("name") or "Support", ship, combat_actor_state(session, str(participant.get("ref") or "")), participant.get("joinedAt"))
+        add_card(str(participant.get("ref") or ""), "player", participant.get("kind") or "support", participant.get("name") or ship.get("name") or "Support", ship, combat_actor_state(session, str(participant.get("ref") or "")), participant.get("joinedAt"), participant.get("faction"))
     for participant in session.get("enemy_support") or []:
         ship = participant.get("ship") or {}
-        add_card(str(participant.get("ref") or ""), "enemy", participant.get("kind") or "support", participant.get("name") or ship.get("name") or "Support", ship, combat_actor_state(session, str(participant.get("ref") or "")), participant.get("joinedAt"))
+        add_card(str(participant.get("ref") or ""), "enemy", participant.get("kind") or "support", participant.get("name") or ship.get("name") or "Support", ship, combat_actor_state(session, str(participant.get("ref") or "")), participant.get("joinedAt"), participant.get("faction"))
     return combatants
 
 
@@ -22200,19 +24041,34 @@ def combat_default_target_for_actor(session: Dict[str, Any], actor_ref: str, req
     requested_ref = str(requested_ref or "")
     combatants = combat_build_combatants(session, actor_ref)
     refs = {str(c.get("ref")): c for c in combatants}
-    if requested_ref and requested_ref in refs and refs[requested_ref].get("side") != actor_side and not refs[requested_ref].get("defeated"):
+    if requested_ref and requested_ref in refs and combat_actors_are_hostile(session, actor_ref, requested_ref) and not refs[requested_ref].get("defeated"):
         return requested_ref
     current = combat_actor_target_ref(session, actor_ref)
-    if current in refs and refs[current].get("side") != actor_side and not refs[current].get("defeated"):
+    if current in refs and combat_actors_are_hostile(session, actor_ref, current) and not refs[current].get("defeated"):
         return current
     for combatant in combatants:
-        if combatant.get("side") != actor_side and not combatant.get("defeated"):
+        target_ref = str(combatant.get("ref") or "")
+        if combat_actors_are_hostile(session, actor_ref, target_ref) and not combatant.get("defeated"):
             return str(combatant.get("ref") or "")
     return combat_side_opponent_primary_ref(session, actor_side)
 
 
 def build_combat_session_payload(session: Dict[str, Any], viewer_player_id: Optional[int] = None) -> Dict[str, Any]:
     max_e = int(COMBAT_BALANCE.get("attack_energy_max", 12))
+    full_log = session.get("log") or []
+    log_limit = 160 if str(session.get("status") or "active") == "complete" else 80
+    log_payload = full_log[-log_limit:]
+    def support_summary(p: Dict[str, Any]) -> Dict[str, Any]:
+        ship = (p or {}).get("ship") or {}
+        faction = combat_faction_payload((p or {}).get("faction"))
+        return {
+            "ref": (p or {}).get("ref"),
+            "side": (p or {}).get("side"),
+            "kind": (p or {}).get("kind"),
+            "name": (p or {}).get("name") or ship.get("name") or "Support",
+            "factionName": faction.get("name"),
+            "factionColor": faction.get("color"),
+        }
     viewer_ref = f"player:{int(viewer_player_id)}" if viewer_player_id else combat_primary_ref(session, "player")
     if not combat_participant_side(session, viewer_ref):
         viewer_ref = combat_primary_ref(session, "player")
@@ -22227,6 +24083,21 @@ def build_combat_session_payload(session: Dict[str, Any], viewer_player_id: Opti
     viewer_ship = combat_actor_profile(session, viewer_ref) or session.get("yourShip") or {}
     viewer_state = combat_actor_state(session, viewer_ref) or session.get("player_state") or {}
     combatants = combat_build_combatants(session, viewer_ref)
+    for combatant in combatants:
+        ref = str(combatant.get("ref") or "")
+        combatant["viewSide"] = combat_actor_display_side(session, viewer_ref, ref)
+        combatant["hostileToViewer"] = combatant["viewSide"] == "enemy"
+    combatants.sort(key=lambda c: (
+        0 if c.get("viewSide") == "friendly" else 1,
+        str(c.get("factionName") or ""),
+        0 if c.get("primary") else 1,
+        str(c.get("joinedAt") or ""),
+        str(c.get("name") or ""),
+    ))
+    combatants_signature = "|".join(
+        f"{c.get('ref')}:{c.get('viewSide')}:{c.get('factionKey')}:{int(bool(c.get('defeated')))}:{int(bool(c.get('escaped')))}"
+        for c in combatants
+    )
     escape_cooldowns = session.get("escape_cooldowns") or {}
     viewer_escape_at = escape_cooldowns.get(viewer_ref) or (session.get("next_escape_at") if viewer_ref == combat_primary_ref(session, "player") else None)
     return {
@@ -22235,7 +24106,9 @@ def build_combat_session_payload(session: Dict[str, Any], viewer_player_id: Opti
         "outcome": session.get("outcome") or "pending",
         "winner": session.get("winner"),
         "rounds": int(session.get("rounds") or session.get("round_no") or 0),
-        "log": session.get("log") or [],
+        "log": log_payload,
+        "logCount": len(full_log),
+        "logTruncated": len(full_log) > len(log_payload),
         "rewards": session.get("rewards") or {},
         "penalties": session.get("penalties") or {},
         "summary": session.get("summary") or "Battle engaged. Attack energy charging.",
@@ -22260,11 +24133,13 @@ def build_combat_session_payload(session: Dict[str, Any], viewer_player_id: Opti
         "enemyEnergyRateSeconds": combat_actor_energy_rate(session, default_target_ref) if default_target_ref else float(session.get("enemy_energy_rate_seconds") or 4.0),
         "playerWeapons": player_weapons,
         "playerUtilities": player_utilities,
-        "playerSupport": session.get("player_support") or [],
-        "enemySupport": session.get("enemy_support") or [],
+        "playerSupport": [support_summary(p) for p in (session.get("player_support") or [])],
+        "enemySupport": [support_summary(p) for p in (session.get("enemy_support") or [])],
         "combatants": combatants,
+        "combatantsSignature": combatants_signature,
         "viewerRef": viewer_ref,
         "viewerSide": viewer_side,
+        "viewerFaction": combat_actor_faction_info(session, viewer_ref),
         "viewerEffectKey": combat_primary_side_for_ref(session, viewer_ref) or viewer_ref,
         "defaultTargetRef": default_target_ref,
         "activeEffects": session.get("active_effects") or [],
@@ -22331,6 +24206,112 @@ def release_combat_actor_locks(conn: sqlite3.Connection, session: Dict[str, Any]
         clear_combat_actor_active_battle(conn, ref)
 
 
+def combat_faction_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_:-]+", "", str(value or "").strip().lower().replace(" ", "_"))
+
+
+def combat_faction_payload(faction: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    faction = faction or {}
+    raw_key = faction.get("code") or faction.get("key") or faction.get("id") or faction.get("faction_id")
+    key = combat_faction_key(raw_key)
+    return {
+        "id": faction.get("id") if faction.get("id") is not None else raw_key,
+        "key": key,
+        "code": faction.get("code") or key,
+        "name": faction.get("name") or faction.get("label") or (label_for_api(key) if key else "Unaligned"),
+        "color": faction.get("color") or faction.get("faction_color") or faction.get("playerFactionColor") or faction.get("npcFactionColor") or "#45f3ff",
+    }
+
+
+def combat_faction_info_for_value(conn: sqlite3.Connection, value: Any) -> Dict[str, Any]:
+    raw = str(value or "").strip()
+    if not raw:
+        return combat_faction_payload(None)
+    faction = None
+    if raw.isdigit():
+        faction = row(conn, "SELECT * FROM factions WHERE id=?", (int(raw),))
+    if not faction:
+        faction = row(conn, "SELECT * FROM factions WHERE lower(code)=lower(?) OR lower(name)=lower(?) LIMIT 1", (raw, raw))
+    if faction:
+        return combat_faction_payload(faction)
+    return combat_faction_payload({"id": raw, "code": raw, "name": label_for_api(raw)})
+
+
+def combat_faction_info_for_player(conn: sqlite3.Connection, player: Dict[str, Any]) -> Dict[str, Any]:
+    faction = player_faction(conn, player) if player else None
+    return combat_faction_payload(faction)
+
+
+def combat_faction_info_for_target(conn: sqlite3.Connection, target: Dict[str, Any]) -> Dict[str, Any]:
+    target = target or {}
+    if target.get("faction"):
+        return combat_faction_payload(target.get("faction"))
+    for key in ("faction_id", "factionId", "playerFactionId", "npcFactionId", "faction", "faction_key", "factionCode"):
+        if target.get(key) not in (None, ""):
+            return combat_faction_info_for_value(conn, target.get(key))
+    kind = str(target.get("kind") or target.get("targetType") or "").lower()
+    raw_id = target.get("rawId")
+    if kind == "player" and raw_id:
+        other = get_player(conn, int(raw_id))
+        if other:
+            return combat_faction_info_for_player(conn, other)
+    if kind in {"npc", "traveler"} and raw_id:
+        npc = row(conn, "SELECT faction_id FROM npc_agents WHERE id=?", (int(raw_id),))
+        if npc and npc.get("faction_id"):
+            return combat_faction_info_for_value(conn, npc.get("faction_id"))
+    return combat_faction_payload(None)
+
+
+def combat_faction_matches(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    ak = combat_faction_key((a or {}).get("key") or (a or {}).get("code") or (a or {}).get("id"))
+    bk = combat_faction_key((b or {}).get("key") or (b or {}).get("code") or (b or {}).get("id"))
+    return bool(ak and bk and ak == bk)
+
+
+def combat_actor_faction_info(session: Dict[str, Any], actor_ref: str) -> Dict[str, Any]:
+    actor_ref = str(actor_ref or "")
+    side = combat_primary_side_for_ref(session, actor_ref)
+    if side == "player":
+        return combat_faction_payload(session.get("player_faction"))
+    if side == "enemy":
+        return combat_faction_payload(session.get("target_faction") or (session.get("target") or {}).get("faction"))
+    _key, _idx, participant = combat_find_support_participant(session, actor_ref)
+    return combat_faction_payload((participant or {}).get("faction"))
+
+
+def combat_actors_are_hostile(session: Dict[str, Any], actor_ref: str, target_ref: str) -> bool:
+    actor_ref = str(actor_ref or "")
+    target_ref = str(target_ref or "")
+    if not actor_ref or not target_ref or actor_ref == target_ref:
+        return False
+    actor_faction = combat_actor_faction_info(session, actor_ref)
+    target_faction = combat_actor_faction_info(session, target_ref)
+    actor_key = combat_faction_key(actor_faction.get("key") or actor_faction.get("id"))
+    target_key = combat_faction_key(target_faction.get("key") or target_faction.get("id"))
+    if actor_key and target_key:
+        return actor_key != target_key
+    actor_side = combat_participant_side(session, actor_ref)
+    target_side = combat_participant_side(session, target_ref)
+    return bool(actor_side and target_side and actor_side != target_side)
+
+
+def combat_side_for_faction(session: Dict[str, Any], faction: Dict[str, Any]) -> str:
+    player_faction = combat_faction_payload(session.get("player_faction"))
+    return "player" if combat_faction_matches(player_faction, faction) else "enemy"
+
+
+def combat_actor_display_side(session: Dict[str, Any], viewer_ref: str, actor_ref: str) -> str:
+    viewer_faction = combat_actor_faction_info(session, viewer_ref)
+    actor_faction = combat_actor_faction_info(session, actor_ref)
+    if combat_faction_matches(viewer_faction, actor_faction):
+        return "friendly"
+    if combat_faction_key(actor_faction.get("key") or actor_faction.get("id")):
+        return "enemy"
+    viewer_side = combat_participant_side(session, viewer_ref) or "player"
+    actor_side = combat_participant_side(session, actor_ref)
+    return "friendly" if actor_side == viewer_side else "enemy"
+
+
 
 
 def combat_support_key(side: str) -> str:
@@ -22343,7 +24324,7 @@ def combat_support_refs(session: Dict[str, Any]) -> set:
     return {r for r in refs if r}
 
 
-def add_combat_support_participant(conn: sqlite3.Connection, session: Dict[str, Any], side: str, actor_ref: str, name: str, ship: Dict[str, Any], kind: str = "npc", target_ref: str = "") -> bool:
+def add_combat_support_participant(conn: sqlite3.Connection, session: Dict[str, Any], side: str, actor_ref: str, name: str, ship: Dict[str, Any], kind: str = "npc", target_ref: str = "", faction: Optional[Dict[str, Any]] = None) -> bool:
     side = "player" if str(side) == "player" else "enemy"
     actor_ref = str(actor_ref or "")
     if not actor_ref:
@@ -22362,11 +24343,13 @@ def add_combat_support_participant(conn: sqlite3.Connection, session: Dict[str, 
         util["requiredEnergy"] = clamp_attack_energy_cost(util.get("requiredEnergy") or util.get("cost") or 2)
         util["cost"] = util["requiredEnergy"]
     default_target_ref = str(target_ref or combat_side_opponent_primary_ref(session, side))
+    faction_payload = combat_faction_payload(faction or (ship or {}).get("faction"))
     payload = {
         "ref": actor_ref,
         "side": side,
         "kind": kind,
         "name": name or ship.get("name") or label_for_api(kind),
+        "faction": faction_payload,
         "ship": ship,
         "state": {"hull": int(ship.get("hull") or 1), "shield": int(ship.get("shield") or 0), "armor": int(ship.get("armor") or 0), "energy": int(ship.get("energy") or 0)},
         "targetRef": default_target_ref,
@@ -22446,6 +24429,66 @@ def perform_combat_support_ai_if_ready(conn: sqlite3.Connection, player: Dict[st
     return fired
 
 
+def combat_auto_join_guild_cap() -> int:
+    return max(0, int(os.getenv("NOVA_COMBAT_GUILD_AUTO_JOIN_CAP", "120") or 120))
+
+
+def combat_player_ship_profile(conn: sqlite3.Connection, player_row: Dict[str, Any]) -> Dict[str, Any]:
+    ship = row(conn, "SELECT s.*, t.name as template_name, t.class_name, t.role, t.slots_json, t.ship_tier FROM ships s JOIN ship_templates t ON t.id=s.template_id WHERE s.id=?", (player_row.get("active_ship_id"),)) if player_row.get("active_ship_id") else None
+    prof = combat_ship_profile(conn, ship, "Player Ship")
+    prof["weapons"] = normalize_combat_weapons(prof.get("weapons") or [], int(prof.get("combatRating") or 100), str(prof.get("role") or "").lower() in {"combat", "siege", "fleet", "gunship", "interceptor"})
+    prof["utilities"] = prof.get("utilities") or [dict(UTILITY_ARCHETYPES[0]), dict(UTILITY_ARCHETYPES[5])]
+    return prof
+
+
+def add_same_faction_guildmates_to_combat(conn: sqlite3.Connection, session: Dict[str, Any], player: Dict[str, Any], side: str = "") -> int:
+    cap = combat_auto_join_guild_cap()
+    if cap <= 0 or not player:
+        return 0
+    guild_id = nova_guild_member_guild_id(conn, int(player["id"])) or int(player.get("guild_id") or 0)
+    if not guild_id:
+        return 0
+    player_faction = combat_faction_info_for_player(conn, player)
+    faction_key = combat_faction_key(player_faction.get("key") or player_faction.get("id"))
+    if not faction_key:
+        return 0
+    combat_side = side if side in {"player", "enemy"} else combat_side_for_faction(session, player_faction)
+    current_refs = set(str(x) for x in (session.get("actor_refs") or []))
+    raw_faction_id = str(player.get("faction_id") or player_faction.get("id") or player_faction.get("code") or faction_key)
+    params = [guild_id, int(player["id"]), player.get("location_planet_id"), raw_faction_id, cap]
+    guildmates = rows(conn, """
+        SELECT p.*, u.username, up.display_name
+        FROM guild_members gm
+        JOIN players p ON p.id=gm.player_id
+        JOIN users u ON u.id=p.user_id
+        LEFT JOIN user_profiles up ON up.user_id=u.id
+        WHERE gm.guild_id=? AND p.id<>? AND p.location_planet_id=?
+          AND lower(COALESCE(CAST(p.faction_id AS TEXT),''))=lower(?)
+        ORDER BY gm.player_id ASC
+        LIMIT ?
+    """, tuple(params))
+    joined = 0
+    for member in guildmates:
+        actor_ref = f"player:{int(member['id'])}"
+        if actor_ref in current_refs:
+            continue
+        active = combat_actor_active_battle(conn, actor_ref)
+        if active and int(active.get("id") or 0) != int(session.get("battle_id") or 0):
+            continue
+        member_faction = combat_faction_info_for_player(conn, member)
+        if not combat_faction_matches(player_faction, member_faction):
+            continue
+        ship = combat_player_ship_profile(conn, member)
+        target_ref = combat_default_target_for_actor(session, actor_ref)
+        name = member.get("display_name") or member.get("callsign") or member.get("username") or "Guildmate"
+        if add_combat_support_participant(conn, session, combat_side, actor_ref, name, ship, "player", target_ref=target_ref, faction=member_faction):
+            current_refs.add(actor_ref)
+            joined += 1
+    if joined:
+        session["summary"] = f"Guild fleet auto-joined: {joined} same-faction guildmate{'s' if joined != 1 else ''} entered the battle."
+    return joined
+
+
 def npc_attack_contact_range_pct(npc: Dict[str, Any], map_type: str) -> float:
     # Close contact only. This replaces the old radar-radius style chase behavior.
     base = 1.05 if str(map_type) == "system" else 0.85
@@ -22506,7 +24549,9 @@ def start_npc_player_battle_if_contact(conn: sqlite3.Connection, player: Dict[st
     if active:
         session = load_combat_session(conn, int(active["id"]), int(player["id"]))
         ship = npc_combat_ship_profile(npc)
-        joined = add_combat_support_participant(conn, session, "enemy", actor_ref, npc.get("name") or "NPC attacker", ship, "npc")
+        npc_faction = combat_faction_info_for_value(conn, npc.get("faction_id")) if npc.get("faction_id") else combat_faction_payload(None)
+        ship["faction"] = npc_faction
+        joined = add_combat_support_participant(conn, session, "enemy", actor_ref, npc.get("name") or "NPC attacker", ship, "npc", faction=npc_faction)
         if joined:
             actor_refs = list(session.get("actor_refs") or [])
             if traveler_ref not in actor_refs:
@@ -22573,7 +24618,9 @@ def _nova_sec_start_security_battle(conn, defender: dict, player_ctx: dict, reas
             session = load_combat_session(conn, int(active["id"]), None)
             if combat_ref_is_escaped(session, player_ref):
                 return False
-            joined = add_combat_support_participant(conn, session, "enemy", security_ref, defender.get("name") or ship.get("name") or "Security defender", ship, "npc", target_ref=player_ref)
+            defender_faction = combat_faction_info_for_value(conn, defender.get("faction_id")) if defender.get("faction_id") else combat_faction_payload(None)
+            ship["faction"] = defender_faction
+            joined = add_combat_support_participant(conn, session, "enemy", security_ref, defender.get("name") or ship.get("name") or "Security defender", ship, "npc", target_ref=player_ref, faction=defender_faction)
             if joined:
                 combat_actor_set_target_ref(session, security_ref, player_ref)
                 persist_combat_session(conn, session)
@@ -22818,6 +24865,7 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         reroll_npc_targets_after_player_escape(conn, player, session)
         persist_combat_session(conn, session)
         add_event(conn, player["id"], "combat", summary, {"battleId": session.get("battle_id"), "outcome": outcome})
+        emit_player_metric(conn, player["id"], "battles_survived", 1, player=player, planet_id=session.get("planet_id"), metadata={"action": "combat_escape", "battle_id": session.get("battle_id"), "target": target.get("name")})
         return build_combat_session_payload(session, int(player["id"]))
 
     enemy_destroyed = int(e_state.get("hull") or 0) <= 0
@@ -22836,8 +24884,16 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         if alien_target:
             xp = max(1, int(xp * 2))
             rewards["eventXpMultiplier"] = 2
+        territory_reward = territory_zone_modifier(conn, player.get("location_planet_id"))
+        if float(territory_reward.get("multiplier") or 1.0) > 1.0:
+            mult = float(territory_reward.get("multiplier") or 1.0)
+            credits = max(0, int(credits * mult))
+            xp = max(1, int(xp * mult))
+            rewards["territoryRewardBonus"] = {"status": territory_reward.get("status"), "multiplier": round(mult, 3), "supplyTier": territory_reward.get("tier")}
         conn.execute("UPDATE players SET credits=credits+? WHERE id=?", (credits, player["id"]))
         add_xp(conn, player["id"], xp)
+        nova_safe_record_guild_contribution(conn, player["id"], "combat", max(50, xp + credits // 100), 1, "combat_victory", {"battleId": session.get("battle_id"), "targetKind": target.get("kind"), "targetRawId": target.get("rawId"), "credits": credits, "xp": xp})
+        nova_record_guild_war_battle_outcome(conn, player["id"], int(target.get("rawId") or 0) if target.get("kind") == "player" and target.get("rawId") else None, str(target.get("targetType") or target.get("kind") or ""), player.get("location_planet_id"), {"battleId": session.get("battle_id"), "outcome": "victory"})
         rewards.update({"credits": credits, "xp": xp, "energySpent": int(session.get("energy_cost") or 0), "rewardProfile": reward_profile, "progression": grant_action_progression(conn, player["id"], "combat", 1.0 + (target.get("level") or 1) / 30, True)})
         if enemy_destroyed and target.get("inTransit"):
             site_preview = create_salvage_site(conn, player["location_planet_id"], None, target, enemy, source_type="open_space_intercept_pending")
@@ -22851,6 +24907,13 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
             npc_after_battle = route_surviving_npc_after_player_battle(conn, player, session, destroyed=False)
             if npc_after_battle:
                 rewards["npcAfterBattle"] = npc_after_battle
+        if enemy_destroyed and target.get("kind") == "player" and target.get("rawId"):
+            defeated_player_id = int(target.get("rawId"))
+            defeated_ship = row(conn, "SELECT * FROM ships WHERE id=(SELECT active_ship_id FROM players WHERE id=?)", (defeated_player_id,))
+            destroy_damage = max(1000, int((defeated_ship or {}).get("hull") or enemy.get("hull") or 0) + int((defeated_ship or {}).get("shield") or enemy.get("shield") or 0) * 2 + 250)
+            defeated_note = damage_or_destroy_ship(conn, defeated_player_id, destroy_damage, "pvp combat defeat", bool(session.get("god")), hospital_minutes=0)
+            rewards["defeatedPlayerRespawn"] = defeated_note
+            add_event(conn, defeated_player_id, "combat", defeated_note, {"battleId": session.get("battle_id"), "defeatedByPlayerId": player["id"]})
         if enemy_destroyed and target.get("targetType") == "security_defense":
             defender_id = str(target.get("securityNpcId") or target.get("rawId") or "")
             if defender_id:
@@ -22870,6 +24933,9 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
             qty = max(1, int((target.get("level") or 1) / 5) + int(enemy.get("tier") or 1))
             add_inventory_item(conn, player["id"], "combat_salvage", "Combat Salvage", "salvage", qty, 1, 420, 0.5, "Recovered loose material after battle", "combat", category="salvage", rarity="uncommon", respect_cargo=True, god=bool(session.get("god")))
             rewards.setdefault("items", []).append({"code":"combat_salvage", "name":"Combat Salvage", "qty":qty})
+        if enemy_destroyed and territory_reward.get("war") and rng.random() < 0.07:
+            add_inventory_item(conn, player["id"], "warfront_relic", "Warfront Relic", "relic", 1, 1, 6500, 0.4, "Recovered from a contested war zone.", "territory_war", category="quest_items", rarity="epic", respect_cargo=True, god=bool(session.get("god")))
+            rewards.setdefault("items", []).append({"code": "warfront_relic", "name": "Warfront Relic", "qty": 1})
         if alien_target and enemy_destroyed:
             alien_drop = grant_alien_unique_equipment_drop(conn, player["id"], target, enemy, rng)
             if alien_drop:
@@ -22889,6 +24955,9 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
         destroy_reason = "pvp combat defeat" if target.get("kind") == "player" else "combat defeat"
         damage_or_destroy_ship(conn, player["id"], max(80, int(((your.get("hull") or 0) - int(y_state.get("hull") or 0)) * 0.35)), destroy_reason, bool(session.get("god")), hospital_minutes=0)
         grant_action_progression(conn, player["id"], "combat", 0.45, False)
+        nova_safe_record_guild_contribution(conn, player["id"], "combat", 25, 1, "combat_defeat", {"battleId": session.get("battle_id"), "targetKind": target.get("kind"), "targetRawId": target.get("rawId")})
+        if target.get("kind") == "player" and target.get("rawId"):
+            nova_record_guild_war_battle_outcome(conn, int(target.get("rawId")), player["id"], "player", player.get("location_planet_id"), {"battleId": session.get("battle_id"), "outcome": "defeated_attacker"})
 
     if legal.get("criminal"):
         heat = increase_player_heat(conn, player["id"], int(legal.get("heatGain") or 0), "unlawful combat")
@@ -22930,6 +24999,20 @@ def finalize_realtime_combat_battle(conn: sqlite3.Connection, player: Dict[str, 
     else:
         immune_until = utcnow() + timedelta(seconds=combat_post_battle_immunity_seconds())
         conn.execute("INSERT INTO combat_cooldowns (player_id,combat_until,updated_at) VALUES (?,?,?) ON CONFLICT(player_id) DO UPDATE SET combat_until=excluded.combat_until, updated_at=excluded.updated_at", (player["id"], iso(immune_until), iso()))
+    combat_metrics = {}
+    if player_won:
+        combat_metrics["battles_won"] = 1
+        combat_metrics["battles_survived"] = 1
+        if enemy_destroyed and target.get("kind") == "player":
+            combat_metrics["player_kills"] = 1
+        elif enemy_destroyed:
+            combat_metrics["npc_kills"] = 1
+        if str(target.get("role") or target.get("targetType") or "").lower() == "bounty":
+            combat_metrics["bounty_value_claimed"] = int((rewards or {}).get("credits") or 0)
+        queue_territory_influence(conn, player["id"], session.get("planet_id") or player.get("location_planet_id"), "combat", 12 if enemy_destroyed else 6, {"battle_id": session.get("battle_id"), "target_kind": target.get("kind"), "target_type": target.get("targetType"), "destroyed": enemy_destroyed}, player=player)
+    elif int(y_state.get("hull") or 0) > 0:
+        combat_metrics["battles_survived"] = 1
+    emit_player_metrics(conn, player["id"], combat_metrics, player=player, planet_id=session.get("planet_id"), metadata={"action": "combat_complete", "battle_id": session.get("battle_id"), "target": target.get("name"), "target_kind": target.get("kind"), "outcome": outcome, "winner": winner})
     persist_combat_session(conn, session)
     add_event(conn, player["id"], "combat", summary, {"battleId": session.get("battle_id"), "outcome": outcome, "legalState": legal.get("state")})
     return build_combat_session_payload(session, int(player["id"]))
@@ -23144,6 +25227,11 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
     legal = preview["legal"]
     your = dict(preview["yourShip"])
     enemy = dict(preview["enemyShip"])
+    player_faction_info = combat_faction_info_for_player(conn, player)
+    target_faction_info = combat_faction_info_for_target(conn, target)
+    your["faction"] = player_faction_info
+    enemy["faction"] = target_faction_info
+    target["faction"] = target_faction_info
 
     # If this target is already inside an active combat session, widen that
     # battle instead of creating a duplicate isolated battle against the same ship.
@@ -23170,10 +25258,15 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
                 if session_target.get("kind") == "player" and session_target.get("rawId"):
                     enemy_refs.add(f"player:{int(session_target['rawId'])}")
                 attacked_side = "enemy" if any(str(r) in enemy_refs for r in target_refs) else "player"
-            join_side = "enemy" if attacked_side == "player" else "player"
-            joined = add_combat_support_participant(conn, session, join_side, player_ref, player.get("callsign") or "Player support", your, "player", target_ref=attacked_ref)
+            attacked_faction = combat_actor_faction_info(session, attacked_ref)
+            join_side = attacked_side if combat_faction_matches(player_faction_info, attacked_faction) else ("enemy" if attacked_side == "player" else "player")
+            joined = add_combat_support_participant(conn, session, join_side, player_ref, player.get("callsign") or "Player support", your, "player", target_ref=attacked_ref, faction=player_faction_info)
             if joined:
-                combat_actor_set_target_ref(session, player_ref, attacked_ref)
+                if combat_actors_are_hostile(session, player_ref, attacked_ref):
+                    combat_actor_set_target_ref(session, player_ref, attacked_ref)
+                else:
+                    combat_actor_set_target_ref(session, player_ref, combat_default_target_for_actor(session, player_ref))
+                add_same_faction_guildmates_to_combat(conn, session, player, join_side)
                 attacked_name = (combat_actor_profile(session, attacked_ref) or {}).get("name") or target.get("name") or "target"
                 add_event(conn, int(session.get("player_id") or player["id"]), "combat", f"{player.get('callsign') or 'A player'} joined the {join_side} side of the battle targeting {attacked_name}.", {"battleId": int(active_target_lock["id"]), "playerId": int(player["id"]), "targetRef": attacked_ref})
                 persist_combat_session(conn, session)
@@ -23235,6 +25328,8 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
         "winner": None,
         "yourShip": your,
         "enemyShip": enemy,
+        "player_faction": player_faction_info,
+        "target_faction": target_faction_info,
         "legal": legal,
         "rewardProfile": preview.get("rewardProfile") or combat_reward_profile(target, enemy, legal),
         "energy_cost": energy_cost,
@@ -23274,6 +25369,7 @@ def simulate_combat_battle(conn: sqlite3.Connection, player: Dict[str, Any], tar
         "next_escape_at": iso(now),
         "escape_chance": player_escape_chance(conn, player),
     }
+    add_same_faction_guildmates_to_combat(conn, session, player, "player")
     persist_combat_session(conn, session)
     add_event(conn, player["id"], "combat", summary, {"battleId": battle_id, "target_ref": target_ref, "realTime": True})
     return {"message": summary, "battleId": battle_id, "battle": build_combat_session_payload(session, player["id"])}
@@ -24493,7 +26589,32 @@ def grant_alien_unique_equipment_drop(conn: sqlite3.Connection, player_id: int, 
 
 
 
-def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any]) -> Dict[str, Any]:
+_PUBLIC_PROFILES_STATE_CACHE: Tuple[float, List[Dict[str, Any]]] = (0.0, [])
+_PUBLIC_PROFILES_STATE_LOCK = threading.Lock()
+_PUBLIC_PROFILES_STATE_TTL = float(os.getenv("NOVA_PUBLIC_PROFILES_CACHE_TTL_SECONDS", "10"))
+
+
+def build_public_profiles_state(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    global _PUBLIC_PROFILES_STATE_CACHE
+    now = time.monotonic()
+    with _PUBLIC_PROFILES_STATE_LOCK:
+        cached_at, cached_payload = _PUBLIC_PROFILES_STATE_CACHE
+        if cached_payload and (now - cached_at) < _PUBLIC_PROFILES_STATE_TTL:
+            return [dict(p) for p in cached_payload]
+    user_ids = [int(u["id"]) for u in rows(conn, "SELECT id FROM users ORDER BY id LIMIT 80")]
+    payload = [public_profile_payload(conn, uid) for uid in user_ids]
+    with _PUBLIC_PROFILES_STATE_LOCK:
+        _PUBLIC_PROFILES_STATE_CACHE = (now, [dict(p) for p in payload])
+    return [dict(p) for p in payload]
+
+
+def invalidate_public_profiles_state_cache() -> None:
+    global _PUBLIC_PROFILES_STATE_CACHE
+    with _PUBLIC_PROFILES_STATE_LOCK:
+        _PUBLIC_PROFILES_STATE_CACHE = (0.0, [])
+
+
+def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], include_maps: bool = True) -> Dict[str, Any]:
     # Central full-state builder restored for /api/state and action refresh responses.
     # NOVA_AUTO_BATTLE_MAP_PATCH_CALL_V1
     nova_patch_redistribute_planets_once(conn)
@@ -24503,16 +26624,14 @@ def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str
     resolve_completed_cargo_operations(conn, player["id"])
     resolve_completed_planet_missions(conn, player["id"])
     resolve_player_legal_state(conn, player["id"])
-    simulate_galaxy_background_market(conn, player, force=False)
     regenerate_energy(conn, player["id"])
     if user.get("god_mode"):
         conn.execute("UPDATE players SET energy=max(energy,999999999), max_energy=max(max_energy,999999999), energy_updated_at=? WHERE id=?", (iso(), player["id"]))
     player = get_player(conn, player["id"])
     ensure_galaxy_faction_content(conn)
-    ensure_server_world_control(conn, force=False)
-    process_server_events(conn)
-    process_planet_faction_wars(conn, player)
-    process_guild_planet_xp_bonus(conn)
+    # Heavy world maintenance runs in the background simulation loop. Full state
+    # requests only refresh player-specific truth that must stay authoritative.
+    process_planet_faction_wars(conn, player, resolve_global=False)
     player = get_player(conn, player["id"])
     ensure_ship_parts(conn)
     sync_player_fuel_capacity(conn, int(player["id"]))
@@ -24569,13 +26688,13 @@ def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str
         mod["stats"] = apply_tier_to_item_stats(decode_json(mod.get("stats_json"), {}) or {}, mod["current_tier"])
         attach_tier_metadata(mod)
         attach_item_visual(mod)
-    ship_templates = rows(conn, "SELECT * FROM ship_templates ORDER BY price")
+    ship_templates = cached_rows(conn, "ship_templates:by_price", "SELECT * FROM ship_templates ORDER BY price", ttl=60.0)
     for st in ship_templates:
         st["current_tier"] = clamp_tier(st.get("ship_tier", 1))
         st["max_tier"] = max(st["current_tier"], st["current_tier"] + 2)
         st["tier_display"] = get_tier_display_data(st["current_tier"], st["max_tier"])
         st["image_url"] = ship_visual_payload(st.get("name") or st.get("code"), st.get("role") or st.get("class_name"))
-    module_templates = rows(conn, "SELECT * FROM module_templates ORDER BY slot_type, price")
+    module_templates = cached_rows(conn, "module_templates:slot_price", "SELECT * FROM module_templates ORDER BY slot_type, price", ttl=60.0)
     for mt in module_templates:
         mt["item_type"] = "ship_module"
         mt["category"] = "ship_modules"
@@ -24601,50 +26720,42 @@ def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str
         op.update(pve_operation_runtime_stats(op, ship_power, bool(user["god_mode"]), conn, player["id"], op_planet or planet))
     active_career = active_job_runtime(conn, player["id"])
     travel_state = build_travel_state(conn, player)
-    galaxy_map = build_galaxy_map(conn, player)
-    system_map = build_system_map(conn, player)
+    galaxy_map = build_galaxy_map(conn, player) if include_maps else None
+    system_map = build_system_map(conn, player) if include_maps else None
     if planet:
         planet["image_url"] = planet_visual_payload(planet)
     ship_status = build_ship_status(conn, player, active_ship)
-    all_planets = rows(conn, "SELECT p.*, g.name as galaxy_name, g.code as galaxy_code FROM planets p JOIN galaxies g ON g.id=p.galaxy_id ORDER BY g.id, p.name")
+    all_planets = cached_rows(conn, "planets:all_with_galaxy", "SELECT p.*, g.name as galaxy_name, g.code as galaxy_code FROM planets p JOIN galaxies g ON g.id=p.galaxy_id ORDER BY g.id, p.name", ttl=10.0)
     for pl in all_planets:
         pl["image_url"] = planet_visual_payload(pl)
     prune_admin_action_logs(conn)
     activity_rows = []
-    ensure_achievement_rows(conn, player["id"])
-    profile = profile_payload(conn, user, player)
-    achievements = build_achievements_state(conn, player["id"])
-    chat_messages = build_chat_messages(conn, user["id"])
+    profile = profile_summary_payload(conn, user, player)
     active_pirate_station = pirate_station_payload(conn, player["id"])
-    party_state = build_party_state(conn, player)
-    social_state = build_social_state(conn, player)
     trade_state = build_trade_state(conn, player)
-    return {
+    active_wars = active_or_upcoming_planet_wars(conn)
+    resolved_wars = resolved_planet_faction_wars(conn)
+    factions = cached_rows(conn, "factions:all", "SELECT * FROM factions ORDER BY id", ttl=30.0)
+    galaxies = cached_rows(conn, "galaxies:all", "SELECT * FROM galaxies", ttl=30.0)
+    state_payload = {
         "user": {"id": user["id"], "username": user["username"], "role": user["role"], "god_mode": bool(user["god_mode"]), "dev_mode": DEV_MODE},
         "profile": profile,
-        "achievements": achievements,
-        "public_profiles": [public_profile_payload(conn, int(u["id"])) for u in rows(conn, "SELECT id FROM users ORDER BY id LIMIT 80")],
-        "avatar_options": avatar_options_for_faction_code(player_faction_code(conn, player)),
-        "chat_messages": chat_messages,
         "active_pirate_station": active_pirate_station,
-        "party": party_state,
-        "social": social_state,
         "trade": trade_state,
         "player": player,
         "player_faction": player_faction(conn, player),
-        "factions": rows(conn, "SELECT * FROM factions ORDER BY id"),
+        "factions": factions,
         "next_level_xp": level_xp_required(player["level"]),
         "location": planet,
         "planet_control": build_planet_control_state(conn, player["id"], planet),
+        "territory_control": build_territory_control_state(conn, player, planet),
         "planet_missions": build_planet_missions_state(conn, player),
-        "galaxies": rows(conn, "SELECT * FROM galaxies"),
+        "galaxies": galaxies,
         "planets": all_planets,
         "travel_state": travel_state,
         "map_operation": active_player_map_operation(conn, player["id"]),
         "tool_capabilities": player_tool_capabilities(conn, player),
         "cargo_operation": cargo_operation_status(conn, player["id"]),
-        "galaxy_map": galaxy_map,
-        "system_map": system_map,
         "ship_status": ship_status,
         "hangar": build_hangar_state(conn, player, user),
         "active_ship": active_ship,
@@ -24708,16 +26819,21 @@ def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str
         "guild": guild,
         "guild_skills": rows(conn, "SELECT * FROM guild_skills WHERE guild_id=?", (player["guild_id"],)) if player.get("guild_id") else [],
         "guilds": rows(conn, "SELECT * FROM guilds ORDER BY respect DESC"),
-        "wars": active_or_upcoming_planet_wars(conn),
-        "planet_wars": active_or_upcoming_planet_wars(conn),
-        "resolved_planet_wars": resolved_planet_faction_wars(conn),
-        "galaxy_wars": active_or_upcoming_planet_wars(conn),
-        "resolved_galaxy_wars": resolved_planet_faction_wars(conn),
+        "wars": active_wars,
+        "planet_wars": active_wars,
+        "resolved_planet_wars": resolved_wars,
+        "galaxy_wars": active_wars,
+        "resolved_galaxy_wars": resolved_wars,
         "server_events": build_server_event_state(conn, player),
         "events": rows(conn, "SELECT * FROM events WHERE player_id IS NULL OR player_id=? ORDER BY id DESC LIMIT 30", (player["id"],)),
         "money_sinks": rows(conn, "SELECT * FROM money_sinks WHERE player_id=? ORDER BY id DESC LIMIT 25", (player["id"],)),
         "server_time": iso(),
     }
+    if include_maps:
+        state_payload["galaxy_map"] = galaxy_map
+        state_payload["system_map"] = system_map
+    attach_deferred_social_profile_sections(state_payload, conn, player)
+    return state_payload
 
 
 @app.post("/api/action")
@@ -24739,7 +26855,6 @@ def action(req: ActionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depend
             resolve_completed_cargo_operations(conn, player["id"])
             resolve_completed_planet_missions(conn, player["id"])
             advance_pirate_station_run(conn, player["id"])
-            process_server_events(conn)
             player = get_player(conn, player["id"])
         if player and session_token:
             player["_session_token"] = session_token
@@ -24748,14 +26863,18 @@ def action(req: ActionRequest, ctx: Tuple[Dict[str,Any], Dict[str,Any]] = Depend
         conn.commit()
         if lightweight_combat_action:
             return {"ok": True, "result": result, "refresh": False}
-        if PERF_RETURN_STATE_ON_ACTION or req.type in {"get_state", "admin_spawn_map_objects", "scan_area"}:
+        if PERF_RETURN_STATE_ON_ACTION or req.type in {"get_state", "admin_spawn_map_objects"}:
             fresh = get_player(conn, player["id"])
             if fresh and session_token:
                 fresh["_session_token"] = session_token
             fresh_user = row(conn, "SELECT * FROM users WHERE id=?", (user["id"],)) or user
             if fresh_user and user_session_token:
                 fresh_user["_session_token"] = user_session_token
-            next_state = build_state(conn, fresh_user, fresh)
+            token = _REQUEST_CACHE.set({})
+            try:
+                next_state = build_state(conn, fresh_user, fresh)
+            finally:
+                _REQUEST_CACHE.reset(token)
             conn.commit()
             return {"ok": True, "result": result, "state": next_state}
         return {"ok": True, "result": result, "refresh": True}
@@ -24776,6 +26895,258 @@ def handle_action_forced_travel(conn, user, player, action_type: str, payload: D
     return handle_action(conn, user, player, ActionRequest(type=action_type, payload=payload, nonce=uuid.uuid4().hex))
 
 
+AUTO_EXPLORE_FUEL_RESERVE_PCT = 0.20
+AUTO_EXPLORE_MODE_CONFIG = {
+    "pirate": {"label": "Auto pirate patrol", "target_label": "pirates only", "sweep_label": "Auto pirate patrol sweep"},
+    "salvage": {"label": "Auto salvage AFK", "target_label": "wrecks", "sweep_label": "Auto salvage sweep"},
+    "anomaly": {"label": "Auto anomaly AFK", "target_label": "anomalies", "sweep_label": "Auto anomaly sweep"},
+    "mining": {"label": "Auto mining AFK", "target_label": "ore sites", "sweep_label": "Auto mining sweep"},
+}
+
+
+def normalize_auto_explore_mode(payload: Optional[Dict[str, Any]] = None) -> str:
+    payload = payload or {}
+    raw = str(payload.get("mode") or payload.get("target_mode") or payload.get("afkMode") or "").strip().lower()
+    if not raw and payload.get("pirates_only"):
+        raw = "pirate"
+    aliases = {
+        "pirates": "pirate",
+        "pirate_afk": "pirate",
+        "auto_pirate": "pirate",
+        "wreck": "salvage",
+        "wrecks": "salvage",
+        "salvage_afk": "salvage",
+        "anomoly": "anomaly",
+        "anomolies": "anomaly",
+        "anomalies": "anomaly",
+        "anomaly_afk": "anomaly",
+        "ancient": "anomaly",
+        "exploration": "anomaly",
+        "ore": "mining",
+        "mine": "mining",
+        "mining_afk": "mining",
+    }
+    return aliases.get(raw, raw if raw in AUTO_EXPLORE_MODE_CONFIG else "pirate")
+
+
+def auto_explore_mode_config(mode: str) -> Dict[str, str]:
+    return AUTO_EXPLORE_MODE_CONFIG.get(mode) or AUTO_EXPLORE_MODE_CONFIG["pirate"]
+
+
+def auto_explore_is_pirate_role(value: Any) -> bool:
+    role = str(value or "").strip().lower()
+    if not role:
+        return False
+    return role == "pirate" or role.startswith("pirate_") or role.startswith("pirate-") or role.endswith("_pirate") or role.endswith("-pirate")
+
+
+def auto_explore_is_pirate_target(target: Dict[str, Any]) -> bool:
+    if not target:
+        return False
+    if str(target.get("kind") or "").lower() != "npc":
+        return False
+    return any(auto_explore_is_pirate_role(target.get(k)) for k in ("role", "career", "targetType", "npcObjective"))
+
+
+def auto_explore_active_battle_is_pirate(session: Dict[str, Any]) -> bool:
+    target = session.get("target") or {}
+    return auto_explore_is_pirate_target({"kind": target.get("kind"), "role": target.get("role"), "career": target.get("career"), "targetType": target.get("targetType")})
+
+
+def auto_explore_fuel_at_reserve(player: Dict[str, Any]) -> bool:
+    max_fuel = max(1, float(player.get("max_fuel") or 1))
+    return float(player.get("fuel") or 0) <= max_fuel * AUTO_EXPLORE_FUEL_RESERVE_PCT
+
+
+def auto_explore_nearest_planet(conn: sqlite3.Connection, player: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    current = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("location_planet_id"),))
+    if not current:
+        return None
+    point = current_player_map_position(conn, player, "system")
+    candidates = rows(conn, "SELECT * FROM planets WHERE galaxy_id=? ORDER BY id", (int(current["galaxy_id"]),))
+    if not candidates:
+        return current
+    return min(candidates, key=lambda p: pct_distance(point, system_planet_map_point(conn, int(p["id"]))))
+
+
+def auto_explore_dock_for_fuel(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], god: bool, mode: str = "pirate") -> Dict[str, Any]:
+    config = auto_explore_mode_config(mode)
+    label = config["label"]
+    travel = build_travel_state(conn, player)
+    travel_mode = str(travel.get("mode") or "").lower()
+    if travel.get("active") and travel_mode == "dock":
+        return {"message": "Fuel reserve reached. Docking approach is already in progress.", "autoExplore": True, "autoExploreMode": mode, "lowFuel": True, "docking": True}
+    if travel.get("active") and travel_mode in {"local", "waypoint", "intercept"}:
+        player = interrupt_active_local_travel(conn, player, f"{label.lower()} fuel reserve")
+        travel = build_travel_state(conn, player)
+    if travel.get("active"):
+        return {"message": "Fuel reserve reached. Waiting for current gate or docking travel to finish.", "autoExplore": True, "autoExploreMode": mode, "lowFuel": True, "waitingForTravel": True}
+    if travel.get("docked"):
+        add_event(conn, int(player["id"]), "travel", f"{label} paused at fuel reserve while docked.", {"fuel": player.get("fuel"), "maxFuel": player.get("max_fuel")})
+        return {"message": "Fuel reserve reached. Docked until you return.", "autoExplore": True, "autoExploreMode": mode, "lowFuel": True, "docked": True, "stopAutoExplore": True}
+    nearest = auto_explore_nearest_planet(conn, player)
+    if not nearest:
+        raise HTTPException(404, "No planet available for fuel reserve docking.")
+    result = handle_action(conn, user, player, ActionRequest(type="travel", payload={"planet_id": int(nearest["id"]), "dock_on_arrival": True}, nonce=uuid.uuid4().hex))
+    result.update({"autoExplore": True, "autoExploreMode": mode, "lowFuel": True, "docking": True, "targetPlanetId": int(nearest["id"]), "targetPlanetName": nearest.get("name")})
+    return result
+
+
+def auto_explore_choose_pirate_target(conn: sqlite3.Connection, player: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    system_map = build_system_map(conn, player)
+    player_point = current_player_map_position(conn, player, "system")
+    candidates = []
+    for contact in system_map.get("traffic") or []:
+        if not auto_explore_is_pirate_target(contact):
+            continue
+        if contact.get("attackable") is False:
+            continue
+        target_ref = str(contact.get("combatTargetRef") or contact.get("id") or "")
+        if not target_ref.startswith("traveler:"):
+            continue
+        candidates.append(contact)
+    if not candidates:
+        return None, system_map
+    candidates.sort(key=lambda c: pct_distance(player_point, c))
+    return candidates[0], system_map
+
+
+def auto_explore_random_waypoint(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], mode: str = "pirate") -> Dict[str, Any]:
+    config = auto_explore_mode_config(mode)
+    travel = build_travel_state(conn, player)
+    if travel.get("active"):
+        return {"message": f"{config['label']} is waiting for current travel to finish.", "autoExplore": True, "autoExploreMode": mode, "waitingForTravel": True}
+    current = row(conn, "SELECT * FROM planets WHERE id=?", (player.get("location_planet_id"),))
+    if not current:
+        raise HTTPException(400, "Current location is unknown")
+    rng = random.Random(f"auto-{mode}-explore:{player['id']}:{int(time.time() // 12)}")
+    origin = current_player_map_position(conn, player, "system")
+    for _attempt in range(10):
+        angle = rng.random() * math.tau
+        radius = rng.uniform(12.0, 34.0)
+        x_pct = clamp_pct(float(origin.get("x_pct") or 50) + math.cos(angle) * radius, 5, 95)
+        y_pct = clamp_pct(float(origin.get("y_pct") or 50) + math.sin(angle) * radius, 5, 95)
+        if pct_distance(origin, {"x_pct": x_pct, "y_pct": y_pct}) >= 8:
+            break
+    result = handle_action(conn, user, player, ActionRequest(type="go_here", payload={"x_pct": x_pct, "y_pct": y_pct, "map_type": "system", "label": config["sweep_label"]}, nonce=uuid.uuid4().hex))
+    result.update({"autoExplore": True, "autoExploreMode": mode, "exploring": True, "x_pct": round(x_pct, 2), "y_pct": round(y_pct, 2)})
+    return result
+
+
+def auto_explore_required_capability(mode: str) -> Optional[str]:
+    return {"mining": "can_mine", "salvage": "can_salvage", "anomaly": "can_investigate"}.get(mode)
+
+
+def auto_explore_choose_object_target(conn: sqlite3.Connection, player: Dict[str, Any], mode: str) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
+    system_map = build_system_map(conn, player)
+    player_point = current_player_map_position(conn, player, "system")
+    source_key = {"mining": "ore_sites", "salvage": "salvage_icons", "anomaly": "exploration_sites"}.get(mode)
+    candidates = []
+    for target in system_map.get(source_key or "", []) or []:
+        if mode == "mining" and int(target.get("qtyRemaining") or target.get("qty") or 0) <= 0:
+            continue
+        if mode == "salvage" and int(target.get("qty_remaining") or target.get("qtyRemaining") or target.get("qty") or 1) <= 0:
+            continue
+        if mode == "anomaly" and int(target.get("qtyRemaining") or target.get("qty") or 0) <= 0:
+            continue
+        candidates.append(target)
+    if not candidates:
+        return None, system_map
+    candidates.sort(key=lambda c: pct_distance(player_point, c))
+    return candidates[0], system_map
+
+
+def auto_explore_object_action(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], mode: str, target: Dict[str, Any], god: bool) -> Dict[str, Any]:
+    config = auto_explore_mode_config(mode)
+    try:
+        range_status = action_range_status(conn, player, target, "system")
+    except Exception:
+        range_status = {"inRange": False}
+    if not range_status.get("inRange"):
+        result = handle_action(conn, user, player, ActionRequest(type="go_here", payload={"x_pct": target.get("x_pct"), "y_pct": target.get("y_pct"), "map_type": "system", "label": target.get("name") or target.get("ship_name") or config["sweep_label"]}, nonce=uuid.uuid4().hex))
+        result.update({"autoExplore": True, "autoExploreMode": mode, "approachingTarget": True, "targetName": target.get("name") or target.get("ship_name") or target.get("label"), "targetKind": target.get("kind")})
+        return result
+
+    if mode == "mining":
+        site_id = str(target.get("siteId") or target.get("objectKey") or target.get("id") or "")
+        result = handle_action(conn, user, player, ActionRequest(type="mine_ore_site", payload={"site_id": site_id}, nonce=uuid.uuid4().hex))
+    elif mode == "salvage":
+        site_id = int(target.get("salvageSiteId") or target.get("id") or 0)
+        result = handle_action(conn, user, player, ActionRequest(type="salvage_site", payload={"site_id": site_id}, nonce=uuid.uuid4().hex))
+    else:
+        site_id = str(target.get("explorationSiteId") or target.get("siteId") or target.get("objectKey") or target.get("id") or "")
+        signal_state = str(target.get("signalState") or "").lower()
+        action_type = "investigate_exploration_site" if signal_state == "resolved" else "scan_exploration_site"
+        result = handle_action(conn, user, player, ActionRequest(type=action_type, payload={"site_id": site_id}, nonce=uuid.uuid4().hex))
+    result.update({"autoExplore": True, "autoExploreMode": mode, "targetName": target.get("name") or target.get("ship_name") or target.get("label"), "targetKind": target.get("kind")})
+    return result
+
+
+def run_auto_explore_battle_tick(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    mode = normalize_auto_explore_mode(payload)
+    config = auto_explore_mode_config(mode)
+    label = config["label"]
+    god = bool(user["god_mode"])
+    if mode in {"mining", "salvage", "anomaly"}:
+        resolve_completed_cargo_operations(conn, int(player["id"]))
+        map_op = active_player_map_operation(conn, int(player["id"]))
+        if map_op and str(map_op.get("status") or "") == "active":
+            return {"message": f"{label} is waiting for {label_for_api(map_op.get('operation_type') or 'operation')} to finish.", "autoExplore": True, "autoExploreMode": mode, "waitingForOperation": True, "mapOperation": map_op}
+        cargo_op = cargo_operation_status(conn, int(player["id"]))
+        if cargo_op.get("active"):
+            return {"message": f"{label} is waiting for cargo {cargo_op.get('operationLabel') or 'handling'} to finish.", "autoExplore": True, "autoExploreMode": mode, "waitingForCargo": True, "cargoOperation": cargo_op}
+
+    active = row(conn, "SELECT id FROM combat_battles WHERE player_id=? AND status='active' ORDER BY id DESC LIMIT 1", (int(player["id"]),))
+    if active:
+        if mode != "pirate":
+            return {"message": f"{label} paused: active battle in progress.", "autoExplore": True, "autoExploreMode": mode, "activeBattle": True, "stopAutoExplore": True, "battleId": int(active["id"])}
+        session = load_combat_session(conn, int(active["id"]), int(player["id"]))
+        if not auto_explore_active_battle_is_pirate(session):
+            return {"message": "Auto pirate patrol paused: active battle target is not a pirate.", "autoExplore": True, "nonPirateBattle": True, "stopAutoExplore": True, "battleId": int(active["id"])}
+        result = perform_realtime_combat_action(conn, player, int(active["id"]), "use_all")
+        if result.get("missingEnergy") or result.get("cooldownSeconds"):
+            battle = advance_realtime_combat_battle(conn, player, int(active["id"]), force=False)
+            result = {"message": battle.get("summary") or result.get("message") or "Auto battle advanced.", "battle": battle}
+        result.update({"autoExplore": True, "autoExploreMode": mode, "autoBattle": True, "battleId": int(active["id"])})
+        return result
+
+    player = get_player(conn, int(player["id"])) or player
+    if auto_explore_fuel_at_reserve(player):
+        return auto_explore_dock_for_fuel(conn, user, player, god, mode)
+
+    travel = build_travel_state(conn, player)
+    if travel.get("active"):
+        return {"message": f"{label} is waiting for travel to finish.", "autoExplore": True, "autoExploreMode": mode, "waitingForTravel": True, "mode": travel.get("mode")}
+
+    if mode in {"mining", "salvage", "anomaly"}:
+        required_cap = auto_explore_required_capability(mode)
+        caps = player_tool_capabilities(conn, player)
+        if required_cap and not caps.get(required_cap) and not god:
+            return {"message": f"{label} paused: missing required ship module.", "autoExplore": True, "autoExploreMode": mode, "missingTool": True, "stopAutoExplore": True}
+        target, _system_map = auto_explore_choose_object_target(conn, player, mode)
+        if target:
+            return auto_explore_object_action(conn, user, player, mode, target, god)
+        return auto_explore_random_waypoint(conn, user, player, mode)
+
+    target, _system_map = auto_explore_choose_pirate_target(conn, player)
+    if target:
+        target_ref = str(target.get("combatTargetRef") or target.get("id") or "")
+        try:
+            range_status = action_range_status(conn, player, target, "system")
+        except Exception:
+            range_status = {"inRange": False}
+        if range_status.get("inRange"):
+            battle_player = interrupt_active_local_travel(conn, player, "auto pirate engagement")
+            result = simulate_combat_battle(conn, battle_player, target_ref, "attack", god)
+            result.update({"autoExplore": True, "autoExploreMode": mode, "targetRole": target.get("role"), "targetName": target.get("name"), "piratesOnly": True})
+            return result
+        result = handle_action(conn, user, player, ActionRequest(type="intercept_traveler", payload={"target_ref": target_ref}, nonce=uuid.uuid4().hex))
+        result.update({"autoExplore": True, "autoExploreMode": mode, "interceptingPirate": True, "targetRole": target.get("role"), "targetName": target.get("name"), "piratesOnly": True})
+        return result
+
+    return auto_explore_random_waypoint(conn, user, player, mode)
+
+
 def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
     t = {"activate_ship":"set_active_ship", "install_equipment":"equip_module", "remove_equipment":"unequip_module", "repair_ship":"repair_refuel", "refuel_ship":"repair_refuel", "recharge_ship":"repair_refuel"}.get(req.type, req.type)
     god = bool(user["god_mode"])
@@ -24788,13 +27159,16 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
     if player and session_token:
         player["_session_token"] = session_token
 
+    if t == "auto_explore_battle_tick":
+        return run_auto_explore_battle_tick(conn, user, player, payload)
+
     docked_only_actions = {
         "buy_commodity", "sell_commodity", "buy_ship", "buy_module", "buy_property",
         "create_player_listing", "buy_player_listing", "cancel_player_listing",
         "equip_module", "unequip_module", "set_active_ship", "repair_refuel",
         "upgrade_module", "upgrade_inventory_item", "equip_inventory_item",
         "salvage_inventory_item", "use_inventory_item", "pve_operation",
-        "run_smuggling_route", "planet_control_action", "career_task",
+        "run_smuggling_route", "planet_control_action", "territory_supply_delivery", "career_task",
         "start_planet_mission", "cancel_planet_mission",
         "accept_bounty", "mine", "salvage",
         "collect_property_income", "upgrade_property", "insure_ship",
@@ -25221,6 +27595,19 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         origin = row(conn, "SELECT * FROM planets WHERE id=?", (player_now.get("travel_origin_planet_id") or player_now.get("location_planet_id"),))
         if not dest:
             raise HTTPException(404, "Intercept destination is no longer available")
+        contact = intercept_contact_status(conn, player_now)
+        if not contact.get("inContact"):
+            if build_travel_state(conn, player_now).get("active"):
+                return {"message": "No contact yet. Intercept course is still tracking; battle starts only when ship circles touch.", "mode": "intercept_tracking", "contact": contact}
+            return finish_intercept_without_contact(conn, player_now, dest, origin, contact, action_result=True)
+        meta = get_player_intercept(conn, pid)
+        target_point = contact.get("target") or {}
+        if target_point:
+            meta["x_pct"] = target_point.get("x_pct")
+            meta["y_pct"] = target_point.get("y_pct")
+            meta["contact_distance_pct"] = contact.get("distancePct")
+            meta["contact_range_pct"] = contact.get("contactRangePct")
+            set_player_intercept(conn, pid, meta)
         return resolve_completed_intercept(conn, player_now, dest, origin, action_result=True)
 
     if t == "intercept_traveler":
@@ -25568,6 +27955,9 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
 
     if t == "planet_control_action":
         return run_planet_control_action(conn, player, str(payload.get("action_key") or ""), god)
+
+    if t == "territory_supply_delivery":
+        return run_territory_supply_delivery(conn, player, str(payload.get("item_code") or ""), int(payload.get("qty") or 1), god)
 
     if t == "attempt_bribe":
         status = resolve_player_legal_state(conn, pid)
@@ -25923,6 +28313,9 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         log_market_transaction(conn, pid, player["location_planet_id"], None, listing["item_code"], listing["item_name"], "player_market_buy", qty, int(listing["unit_price"]), gross, 0, gross, int(listing["legal"]), "player_market")
         if seller_id:
             log_market_transaction(conn, int(seller_id), listing.get("planet_id") or player["location_planet_id"], None, listing["item_code"], listing["item_name"], "player_market_sale", qty, int(listing["unit_price"]), gross, sale_fee, gross - sale_fee, int(listing["legal"]), "player_market")
+        emit_player_metric(conn, pid, "market_purchase_value", gross, player=player, metadata={"action": "player_market_buy", "item": listing["item_code"], "qty": qty, "listing_id": listing_id})
+        if seller_id:
+            emit_player_metric(conn, int(seller_id), "market_sales_value", gross, planet_id=listing.get("planet_id") or player["location_planet_id"], metadata={"action": "player_market_sale", "item": listing["item_code"], "qty": qty, "listing_id": listing_id, "fee": sale_fee})
         add_event(conn, pid, "player_market", f"Bought {qty}x {listing['item_name']} from {listing['seller_name']} for {gross:,} credits.")
         return {"message": f"Bought {qty}x {listing['item_name']} from player market.", "gross": gross, "qty": qty}
 
@@ -25957,6 +28350,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if active and active["job_code"] == "smuggler":
             increment_job_metrics(conn, pid, "smuggler", {"smuggles": 1, "contraband_profit": profit})
         add_xp(conn, pid, 850)
+        nova_safe_record_guild_contribution(conn, pid, "money", max(50, profit // 80), qty, "smuggling_delivery", {"commodity": illegal["code"], "profit": profit})
         add_event(conn, pid, "smuggling", f"Smuggling success: {illegal['name']} moved for {profit:,} credits.")
         return {"message":"Smuggling success against NPC customs.", "profit":profit}
 
@@ -26071,7 +28465,9 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             add_xp(conn, pid, runtime["xp_critical"])
             world_note = apply_pve_world_rewards(conn, pid, player["location_planet_id"], op, outcome, runtime)
             grant_action_progression(conn, pid, progression_key, max(1.0, int(op.get("difficulty") or 1) * 1.8), True)
+            nova_safe_record_guild_contribution(conn, pid, "mission" if progression_key == "planet_mission" else "combat" if progression_key in {"combat", "bounty", "security"} else "mining" if progression_key == "mining" else "salvage" if progression_key == "salvage" else "money", max(50, int(runtime["xp_critical"]) + reward // 100), 1, "pve_operation", {"code": op["code"], "opType": op.get("op_type"), "outcome": outcome})
             add_event(conn, pid, "pve", f"Critical success on {op['name']} for {reward:,} credits. {world_note}")
+            emit_player_metrics(conn, pid, {"missions_completed": 1, "mission_reward_value": reward}, player=player, metadata={"action": "pve_operation", "operation": op.get("code"), "operation_type": op.get("op_type"), "outcome": outcome})
             return {"message":f"Critical success: {op['name']} {world_note}", "reward":reward, "scrap":scrap, "outcome":outcome, "success_odds":round(success_odds,2), "energy_cost":energy_cost, "world_note":world_note}
         if outcome == "success":
             reward = random.randint(reward_min, reward_max)
@@ -26080,7 +28476,9 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             add_xp(conn, pid, runtime["xp_reward"])
             world_note = apply_pve_world_rewards(conn, pid, player["location_planet_id"], op, outcome, runtime)
             grant_action_progression(conn, pid, progression_key, max(1.0, int(op.get("difficulty") or 1) * 1.2), True)
+            nova_safe_record_guild_contribution(conn, pid, "mission" if progression_key == "planet_mission" else "combat" if progression_key in {"combat", "bounty", "security"} else "mining" if progression_key == "mining" else "salvage" if progression_key == "salvage" else "money", max(50, int(runtime["xp_reward"]) + reward // 100), 1, "pve_operation", {"code": op["code"], "opType": op.get("op_type"), "outcome": outcome})
             add_event(conn, pid, "pve", f"Completed {op['name']} for {reward:,} credits. {world_note}")
+            emit_player_metrics(conn, pid, {"missions_completed": 1, "mission_reward_value": reward}, player=player, metadata={"action": "pve_operation", "operation": op.get("code"), "operation_type": op.get("op_type"), "outcome": outcome})
             return {"message":f"Completed {op['name']} {world_note}", "reward":reward, "scrap":scrap, "outcome":outcome, "success_odds":round(success_odds,2), "energy_cost":energy_cost, "world_note":world_note}
         if outcome == "partial":
             reward = int(random.randint(reward_min, reward_max) * 0.38)
@@ -26090,7 +28488,9 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             add_xp(conn, pid, runtime["xp_partial"])
             world_note = apply_pve_world_rewards(conn, pid, player["location_planet_id"], op, outcome, runtime)
             grant_action_progression(conn, pid, progression_key, max(0.5, int(op.get("difficulty") or 1) * 0.55), False)
+            nova_safe_record_guild_contribution(conn, pid, "mission" if progression_key == "planet_mission" else "combat" if progression_key in {"combat", "bounty", "security"} else "mining" if progression_key == "mining" else "salvage" if progression_key == "salvage" else "money", max(20, int(runtime["xp_partial"]) + reward // 150), 1, "pve_operation_partial", {"code": op["code"], "opType": op.get("op_type"), "outcome": outcome})
             add_event(conn, pid, "pve", f"Partial completion: {op['name']}. {consequence} {world_note}")
+            emit_player_metric(conn, pid, "mission_reward_value", reward, player=player, metadata={"action": "pve_operation", "operation": op.get("code"), "operation_type": op.get("op_type"), "outcome": outcome})
             return {"message":f"Partial completion: {op['name']}. {consequence} {world_note}", "reward":reward, "scrap":scrap, "outcome":outcome, "success_odds":round(success_odds,2), "energy_cost":energy_cost, "world_note":world_note}
         consequence = apply_operation_consequence(conn, pid, op["difficulty"], outcome, op["name"], god)
         grant_action_progression(conn, pid, progression_key, max(0.35, int(op.get("difficulty") or 1) * 0.35), False)
@@ -26117,7 +28517,14 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             if active and active["job_code"] == "bounty_hunter":
                 increment_job_metrics(conn, pid, "bounty_hunter", {"bounties": 1, "bounty_value": payout})
             grant_action_progression(conn, pid, "bounty", max(1.0, difficulty * 1.4), True)
+            nova_safe_record_guild_contribution(conn, pid, "combat", max(75, bounty["threat"] * 40), 1, "bounty_complete", {"bountyId": bounty["id"], "outcome": outcome, "payout": payout})
             add_event(conn, pid, "bounty", f"Captured NPC bounty {bounty['name']}.")
+            emit_player_metrics(conn, pid, {
+                "battles_won": 1,
+                "battles_survived": 1,
+                "npc_kills": 1,
+                "bounty_value_claimed": payout,
+            }, player=player, planet_id=bounty.get("planet_id"), metadata={"action": "accept_bounty", "bounty_id": bounty.get("id"), "target": bounty.get("name"), "outcome": outcome})
             return {"message":f"Bounty captured: {bounty['name']}", "reward":payout, "outcome":outcome}
         consequence = apply_operation_consequence(conn, pid, difficulty, outcome, "bounty fight", god)
         grant_action_progression(conn, pid, "bounty", max(0.35, difficulty * 0.45), False)
@@ -26143,6 +28550,12 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             if active and active["job_code"] == "miner":
                 increment_job_metrics(conn,pid,"miner",{"mining_runs":1,"ore_value":qty*40})
             grant_action_progression(conn, pid, "mining", max(0.6, difficulty * mult), outcome != "partial")
+            nova_safe_record_guild_contribution(conn, pid, "mining", max(40, int(350 * mult) + qty // 3), qty, "validated_mining", {"outcome": outcome, "difficulty": difficulty, "qty": qty})
+            emit_player_metrics(conn, pid, {
+                "resources_mined": qty,
+                "mining_haul_value": qty * 40,
+                "mining_missions_completed": 1,
+            }, player=player, metadata={"action": "mine", "item": "titanium", "qty": qty, "outcome": outcome})
             msg = f"{outcome.replace('_',' ').title()}: mined {qty} Titanium Ore from NPC asteroid fields."
             if outcome == "partial":
                 msg += " " + apply_operation_consequence(conn,pid,difficulty,outcome,"mining mishap",god)
@@ -26206,11 +28619,17 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         conn.execute("UPDATE salvage_sites SET qty_remaining=max(0,qty_remaining-1) WHERE id=?", (site_id,))
         grant_action_progression(conn, pid, "salvage", max(1.0, int(site.get("difficulty") or 1) * 0.8), True)
         add_xp(conn, pid, max(60, int(site.get("salvage_value") or 0) // 12))
+        nova_safe_record_guild_contribution(conn, pid, "material", max(50, int(site.get("salvage_value") or 0) // 10 + scrap_gain), max(1, len(awarded) + scrap_gain), "salvage_site", {"siteId": site_id, "shipName": site.get("ship_name"), "items": awarded, "scrap": scrap_gain})
         active = row(conn,"SELECT * FROM player_jobs WHERE player_id=? AND active=1", (pid,))
         if active and active["job_code"] == "salvager":
             increment_job_metrics(conn,pid,"salvager",{"salvage_runs":1,"salvage_value":int(site.get("salvage_value") or 0)})
+        emit_player_metrics(conn, pid, {
+            "salvage_runs_completed": 1,
+            "salvage_materials_recovered": scrap_gain + sum(int(a.get("qty") or 0) for a in awarded),
+            "salvage_value_recovered": int(site.get("salvage_value") or 0),
+        }, player=player, metadata={"action": "salvage_site", "site_id": site_id, "ship": site.get("ship_name")})
         add_event(conn, pid, "salvage", f"Stripped wreckage from {site.get('ship_name')} for salvage materials.")
-        return {"message":f"Salvaged {site.get('ship_name')} wreck.", "scrap":scrap_gain, "items":awarded, "energyCost":energy_cost}
+        return {"message":f"Salvaged {site.get('ship_name')} wreck.", "scrap":scrap_gain, "items":awarded, "energyCost":energy_cost, "mapOperation": map_op}
 
     if t == "salvage":
         spend(conn,pid,fuel=4,energy=10,god=god)
@@ -26229,6 +28648,12 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             if active and active["job_code"] == "salvager":
                 increment_job_metrics(conn,pid,"salvager",{"salvage_runs":1,"salvage_value":scrap+circuits*120})
             grant_action_progression(conn, pid, "salvage", max(0.6, difficulty * mult), outcome != "partial")
+            nova_safe_record_guild_contribution(conn, pid, "material", max(40, int(300 * mult) + (scrap + circuits * 120) // 20), scrap + circuits, "validated_salvage", {"outcome": outcome, "difficulty": difficulty, "scrap": scrap, "circuits": circuits})
+            emit_player_metrics(conn, pid, {
+                "salvage_runs_completed": 1,
+                "salvage_materials_recovered": scrap + circuits,
+                "salvage_value_recovered": scrap + circuits * 120,
+            }, player=player, metadata={"action": "salvage", "outcome": outcome, "scrap": scrap, "circuits": circuits})
             msg = f"{outcome.replace('_',' ').title()}: salvaged {scrap} scrap and {circuits} circuit wafers."
             if outcome == "partial":
                 msg += " " + apply_operation_consequence(conn,pid,difficulty,outcome,"salvage ambush",god)
@@ -26281,6 +28706,13 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         for m in preview.get("materials") or []:
             add_inventory_item(conn, pid, m["item_code"], m["name"], "salvage", int(m["qty"]) * qty, 1, 120 + 160 * int(m.get("tier") or 0), 0.6, "Recovered upgrade material from salvage.", "salvage", "salvage", "uncommon", tier=int(m.get("tier") or 0), max_tier=max(2, int(m.get("tier") or 0)+2), tier_source="salvaged", respect_cargo=True, god=god)
         add_event(conn, pid, "salvage", f"Salvaged {qty}x {inv['name']} into {scrap} scrap and upgrade materials.", {"item_code": item_code, "scrap": scrap})
+        nova_safe_record_guild_contribution(conn, pid, "material", max(20, scrap // 3), qty, "inventory_salvage", {"itemCode": item_code, "qty": qty, "scrap": scrap})
+        material_qty = scrap + sum(int(m.get("qty") or 0) * qty for m in (preview.get("materials") or []))
+        material_value = scrap + sum((120 + 160 * int(m.get("tier") or 0)) * int(m.get("qty") or 0) * qty for m in (preview.get("materials") or []))
+        emit_player_metrics(conn, pid, {
+            "salvage_materials_recovered": material_qty,
+            "salvage_value_recovered": material_value,
+        }, player=player, metadata={"action": "salvage_inventory_item", "item": item_code, "qty": qty, "scrap": scrap})
         return {"message": f"Salvaged {qty}x {inv['name']} into {scrap} scrap.", "outcome": "salvaged", "scrap": scrap, "materials": preview.get("materials")}
 
     if t == "upgrade_module":
@@ -26332,6 +28764,8 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         if effective_credits and not god:
             log_money_sink(conn, pid, "crafting_fee", effective_credits, f"Crafting cost for {recipe['name']}; materials are a controlled economy sink")
         consume_recipe_inputs(conn, pid, recipe)
+        input_qty = sum(max(0, int(qty or 0)) for qty in (recipe.get("inputs") or {}).values())
+        emit_player_metric(conn, pid, "materials_processed", input_qty, player=player, metadata={"action": "crafting_start", "recipe": recipe.get("code"), "recipe_name": recipe.get("name")})
 
         odds = float(report["success_odds"])
         duration = 0 if (god and CRAFTING_BALANCE.get("god_instant_crafting")) else int(recipe.get("craft_seconds") or crafting_duration_seconds(recipe))
@@ -26651,6 +29085,20 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
                 if commodity:
                     mutate_market(conn, player["location_planet_id"], commodity["id"], 2, -1, "player_career_trade")
                     career_note = " Local supply movement improved."
+            career_metric_amounts: Dict[str, Any] = {}
+            if job_code == "miner":
+                career_metric_amounts = {"mining_missions_completed": 1, "resources_mined": note_qty * 12, "mining_haul_value": note_qty * 12 * 40}
+            elif job_code == "salvager":
+                career_metric_amounts = {"salvage_runs_completed": 1, "salvage_materials_recovered": note_qty * 3, "salvage_value_recovered": note_qty * 3 * 120}
+            elif job_code in {"engineer", "shipwright"}:
+                career_metric_amounts = {"items_crafted": int(metric_changes.get("crafts") or 1), "crafting_value_created": reward}
+            elif job_code in {"trader", "dockmaster", "quartermaster"}:
+                career_metric_amounts = {"trade_profit": reward, "market_sales_value": reward}
+            elif job_code in {"security_pilot", "bounty_hunter", "marshal", "mercenary"}:
+                career_metric_amounts = {"battles_won": 1, "battles_survived": 1, "npc_kills": 1}
+                if job_code == "bounty_hunter":
+                    career_metric_amounts["bounty_value_claimed"] = reward
+            emit_player_metrics(conn, pid, career_metric_amounts, player=player, metadata={"action": "career_task", "career": job_code, "task": task.get("key"), "outcome": outcome})
         msg = f"{outcome.replace('_',' ').title()}: {task['name']} for {active['name']}. Earned {reward:,} credits, {xp:,} career XP."
         if consequence:
             msg += " " + consequence
@@ -26817,7 +29265,8 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
         cost = 250000
         spend(conn,pid,credits=cost,god=god)
         tag = ''.join([x[0] for x in name.split()])[:5].upper() or "GUILD"
-        conn.execute("INSERT INTO guilds (name,tag,respect,treasury,created_at) VALUES (?,?,?,?,?)", (name,tag,0,0,iso()))
+        faction = player_faction(conn, player) or {}
+        conn.execute("INSERT INTO guilds (name,tag,respect,treasury,created_at,faction_id) VALUES (?,?,?,?,?,?)", (name,tag,0,0,iso(), str(faction.get("id") or player.get("faction_id") or "")))
         gid = scalar(conn,"SELECT id FROM guilds WHERE name=?", (name,))
         conn.execute("INSERT INTO guild_members (guild_id,player_id,rank,contribution) VALUES (?,?,?,?)", (gid,pid,"Founder",0))
         conn.execute("UPDATE players SET guild_id=? WHERE id=?", (gid,pid))
@@ -26870,6 +29319,7 @@ def handle_action(conn, user, player, req: ActionRequest) -> Dict[str, Any]:
             (planet_id, planet["galaxy_id"], guild["id"], faction["id"], planet.get("faction_id"), "declared", iso(), iso(opens), cost, f"{guild['name']} declared a faction war on {planet['name']}. Capture ring opens in 2 days."),
         )
         add_event(conn, pid, "planet_war", f"{guild['name']} declared faction war on {planet['name']}. Capture ring opens in 2 days.", {"planetId": planet_id, "cost": cost})
+        nova_safe_record_guild_contribution(conn, pid, "war", max(100, cost // 5000), 1, "planet_war_declare", {"planetId": planet_id, "cost": cost})
         return {"message": f"Planet war declared on {planet['name']}. Capture ring opens in 2 days.", "cost": cost, "openPage": "Faction War"}
 
     if t in {"navigate_to_planet_war", "navigate_to_galaxy_war"}:
@@ -28127,7 +30577,8 @@ def _nova_guild_level_apply(conn, guild_id: int) -> None:
 
 
 def nova_record_guild_contribution(conn, player_id: int, contribution_type='activity', raw_xp=0, quantity=1, source='activity', metadata=None) -> dict:
-    nova_guild_ensure_tables(conn)
+    if not (_nova_guild_table_exists(conn, 'guild_contributions_daily') and _nova_guild_table_exists(conn, 'guild_contribution_events')):
+        nova_guild_ensure_tables(conn)
     member = _nova_guild_membership(conn, player_id)
     if not member:
         return {'ok': False, 'reason': 'player_not_in_guild'}
@@ -28160,6 +30611,84 @@ def nova_record_guild_contribution(conn, player_id: int, contribution_type='acti
     conn.execute('UPDATE guilds SET xp=xp+?, updated_at=? WHERE id=?', (effective, now, guild_id))
     _nova_guild_level_apply(conn, guild_id)
     return {'ok': True, 'guild_id': guild_id, 'raw_xp': raw_xp, 'effective_xp': effective, 'soft_capped': over_value > 0}
+
+
+def nova_safe_record_guild_contribution(conn, player_id: int, contribution_type='activity', raw_xp=0, quantity=1, source='activity', metadata=None) -> dict:
+    try:
+        raw_xp = int(raw_xp or 0)
+        if raw_xp <= 0:
+            return {'ok': False, 'reason': 'no_xp'}
+        return nova_record_guild_contribution(conn, int(player_id), contribution_type, raw_xp, quantity, source, metadata or {})
+    except Exception as exc:
+        return {'ok': False, 'reason': 'guild_contribution_failed', 'error': str(exc)[:160]}
+
+
+def nova_guild_member_guild_id(conn, player_id: int) -> int:
+    try:
+        member = _nova_guild_membership(conn, int(player_id))
+        guild_id = int((member or {}).get('guild_id') or 0)
+        if guild_id:
+            return guild_id
+    except Exception:
+        pass
+    try:
+        return int(nova_get_player_guild_id(conn, int(player_id)) or 0)
+    except Exception:
+        return 0
+
+
+def nova_guild_active_score_wars(conn, guild_id: int, opposing_guild_id: Optional[int] = None, target_planet_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    if not guild_id or not _nova_guild_table_exists(conn, 'guild_wars') or not _nova_guild_table_exists(conn, 'guild_war_scores'):
+        return []
+    now = _nova_guild_now_iso()
+    params: List[Any] = [int(guild_id), int(guild_id), now, now]
+    filters = [
+        "(attacker_guild_id=? OR defender_guild_id=?)",
+        "status IN ('pending','preparation','active')",
+        "(starts_at IS NULL OR starts_at<=?)",
+        "(ends_at IS NULL OR ends_at>=?)",
+    ]
+    if opposing_guild_id:
+        filters.append("((attacker_guild_id=? AND defender_guild_id=?) OR (attacker_guild_id=? AND defender_guild_id=?))")
+        params.extend([int(guild_id), int(opposing_guild_id), int(opposing_guild_id), int(guild_id)])
+    if target_planet_id:
+        filters.append("(target_planet_id IS NULL OR target_planet_id=?)")
+        params.append(int(target_planet_id))
+    return _nova_guild_rows(conn, f"SELECT * FROM guild_wars WHERE {' AND '.join(filters)}", tuple(params))
+
+
+def nova_guild_add_war_score(conn, war_id: int, guild_id: int, score_column: str, points: int) -> None:
+    allowed = {'pvp_kills', 'npc_kills', 'objectives', 'cargo_score', 'influence_score'}
+    if score_column not in allowed or not war_id or not guild_id or int(points or 0) <= 0:
+        return
+    now = _nova_guild_now_iso()
+    points = int(points)
+    conn.execute('INSERT OR IGNORE INTO guild_war_scores(war_id,guild_id,updated_at) VALUES(?,?,?)', (int(war_id), int(guild_id), now))
+    conn.execute(
+        f"UPDATE guild_war_scores SET {score_column}={score_column}+?, total_score=total_score+?, updated_at=? WHERE war_id=? AND guild_id=?",
+        (points, points, now, int(war_id), int(guild_id)),
+    )
+
+
+def nova_record_guild_war_battle_outcome(conn, winner_player_id: int, loser_player_id: Optional[int] = None, target_kind: str = '', target_planet_id: Optional[int] = None, metadata: Optional[Dict[str, Any]] = None) -> dict:
+    winner_guild_id = nova_guild_member_guild_id(conn, int(winner_player_id or 0))
+    if not winner_guild_id:
+        return {'ok': False, 'reason': 'winner_not_in_guild'}
+    loser_guild_id = nova_guild_member_guild_id(conn, int(loser_player_id or 0)) if loser_player_id else 0
+    target_kind = str(target_kind or '').lower()
+    if loser_guild_id and loser_guild_id != winner_guild_id:
+        wars = nova_guild_active_score_wars(conn, winner_guild_id, loser_guild_id, target_planet_id)
+        score_col, score_points, contribution_xp = 'pvp_kills', 25, 180
+    elif target_kind in {'npc', 'security_defense', 'station_pirate', 'pirate'}:
+        wars = [w for w in nova_guild_active_score_wars(conn, winner_guild_id, None, target_planet_id) if w.get('target_planet_id') or str(w.get('target_type') or '') == 'planet']
+        score_col, score_points, contribution_xp = 'npc_kills', 8, 80
+    else:
+        return {'ok': False, 'reason': 'not_a_scored_war_outcome'}
+    for war in wars:
+        nova_guild_add_war_score(conn, int(war['id']), winner_guild_id, score_col, score_points)
+    if wars:
+        nova_safe_record_guild_contribution(conn, winner_player_id, 'war', contribution_xp, 1, 'war_battle', {**(metadata or {}), 'wars': [int(w['id']) for w in wars], 'score': score_col})
+    return {'ok': bool(wars), 'war_count': len(wars)}
 
 
 def _nova_guild_summary(conn, guild_id: int) -> dict:
@@ -28220,6 +30749,17 @@ def _nova_guild_inventory_change(conn, player_id: int, planet_id: int, item_type
 def _nova_guild_sanitize_target_type(v: str) -> str:
     v = str(v or 'guild').lower().strip()
     return 'planet' if v == 'planet' else 'guild'
+
+
+def _nova_guild_faction_key_value(value: Any) -> str:
+    return str(value or '').strip().lower()
+
+
+def _nova_guild_require_same_faction(player: Dict[str, Any], guild: Dict[str, Any]) -> None:
+    player_faction = _nova_guild_faction_key_value((player or {}).get('faction_id'))
+    guild_faction = _nova_guild_faction_key_value((guild or {}).get('faction_id'))
+    if guild_faction and player_faction and guild_faction != player_faction:
+        _nova_guild_raise(403, 'Guilds are faction locked. You can only join guilds from your own faction.')
 
 
 @app.get('/api/guild/list')
@@ -28348,6 +30888,8 @@ def nova_guild_apply(req: NovaGuildApplyRequest, ctx: Tuple[Dict[str,Any], Dict[
         if _nova_guild_membership(conn, req.player_id):
             _nova_guild_raise(400, 'You are already in a guild')
         guild = _nova_guild_summary(conn, req.guild_id)
+        player = _nova_guild_player(conn, req.player_id)
+        _nova_guild_require_same_faction(player, guild)
         if guild.get('status') == 'private':
             _nova_guild_raise(400, 'Guild is private')
         conn.execute('''INSERT OR REPLACE INTO guild_applications(guild_id,player_id,message,status,created_at)
@@ -28377,6 +30919,9 @@ def nova_guild_invite(req: NovaGuildInviteRequest, ctx: Tuple[Dict[str,Any], Dic
             _nova_guild_raise(404, 'Recipient not found')
         if _nova_guild_membership(conn, recipient_id):
             _nova_guild_raise(400, 'Recipient is already in a guild')
+        guild = _nova_guild_summary(conn, req.guild_id)
+        recipient = _nova_guild_player(conn, recipient_id)
+        _nova_guild_require_same_faction(recipient, guild)
         conn.execute('''INSERT INTO guild_invites(guild_id,sender_player_id,recipient_player_id,message,status,created_at)
                        VALUES(?,?,?,?,?,?)''', (req.guild_id, req.player_id, recipient_id, _nova_guild_clamp_text(req.message, 500), 'pending', _nova_guild_now_iso()))
         _nova_guild_log(conn, req.guild_id, req.player_id, 'invite_sent', recipient_id, {})
@@ -28403,6 +30948,8 @@ def nova_guild_invite_respond(req: NovaGuildInviteRespondRequest, ctx: Tuple[Dic
         conn.execute('UPDATE guild_invites SET status=?, resolved_at=? WHERE id=?', (status, _nova_guild_now_iso(), req.invite_id))
         if req.accept:
             g = _nova_guild_summary(conn, int(inv['guild_id']))
+            player = _nova_guild_player(conn, req.player_id)
+            _nova_guild_require_same_faction(player, g)
             if int(g['member_count']) >= int(g['max_members']):
                 _nova_guild_raise(400, 'Guild is full')
             rank = _nova_guild_default_rank(conn, int(inv['guild_id']))
@@ -28761,6 +31308,7 @@ def nova_guild_war_declare(req: NovaGuildWarDeclareRequest, ctx: Tuple[Dict[str,
         if defender_id:
             conn.execute('INSERT OR IGNORE INTO guild_war_scores(war_id,guild_id,updated_at) VALUES(?,?,?)', (war_id, defender_id, now_iso))
         _nova_guild_log(conn, req.guild_id, req.player_id, 'war_declared', None, {'war_id': war_id, 'target_type': target_type, 'cost': cost})
+        nova_safe_record_guild_contribution(conn, req.player_id, 'war', max(100, cost // 500), 1, 'guild_war_declare', {'warId': war_id, 'targetType': target_type, 'cost': cost})
         conn.commit()
         return {'ok': True, 'war_id': war_id, 'cost': cost, 'starts_at': starts, 'ends_at': ends}
     except Exception:
@@ -28886,11 +31434,11 @@ _NOVA_LB_HEAVY_STATE_KEYS = {
     "world_statistics", "server_analytics", "admin_logs", "full_admin_logs",
     "chat_history", "chat_messages", "full_chat_messages", "guild_logs", "guild_history",
     "guild_armory", "market_history", "event_history", "achievement_details",
-    "public_profiles_full", "profile_directory",
+    "public_profiles_full", "profile_directory", "public_profiles", "party", "social",
 }
 # Only removed when NOVA_STRICT_STATE_SLIMMING=1 because older frontend builds may still depend on it.
 _NOVA_LB_STRICT_EXTRA_HEAVY_STATE_KEYS = {
-    "public_profiles", "achievements", "events", "market", "guild", "messages", "mailbox",
+    "achievements", "avatar_options", "events", "market", "guild", "messages", "mailbox",
 }
 
 _NOVA_LB_METRICS = [
@@ -28930,12 +31478,16 @@ _NOVA_LB_METRICS = [
     ("galaxies_visited", "Galaxies Visited", "Exploration", "Unique or scored galaxy visits.", "number", "desc", 1, 1, "exploration"),
     ("anomalies_discovered", "Anomalies Discovered", "Exploration", "Anomalies discovered.", "number", "desc", 1, 1, "exploration"),
     ("salvage_sites_discovered", "Salvage Sites Discovered", "Exploration", "Salvage sites discovered.", "number", "desc", 1, 1, "exploration"),
+    ("salvage_runs_completed", "Salvage Runs Completed", "Salvage", "Salvage actions completed.", "number", "desc", 1, 1, "salvage"),
+    ("salvage_materials_recovered", "Salvage Materials Recovered", "Salvage", "Materials and scrap recovered through salvage.", "number", "desc", 1, 1, "salvage"),
+    ("salvage_value_recovered", "Salvage Value Recovered", "Salvage", "Estimated value recovered through salvage.", "currency", "desc", 1, 1, "salvage"),
     ("guild_contribution_xp", "Guild Contribution XP", "Guild / War", "Guild XP contributed.", "number", "desc", 1, 1, "guild"),
     ("materials_donated_to_guild", "Materials Donated to Guild", "Guild / War", "Guild material donation score.", "number", "desc", 1, 1, "guild"),
     ("treasury_donated", "Treasury Donated", "Guild / War", "Guild treasury donations.", "currency", "desc", 1, 1, "guild"),
     ("armory_deposits", "Armory Deposits", "Guild / War", "Guild armory deposit count/value.", "number", "desc", 1, 1, "guild"),
     ("war_score", "War Score", "Guild / War", "Validated war score.", "number", "desc", 1, 1, "war"),
     ("planet_capture_progress", "Planet Capture Progress", "Guild / War", "Planet capture progress contributed.", "number", "desc", 1, 1, "war"),
+    ("war_participation_score", "War Participation Score", "Guild / War", "Faction war activity, supply, and combat participation.", "number", "desc", 1, 1, "war"),
     ("defense_kills", "Defense Kills", "Guild / War", "Defense kills during valid defense events/wars.", "number", "desc", 1, 1, "war"),
     ("faction_contribution", "Faction Contribution", "Planet / Faction", "Faction contribution score.", "number", "desc", 1, 1, "faction"),
     ("planet_influence_gained", "Planet Influence Gained", "Planet / Faction", "Planet influence gained.", "number", "desc", 1, 1, "faction"),
@@ -29075,6 +31627,7 @@ def nova_ensure_leaderboard_schema(conn=None):
     if conn is None and now - _NOVA_LB_SCHEMA_READY_AT < 60:
         return
     conn = conn or _nova_lb_conn()
+    started_in_transaction = bool(getattr(conn, "in_transaction", False))
     cur = conn.cursor()
     cur.executescript("""
     CREATE TABLE IF NOT EXISTS leaderboard_metric_definitions (
@@ -29203,12 +31756,14 @@ def nova_ensure_leaderboard_schema(conn=None):
             INSERT OR IGNORE INTO maintenance_jobs(job_key, interval_seconds, status, next_run_at, updated_at)
             VALUES (?, ?, 'idle', ?, ?)
         """, (key, interval, _nova_lb_now_iso(), _nova_lb_now_iso()))
-    conn.commit()
+    if not started_in_transaction:
+        conn.commit()
     _NOVA_LB_SCHEMA_READY_AT = now
 
 def nova_bump_state_version(conn, version_key):
     try:
-        nova_ensure_leaderboard_schema(conn)
+        if not bool(getattr(conn, "in_transaction", False)) or not _nova_lb_table_exists(conn, "nova_state_versions"):
+            nova_ensure_leaderboard_schema(conn)
         conn.execute("""
             INSERT INTO nova_state_versions(version_key, version_value, updated_at)
             VALUES(?, 1, ?)
@@ -29229,10 +31784,29 @@ def _nova_lb_get_setting(conn, key, default):
 def record_player_metric(conn, player_id, metric_key, amount, faction_id=None, guild_id=None, planet_id=None, metadata=None):
     return nova_record_player_metric(conn, player_id, metric_key, amount, faction_id, guild_id, planet_id, metadata)
 
+def _nova_lb_metric_definition(metric_key):
+    for metric in _NOVA_LB_METRICS:
+        if metric[0] == metric_key:
+            return metric
+    return None
+
 def nova_record_player_metric(conn, player_id, metric_key, amount, faction_id=None, guild_id=None, planet_id=None, metadata=None):
     """Server-side metric hook. Call this from validated gameplay actions only."""
     try:
-        nova_ensure_leaderboard_schema(conn)
+        in_action_transaction = bool(getattr(conn, "in_transaction", False))
+        if in_action_transaction:
+            required_tables = ("leaderboard_metric_definitions", "player_metric_events", "player_metric_daily_rollups", "nova_state_versions")
+            if not all(_nova_lb_table_exists(conn, table_name) for table_name in required_tables):
+                return False
+            metric_def = _nova_lb_metric_definition(metric_key)
+            if metric_def:
+                conn.execute("""
+                    INSERT OR IGNORE INTO leaderboard_metric_definitions
+                        (metric_key, display_name, category, description, value_type, sort_direction, enabled, visible_to_players, source_event_type)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, metric_def)
+        else:
+            nova_ensure_leaderboard_schema(conn)
         if not player_id or metric_key is None:
             return False
         amount = float(amount)
@@ -29545,7 +32119,12 @@ def nova_slim_state_payload(state, conn=None, player=None):
             "market_history": "/api/market/history",
             "event_history": "/api/events",
             "achievement_details": "/api/achievements",
+            "achievements": "/api/achievements",
+            "avatar_options": "/api/state/profile",
             "public_profiles": "/api/profile/public-profiles",
+            "party": "/api/state/party",
+            "social": "/api/state/social",
+            "profile": "/api/state/profile",
         }.get(key)
         deferred[key] = {"count": count, "endpoint": endpoint, "reason": "not_hot_path"}
         del state[key]
@@ -29784,6 +32363,20 @@ except Exception as _nova_lb_route_exc:
         print("[leaderboards] route registration skipped", _nova_lb_route_exc)
     except Exception:
         pass
+try:
+    _nova_lb_boot_conn = _nova_lb_conn()
+    try:
+        nova_ensure_leaderboard_schema(_nova_lb_boot_conn)
+    finally:
+        try:
+            _nova_lb_boot_conn.close()
+        except Exception:
+            pass
+except Exception as _nova_lb_schema_exc:
+    try:
+        print("[leaderboards] schema init skipped", _nova_lb_schema_exc)
+    except Exception:
+        pass
 # === NOVA LEADERBOARDS + STATE SLIMMING PATCH END ===
 
 
@@ -29817,7 +32410,7 @@ def nova_is_guild_war_active(conn, guild_a_id, guild_b_id):
             FROM guild_wars
             WHERE ((attacker_guild_id = ? AND defender_guild_id = ?) OR (attacker_guild_id = ? AND defender_guild_id = ?))
               AND status IN ('pending', 'preparation', 'active')
-              AND (end_at IS NULL OR end_at >= ?)
+              AND (ends_at IS NULL OR ends_at >= ?)
             LIMIT 1
             """,
             (guild_a_id, guild_b_id, guild_b_id, guild_a_id, now_iso)

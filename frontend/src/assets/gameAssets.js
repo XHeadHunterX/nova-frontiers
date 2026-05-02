@@ -10,7 +10,7 @@ const brandModules = import.meta.glob('./brand/*.svg', {
   import: 'default',
 });
 
-const factionModules = import.meta.glob('./factions/**/*.svg', {
+const factionModules = import.meta.glob(['./factions/**/emblem.svg', './factions/**/avatar-*.png'], {
   eager: true,
   import: 'default',
 });
@@ -134,18 +134,9 @@ const brandAsset = (path) => brandModules[`./brand/${path}`] || u(`./brand/${pat
 const pad2 = (value) => String(value).padStart(2, '0');
 
 const factionAvatarNames = {
-  solar_accord: {
-    female: ['Aster Command', 'Dawn Wing', 'Civic Ace', 'Sun Marshal', 'Halo Runner', 'Aurora Envoy'],
-    male: ['Atlas Watch', 'Bright Lance', 'Cobalt Captain', 'Sol Ranger', 'Beacon Guard', 'Zenith Pilot'],
-  },
-  iron_meridian: {
-    female: ['Chrome Oracle', 'Forge Relay', 'Servo Crown', 'Vector Saint', 'Arc Warden', 'Titan Loom'],
-    male: ['Anvil Prime', 'Steel Vector', 'Torque Herald', 'Bulwark Node', 'Cinder Core', 'Rail Sentinel'],
-  },
-  umbral_veil: {
-    female: ['Nebula Whisper', 'Crescent Shade', 'Star Siren', 'Omen Drift', 'Void Seer', 'Eclipse Bloom'],
-    male: ['Night Cartographer', 'Grave Star', 'Abyss Broker', 'Vesper Coil', 'Dark Meridian', 'Moonless Scout'],
-  },
+  solar_accord: ['Solar Pilot 01', 'Solar Pilot 02', 'Solar Pilot 03', 'Solar Pilot 04', 'Solar Pilot 05', 'Solar Pilot 06', 'Solar Pilot 07', 'Solar Pilot 08', 'Solar Pilot 09', 'Solar Pilot 10', 'Solar Pilot 11', 'Solar Pilot 12'],
+  iron_meridian: ['Meridian Unit 01', 'Meridian Unit 02', 'Meridian Unit 03', 'Meridian Unit 04', 'Meridian Unit 05', 'Meridian Unit 06', 'Meridian Unit 07', 'Meridian Unit 08', 'Meridian Unit 09', 'Meridian Unit 10', 'Meridian Unit 11', 'Meridian Unit 12'],
+  umbral_veil: ['Veil Envoy 01', 'Veil Envoy 02', 'Veil Envoy 03', 'Veil Envoy 04', 'Veil Envoy 05', 'Veil Envoy 06', 'Veil Envoy 07', 'Veil Envoy 08', 'Veil Envoy 09', 'Veil Envoy 10', 'Veil Envoy 11', 'Veil Envoy 12'],
 };
 
 const factionAvatarMeta = {
@@ -156,22 +147,23 @@ const factionAvatarMeta = {
 
 function makeFactionAvatars(factionCode) {
   const meta = factionAvatarMeta[factionCode];
-  return ['female', 'male'].flatMap((gender) =>
-    factionAvatarNames[factionCode][gender].map((name, index) => {
-      const num = index + 1;
-      return {
-        id: `${factionCode}_${gender}_${pad2(num)}`,
-        label: `${name}`,
-        fullLabel: `${meta.name} ${name}`,
-        gender,
-        factionCode,
-        faction: meta.name,
-        species: meta.species,
-        index: num,
-        url: factionAsset(`${factionCode}/${gender}-${pad2(num)}.svg`),
-      };
-    })
-  );
+  return factionAvatarNames[factionCode].map((name, index) => {
+    const num = index + 1;
+    return {
+      id: `${factionCode}_avatar_${pad2(num)}`,
+      legacyIds: [
+        `${factionCode}_${num <= 6 ? 'female' : 'male'}_${pad2(num <= 6 ? num : num - 6)}`,
+      ],
+      label: `${name}`,
+      fullLabel: `${meta.name} ${name}`,
+      gender: 'portrait',
+      factionCode,
+      faction: meta.name,
+      species: meta.species,
+      index: num,
+      url: factionAsset(`${factionCode}/avatar-${pad2(num)}.png`),
+    };
+  });
 }
 
 export const factionAvatarAssets = {
@@ -181,7 +173,12 @@ export const factionAvatarAssets = {
 };
 
 const factionAvatarCatalog = Object.values(factionAvatarAssets).flat();
-const avatarAssetById = Object.fromEntries(factionAvatarCatalog.map((avatar) => [avatar.id, avatar.url]));
+const avatarAssetById = Object.fromEntries(
+  factionAvatarCatalog.flatMap((avatar) => [
+    [avatar.id, avatar.url],
+    ...(avatar.legacyIds || []).map((id) => [id, avatar.url]),
+  ])
+);
 
 
 export const brandAssets = {
@@ -490,11 +487,19 @@ const catalogs = {
     default: [u('./modules/armor_plating.png'), u('./modules/shield_emitter.png')],
   },
   item: [
+    generatedAssetMap['items/ai_cores'] || generatedAssetMap.ai_cores,
+    generatedAssetMap['items/fuel_cell'] || generatedAssetMap.fuel_cell,
+    generatedAssetMap['items/field_rations'] || generatedAssetMap.field_rations,
+    generatedAssetMap['items/meds'] || generatedAssetMap.meds,
+    generatedAssetMap['items/luxury'] || generatedAssetMap.luxury,
+    generatedAssetMap['items/microchips'] || generatedAssetMap.microchips,
+    generatedAssetMap['items/refined_alloy'] || generatedAssetMap.refined_alloy,
+    generatedAssetMap['items/void_crystal'] || generatedAssetMap.void_crystal,
     u('./materials/cargo_cache.png'),
     u('./modules/module_cargo.png'),
     u('./materials/ore_blue_crystal.png'),
     u('./materials/ancient_relic.png'),
-  ],
+  ].filter(Boolean),
 };
 
 function hashString(value) {
@@ -558,8 +563,9 @@ function exactAvatarAsset(src = '', hint = '') {
   for (const avatar of factionAvatarCatalog) {
     const num = pad2(avatar.index);
     if (text.includes(avatar.id)) return avatar.url;
-    if (text.includes(avatar.factionCode) && text.includes(`${avatar.gender}_${num}`)) return avatar.url;
-    if (text.includes(avatar.factionCode) && text.includes(`${avatar.gender}_${avatar.index}`)) return avatar.url;
+    if ((avatar.legacyIds || []).some((id) => text.includes(id))) return avatar.url;
+    if (text.includes(avatar.factionCode) && text.includes(`avatar_${num}`)) return avatar.url;
+    if (text.includes(avatar.factionCode) && text.includes(`avatar_${avatar.index}`)) return avatar.url;
   }
   return '';
 }
@@ -613,6 +619,49 @@ function themedShipAsset(category = '', hint = '', seed = '') {
 }
 
 
+
+const generatedItemAssetAliases = {
+  ai_core: 'ai_cores',
+  alien_relic: 'alien_relics',
+  alien_artifact: 'alien_relics',
+  ammunition: 'ammo',
+  ammo_pack: 'ammo',
+  bio_gel_pack: 'bio_gel',
+  implants: 'black_implants',
+  black_market_implants: 'black_implants',
+  chemical_crate: 'chemicals',
+  electronics: 'microchips',
+  electronic_parts: 'microchips',
+  microchip: 'microchips',
+  id_chip: 'forged_ids',
+  forged_id: 'forged_ids',
+  fuel: 'fuel_cell',
+  fuel_cells: 'fuel_cell',
+  helium3: 'helium_3',
+  helium_3_cells: 'helium3_cells',
+  medical_supplies: 'meds',
+  medicine: 'meds',
+  rations: 'field_rations',
+  spices: 'hydro_spices',
+  luxury_goods: 'luxury',
+  luxuries: 'luxury',
+  alloys: 'refined_alloy',
+  alloy: 'refined_alloy',
+  restricted_weapon: 'restricted_weapons',
+  weapons_cache: 'restricted_weapons',
+  weapons: 'restricted_weapons',
+  polymer_sheet: 'polymer',
+  quantum_glass_sheet: 'quantum_glass',
+  void_crystals: 'void_crystal',
+  volatile_reagent: 'volatile_reagents',
+};
+
+function generatedItemAliasAsset(key = '') {
+  const alias = generatedItemAssetAliases[key];
+  if (!alias) return '';
+  return generatedAssetMap[`items/${alias}`] || generatedAssetMap[alias] || '';
+}
+
 function exactGeneratedAsset(assetType = 'item', hint = '', seed = '') {
   if (String(assetType || '').toLowerCase() === 'ship') {
     const ship = exactGeneratedShipAssetFor(hint, seed);
@@ -633,6 +682,8 @@ function exactGeneratedAsset(assetType = 'item', hint = '', seed = '') {
   safeSeed.split(/[\s,/|]+/).forEach(push);
   for (const key of tokens) {
     if (generatedAssetMap[key]) return generatedAssetMap[key];
+    const aliasedItem = generatedItemAliasAsset(key);
+    if (aliasedItem) return aliasedItem;
     if ((assetType === 'module' || assetType === 'weapon' || assetType === 'armor') && generatedAssetMap[`modules/${key}`]) return generatedAssetMap[`modules/${key}`];
     if (generatedAssetMap[`items/${key}`]) return generatedAssetMap[`items/${key}`];
     if (generatedAssetMap[`modules/${key}`]) return generatedAssetMap[`modules/${key}`];

@@ -3210,3 +3210,4 @@ td button{margin:2px;padding:7px 9px;font-size:12px}
 .battleSupportBand.player{border-color:rgba(69,243,255,.18)}
 .battleSupportBand.enemy{border-color:rgba(255,91,91,.20)}
 @media(max-width:1100px){.battleSupportBands{grid-template-columns:1fr}}
+

@@ -2133,6 +2133,7 @@ td button{margin:2px;padding:7px 9px;font-size:12px}
   box-sizing:border-box;
 }
 .combatantRosterColumn.enemy{border-color:rgba(255,91,91,.22)}
+.combatantRosterColumn.friendly{border-color:rgba(99,255,213,.22)}
 .combatantRosterHeader{
   display:flex;
   align-items:center;
@@ -2173,16 +2174,16 @@ td button{margin:2px;padding:7px 9px;font-size:12px}
   gap:7px;
   padding:8px!important;
   border-radius:8px!important;
-  border:1px solid rgba(69,243,255,.20)!important;
-  background:linear-gradient(180deg,rgba(6,23,34,.94),rgba(3,10,18,.96))!important;
+  border:1px solid color-mix(in srgb,var(--combatant-faction-color,#45f3ff) 72%,transparent)!important;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--combatant-faction-color,#45f3ff) 12%,rgba(6,23,34,.94)),rgba(3,10,18,.96))!important;
   color:#effcff!important;
   text-align:left;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.04);
   overflow:hidden;
 }
 .combatantBattleCard.enemy{
-  border-color:rgba(255,91,91,.24)!important;
-  background:linear-gradient(180deg,rgba(35,8,18,.90),rgba(5,10,18,.96))!important;
+  border-color:color-mix(in srgb,var(--combatant-faction-color,#ff5b5b) 78%,transparent)!important;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--combatant-faction-color,#ff5b5b) 13%,rgba(35,8,18,.90)),rgba(5,10,18,.96))!important;
 }
 .combatantBattleCard:disabled{
   opacity:1;
@@ -2194,12 +2195,12 @@ td button{margin:2px;padding:7px 9px;font-size:12px}
   border-color:rgba(255,255,255,.36)!important;
 }
 .combatantBattleCard.selectedTarget{
-  border-color:rgba(255,210,122,.82)!important;
-  box-shadow:0 0 0 1px rgba(255,210,122,.32),0 0 26px rgba(255,210,122,.16),inset 0 1px 0 rgba(255,255,255,.08);
+  border-color:color-mix(in srgb,var(--combatant-faction-color,#ffd27a) 88%,#fff 8%)!important;
+  box-shadow:0 0 0 1px rgba(255,210,122,.42),0 0 26px color-mix(in srgb,var(--combatant-faction-color,#ffd27a) 28%,transparent),inset 0 1px 0 rgba(255,255,255,.08);
 }
 .combatantBattleCard.you{
   border-style:solid!important;
-  background:linear-gradient(180deg,rgba(11,38,44,.96),rgba(3,13,20,.96))!important;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--combatant-faction-color,#45f3ff) 18%,rgba(11,38,44,.96)),rgba(3,13,20,.96))!important;
 }
 .combatantBattleCard.defeated{
   opacity:.78;
@@ -2244,6 +2245,17 @@ td button{margin:2px;padding:7px 9px;font-size:12px}
   padding:2px 6px;
   font-size:10px;
   font-weight:850;
+}
+.combatantCardFaction{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:color-mix(in srgb,var(--combatant-faction-color,#9dffdf) 76%,#dffbff);
+  font-size:10px;
+  font-weight:800;
+  letter-spacing:0;
+  text-transform:uppercase;
 }
 .combatantCardVitals{
   display:grid;
@@ -4186,6 +4198,17 @@ input,select,textarea{border-radius:12px!important;background:rgba(2,8,16,.72)!i
 @keyframes nfWarPulse{50%{filter:brightness(1.3);transform:translate(-50%,-50%) scale(1.08)!important;}}
 @keyframes nfWarRing{50%{transform:scale(1.18);opacity:.38;}}
 .galaxyWarRing,.planetWarRing{border-color:rgba(255,122,47,.74)!important;background:radial-gradient(circle,rgba(255,122,47,.11),rgba(255,77,109,.045) 42%,transparent 72%)!important;box-shadow:0 0 48px rgba(255,122,47,.18)!important;animation:nfWarRing 1.25s ease-in-out infinite;}
+.territoryOverlay{position:absolute;z-index:1;translate:-50% -50%;width:118px;height:86px;border-radius:50%;pointer-events:none;background:radial-gradient(circle,color-mix(in srgb,var(--territory-color,#35f2ff) 18%,transparent),transparent 68%);border:1px solid color-mix(in srgb,var(--territory-color,#35f2ff) 20%,transparent);opacity:.58}
+.territoryOverlay.border{border-style:dashed;opacity:.76}
+.territoryOverlay.contested{background:radial-gradient(circle,rgba(255,194,71,.18),rgba(255,122,47,.06) 46%,transparent 72%);border-color:rgba(255,194,71,.44);animation:nfWarRing 1.8s ease-in-out infinite}
+.territoryOverlay.war{width:156px;height:112px;background:radial-gradient(circle,rgba(255,122,47,.22),rgba(255,77,109,.07) 50%,transparent 74%);border-color:rgba(255,122,47,.58);box-shadow:0 0 42px rgba(255,77,109,.2);animation:nfWarRing 1.15s ease-in-out infinite}
+.mapNode.contestedNode{box-shadow:0 0 0 3px rgba(255,194,71,.12),0 0 24px rgba(255,194,71,.24)!important}
+.mapNode.territoryWarNode{border-color:#ff7a2f!important;box-shadow:0 0 0 4px rgba(255,122,47,.16),0 0 34px rgba(255,77,109,.48)!important;animation:nfWarPulse 1.4s ease-in-out infinite}
+.warSupplyHead{margin-bottom:10px}
+.warSupplyGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.warSupplyCard{text-align:left;text-transform:none;letter-spacing:0;display:grid;gap:5px;align-content:start;border-color:rgba(255,194,71,.32)!important;background:linear-gradient(180deg,rgba(20,18,8,.9),rgba(5,13,18,.95))!important}
+.warSupplyCard b{color:#fff1c5}
+.warSupplyCard span,.warSupplyCard small{color:var(--muted);font-size:12px;line-height:1.3}
 .captureStationMarker{border-radius:999px!important;border-color:#ff7a2f!important;background:linear-gradient(180deg,#2a0b13,#14070b)!important;color:#ffcf6f!important;box-shadow:0 0 24px rgba(255,122,47,.38)!important;}
 .battleModal,.battleScreen,.realtimeBattleScreen{border-radius:26px!important;background:linear-gradient(180deg,rgba(4,15,28,.96),rgba(1,5,11,.98))!important;border-color:rgba(108,246,255,.32)!important;box-shadow:0 40px 130px rgba(0,0,0,.62),0 0 80px rgba(108,246,255,.08)!important;}
 .battleShipImageFrame{border-radius:24px!important;background:radial-gradient(circle at 50% 46%,rgba(108,246,255,.14),rgba(1,7,14,.9) 68%)!important;}
@@ -4251,175 +4274,969 @@ input,select,textarea{border-radius:12px!important;background:rgba(2,8,16,.72)!i
 .authModeTabs button.active{background:linear-gradient(135deg,rgba(53,242,255,.18),rgba(155,92,255,.14));border-color:rgba(53,242,255,.38);color:#e9fdff;box-shadow:0 0 24px rgba(53,242,255,.10)}
 .registerForm{grid-template-columns:1fr 1fr;gap:10px}.registerForm>.primary,.factionPickerBlock{grid-column:1/-1}.registerForm input{min-width:0}.authSectionHeader{display:grid;gap:4px;margin:4px 0 10px}.authSectionHeader b{color:#eaffff;font-size:14px;text-transform:uppercase;letter-spacing:.08em}.authSectionHeader span{color:var(--muted);font-size:13px;line-height:1.45}.factionPickerBlock{border:1px solid rgba(100,240,255,.18);background:linear-gradient(180deg,rgba(8,22,34,.82),rgba(3,10,18,.78));border-radius:18px;padding:12px;display:grid;gap:12px}.factionBalanceGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.factionChoice{position:relative;display:grid;gap:8px;text-align:left;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:radial-gradient(circle at top left,color-mix(in srgb,var(--faction-accent) 18%,transparent),transparent 42%),rgba(4,13,22,.86);padding:12px;color:#dffbff;cursor:pointer;overflow:hidden}.factionChoice:hover,.factionChoice.selected{border-color:color-mix(in srgb,var(--faction-accent) 72%,#ffffff 8%);box-shadow:0 0 28px color-mix(in srgb,var(--faction-accent) 18%,transparent),inset 0 0 22px rgba(255,255,255,.035)}.factionChoice.selected:after{content:'Selected';position:absolute;right:10px;bottom:10px;border:1px solid color-mix(in srgb,var(--faction-accent) 70%,#fff 10%);border-radius:999px;padding:4px 8px;font-size:10px;text-transform:uppercase;font-weight:1000;color:#fff;background:rgba(0,0,0,.34)}.factionChoiceTop{display:flex;justify-content:space-between;gap:8px;align-items:center}.factionChoiceTop b{font-size:14px;color:#fff}.factionChoiceTop em{font-style:normal;font-size:10px;border:1px solid color-mix(in srgb,var(--faction-accent) 55%,#fff 8%);padding:3px 7px;border-radius:999px;color:#fff;background:rgba(0,0,0,.22)}.factionChoice span:not(.factionChoiceTop){color:#c7e8ef;font-size:12px;line-height:1.35;padding-right:28px}.factionChoice i{font-style:normal;color:var(--muted);font-size:11px}.factionBalanceBar{height:7px;border-radius:999px;background:rgba(255,255,255,.09);overflow:hidden}.factionBalanceBar span{display:block;height:100%;border-radius:999px;background:linear-gradient(90deg,var(--faction-accent),#eaffff);box-shadow:0 0 16px color-mix(in srgb,var(--faction-accent) 52%,transparent)}.factionDecisionPanel{border:1px solid color-mix(in srgb,var(--faction-accent) 42%,#ffffff 5%);border-radius:16px;padding:12px;background:linear-gradient(135deg,color-mix(in srgb,var(--faction-accent) 12%,transparent),rgba(5,12,22,.78));display:grid;gap:5px}.factionDecisionPanel b{font-size:16px;color:#fff}.factionDecisionPanel p{margin:0;color:#dcf8ff;line-height:1.45}.factionDecisionPanel small{color:var(--muted);line-height:1.35}.googleAuthBlock{display:grid;gap:7px;place-items:center;margin:14px 0 6px}.googleAuthBlock span{color:var(--muted);font-size:12px;text-align:center;max-width:620px;line-height:1.35}.googleButtonSlot{min-height:42px;display:grid;place-items:center}.googleDisabled{border-radius:999px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.05);color:var(--muted);padding:10px 18px}.loginCard .note{line-height:1.4}@media(max-width:860px){.registerForm{grid-template-columns:1fr}.factionBalanceGrid{grid-template-columns:1fr}.registrationCard{width:calc(100vw - 20px)}}
 
-/* Landing/login gameplay loop deck */
-.loginLandingWrap{
-  width:min(1280px,calc(100vw - 32px));
-  display:grid;
-  grid-template-columns:minmax(420px,.9fr) minmax(360px,1fr);
-  gap:18px;
-  align-items:start;
-  padding:32px 0;
-}
-.loginLandingAuth.loginCard{
-  width:100%!important;
-  max-width:none!important;
-}
-.gameplayLoopDeck{
-  width:100%;
-  padding:22px;
-  border-radius:28px!important;
-  overflow:hidden;
+/* Cinematic landing/login */
+.novaLandingScreen{
+  display:block!important;
+  min-height:100vh;
+  min-height:100svh;
+  overflow-x:hidden;
+  isolation:isolate;
   background:
-    radial-gradient(circle at 78% 16%,rgba(255,194,71,.14),transparent 28%),
-    linear-gradient(180deg,rgba(7,23,38,.86),rgba(2,8,16,.92))!important;
+    radial-gradient(circle at 50% 24%,rgba(72,202,255,.17),transparent 28%),
+    radial-gradient(circle at 18% 72%,rgba(255,190,82,.10),transparent 28%),
+    radial-gradient(circle at 82% 78%,rgba(177,116,255,.13),transparent 30%),
+    url('./assets/backgrounds/starfield.svg') center/cover fixed,
+    #01050b!important;
 }
-.gameplayLoopIntro{
-  display:grid;
-  gap:7px;
-  margin-bottom:14px;
+.novaLandingScreen:before{
+  content:'';
+  position:fixed;
+  inset:0;
+  z-index:-3;
+  pointer-events:none;
+  background:
+    linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:100% 4px,88px 100%;
+  opacity:.22;
+  mask-image:linear-gradient(180deg,rgba(0,0,0,.84),rgba(0,0,0,.12));
 }
-.gameplayLoopIntro span{
-  width:max-content;
-  max-width:100%;
-  padding:4px 9px;
-  border:1px solid rgba(255,194,71,.38);
-  border-radius:999px;
-  color:#ffe3a2;
-  background:rgba(255,194,71,.08);
-  font-size:11px;
-  font-weight:900;
-  text-transform:uppercase;
-  letter-spacing:.1em;
+.landingStars,
+.landingStars i{
+  position:fixed;
+  inset:-20%;
+  z-index:-2;
+  pointer-events:none;
+  background-image:radial-gradient(rgba(235,253,255,.72) 1px,transparent 1.4px);
+  background-size:92px 92px;
+  opacity:.32;
+  animation:landingStarDrift 42s linear infinite;
 }
-.gameplayLoopIntro h2{
-  margin:0;
-  color:#eaffff;
-  font-size:30px;
-  line-height:1.04;
-  text-transform:none;
-  letter-spacing:0;
-}
-.gameplayLoopIntro p{
-  margin:0;
-  color:var(--muted);
-  line-height:1.45;
-}
-.gameplayLoopList{
-  display:grid;
-  gap:10px;
-}
-.gameplayLoopPanel{
-  display:grid;
-  gap:0;
-  width:100%;
-  min-height:74px;
-  padding:0;
-  border-radius:18px!important;
-  border:1px solid rgba(108,246,255,.18)!important;
-  background:linear-gradient(180deg,rgba(5,19,31,.82),rgba(3,10,18,.9))!important;
-  color:#dffbff;
-  text-align:left;
-  text-transform:none;
-  letter-spacing:0;
-  overflow:hidden;
-}
-.gameplayLoopPanel.active{
-  border-color:rgba(255,194,71,.56)!important;
-  box-shadow:0 0 28px rgba(255,194,71,.12),inset 0 0 28px rgba(255,255,255,.035)!important;
-}
-.gameplayLoopPanelHead{
+.landingStars i:nth-child(1){background-size:58px 58px;opacity:.24;animation-duration:30s}
+.landingStars i:nth-child(2){background-size:132px 132px;opacity:.28;animation-duration:58s;animation-direction:reverse}
+.landingStars i:nth-child(3){background-size:210px 210px;opacity:.20;animation-duration:74s}
+@keyframes landingStarDrift{to{transform:translate3d(-90px,70px,0)}}
+.landingTopbar{
+  position:fixed;
+  top:0;
+  left:0;
+  right:0;
+  z-index:40;
   display:flex;
-  align-items:center;
+  align-items:flex-start;
   justify-content:space-between;
-  gap:14px;
-  min-height:72px;
-  padding:13px 14px;
+  gap:18px;
+  padding:14px clamp(16px,3vw,38px);
+  background:linear-gradient(180deg,rgba(2,8,16,.84),rgba(2,8,16,.42));
+  border-bottom:1px solid rgba(124,238,255,.16);
+  backdrop-filter:blur(18px);
+  box-shadow:0 22px 70px rgba(0,0,0,.32);
 }
-.gameplayLoopPanelHead>span{
-  display:grid;
+.brandNova-landing{
+  align-self:center;
+  min-width:188px;
   gap:4px;
+}
+.brandNova-landing img{
+  width:188px;
+  filter:drop-shadow(0 0 18px rgba(108,246,255,.20));
+}
+.brandNova-landing span{
+  margin-left:4px;
+  font-size:9px;
+  letter-spacing:.18em;
+}
+.landingAuthPanel{
+  width:min(690px,calc(100vw - 260px));
+  display:grid;
+  grid-template-columns:150px minmax(0,1fr);
+  gap:8px 10px;
+  align-items:start;
+  padding:8px;
+  border:1px solid rgba(124,238,255,.20);
+  border-radius:18px;
+  background:linear-gradient(180deg,rgba(4,14,25,.72),rgba(2,8,16,.64));
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),0 0 36px rgba(64,212,255,.08);
+}
+.landingAuthTabs{
+  grid-row:1;
+  margin:0;
+  padding:4px;
+  align-self:stretch;
+}
+.landingAuthTabs button{
+  padding:8px 10px;
+  font-size:11px;
+}
+.landingAuthForm{
+  grid-row:1;
+  display:grid;
+  grid-template-columns:minmax(110px,1fr) minmax(110px,1fr) auto;
+  gap:8px;
+  align-items:start;
+}
+.registerMode .landingAuthPanel{
+  width:min(860px,calc(100vw - 260px));
+}
+.registerMode .landingAuthForm{
+  grid-template-columns:repeat(4,minmax(92px,1fr)) auto;
+}
+.landingAuthForm input{
   min-width:0;
+  height:38px;
+  padding:9px 10px;
+  font-size:13px;
 }
-.gameplayLoopPanelHead b{
-  color:#f2fdff;
-  font-size:16px;
-  line-height:1.15;
+.landingAuthSubmit{
+  min-height:38px;
+  white-space:nowrap;
+  padding:9px 14px!important;
 }
-.gameplayLoopPanelHead small{
-  color:#9ed7e2;
+.landingRegisterDetails{
+  grid-column:1/-1;
+  max-height:min(46vh,470px);
+  overflow:auto;
+  border:1px solid rgba(124,238,255,.16);
+  border-radius:14px;
+  background:rgba(1,6,13,.50);
+}
+.landingRegisterDetails summary{
+  cursor:pointer;
+  padding:9px 11px;
+  color:#eaffff;
   font-size:12px;
-  line-height:1.25;
-}
-.gameplayLoopPanelHead em{
-  flex:0 0 auto;
-  min-width:56px;
-  text-align:center;
-  font-style:normal;
-  border:1px solid rgba(108,246,255,.22);
-  border-radius:999px;
-  padding:4px 8px;
-  color:#9dfcff;
-  background:rgba(2,8,16,.46);
-  font-size:10px;
-  font-weight:1000;
+  font-weight:900;
   text-transform:uppercase;
   letter-spacing:.08em;
 }
-.gameplayLoopPanel.active .gameplayLoopPanelHead em{
-  border-color:rgba(255,194,71,.52);
-  color:#ffe3a2;
+.landingRegisterDetails .factionPickerBlock{
+  margin:0;
+  border:0;
+  border-top:1px solid rgba(124,238,255,.14);
+  border-radius:0;
+  background:transparent;
 }
-.gameplayLoopExpanded{
+.landingRegisterDetails .factionChoice{
+  min-height:0;
+}
+.landingRegisterDetails .factionChoice span:not(.factionChoiceTop){
+  display:-webkit-box;
+  -webkit-line-clamp:2;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+}
+.landingRegisterDetails .factionAvatarGrid{
+  grid-template-columns:repeat(auto-fill,minmax(82px,1fr));
+}
+.landingGoogleBlock{
+  grid-column:1/-1;
+  grid-template-columns:auto 1fr;
+  justify-content:end;
+  place-items:center end;
+  margin:0;
+  gap:8px;
+}
+.landingGoogleBlock .googleButtonSlot{
+  min-height:36px;
+}
+.landingGoogleBlock span{
+  max-width:280px;
+  text-align:left;
+  font-size:11px;
+}
+.landingAuthPanel .error{
+  grid-column:1/-1;
+  margin:0;
+  padding:7px 9px;
+  border:1px solid rgba(255,138,138,.26);
+  border-radius:10px;
+  background:rgba(80,14,24,.28);
+  font-size:12px;
+}
+.landingExperience{
+  position:relative;
+  z-index:1;
+}
+.landingHero{
+  min-height:100vh;
+  min-height:100svh;
   display:grid;
-  grid-template-columns:148px minmax(0,1fr);
-  gap:13px;
-  align-items:center;
-  padding:0 14px 14px;
+  grid-template-columns:minmax(320px,620px) minmax(280px,420px);
+  grid-template-rows:1fr auto;
+  align-items:end;
+  justify-content:space-between;
+  gap:clamp(20px,4vw,70px);
+  padding:clamp(132px,16vh,184px) clamp(20px,5vw,76px) 44px;
+  text-align:left;
+  position:relative;
+  overflow:hidden;
+  isolation:isolate;
 }
-.gameplayLoopImage{
-  width:148px;
-  aspect-ratio:16/10;
-  border:1px solid rgba(108,246,255,.22);
-  border-radius:16px;
+.landingHero:after{
+  content:'';
+  position:absolute;
+  left:0;
+  right:0;
+  bottom:0;
+  height:34%;
+  z-index:-1;
+  pointer-events:none;
+  background:linear-gradient(180deg,transparent,rgba(1,5,11,.88));
+}
+.landingHeroBackdrop{
+  position:absolute;
+  inset:86px 0 0;
+  z-index:-2;
+  overflow:hidden;
+}
+.landingHeroBackdrop:before,
+.landingHeroBackdrop:after{
+  content:'';
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  z-index:2;
+}
+.landingHeroBackdrop:before{
+  background:
+    radial-gradient(circle at 68% 44%,transparent 0 28%,rgba(1,5,11,.22) 44%,rgba(1,5,11,.78) 100%),
+    linear-gradient(90deg,rgba(1,5,11,.94) 0%,rgba(1,5,11,.58) 36%,rgba(1,5,11,.12) 67%,rgba(1,5,11,.74) 100%);
+}
+.landingHeroBackdrop:after{
+  background:
+    linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(124,238,255,.07) 1px,transparent 1px);
+  background-size:100% 42px,118px 100%;
+  opacity:.32;
+  mask-image:linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.92));
+}
+.landingHeroBackdrop>img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  object-position:64% 42%;
+  display:block;
+  transform:scale(1.045);
+  filter:saturate(1.1) contrast(1.06) brightness(.82);
+  animation:landingCoreFloat 16s ease-in-out infinite;
+}
+.landingHeroCopy{
+  display:grid;
+  gap:14px;
+  justify-items:start;
+  align-self:center;
+  max-width:640px;
+  padding-bottom:clamp(10px,5vh,62px);
+}
+.landingHeroCopy span,
+.landingStoryCopy>span{
+  width:max-content;
+  max-width:100%;
+  padding:5px 10px;
+  border:1px solid rgba(124,238,255,.28);
+  border-radius:999px;
+  color:#bdf8ff;
+  background:rgba(35,203,235,.07);
+  font-size:11px;
+  font-weight:1000;
+  text-transform:uppercase;
+  letter-spacing:.13em;
+}
+.landingHeroCopy h1{
+  margin:0;
+  max-width:720px;
+  color:#f2fdff;
+  font-size:clamp(54px,8.4vw,126px);
+  line-height:.86;
+  text-transform:none;
+  letter-spacing:0;
+  text-shadow:0 0 34px rgba(108,246,255,.20),0 20px 80px rgba(0,0,0,.62);
+}
+.landingHeroCopy p{
+  margin:0;
+  max-width:590px;
+  color:#c5e4ec;
+  font-size:clamp(15px,1.7vw,19px);
+  line-height:1.48;
+}
+.landingRoleCards{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+  width:min(100%,620px);
+  margin-top:4px;
+}
+.landingRoleCards span{
+  display:grid;
+  gap:4px;
+  min-height:88px;
+  padding:12px;
+  border:1px solid rgba(124,238,255,.16);
+  border-radius:8px;
+  background:linear-gradient(180deg,rgba(5,18,31,.58),rgba(2,8,16,.42));
+  backdrop-filter:blur(10px);
+}
+.landingRoleCards b{
+  color:#f4fdff;
+  font-size:15px;
+  letter-spacing:.04em;
+  text-transform:uppercase;
+}
+.landingRoleCards small{
+  color:#a8c4ce;
+  line-height:1.35;
+}
+.landingCommandBrief{
+  align-self:center;
+  justify-self:end;
+  width:min(420px,100%);
+  display:grid;
+  gap:14px;
+  padding:16px;
+  border:1px solid rgba(124,238,255,.22);
+  border-radius:10px;
+  background:linear-gradient(180deg,rgba(4,14,25,.72),rgba(2,8,16,.56));
+  box-shadow:0 24px 80px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.05);
+  backdrop-filter:blur(14px);
+}
+.landingCommandBrief>div{
+  display:grid;
+  gap:4px;
+  padding-bottom:12px;
+  border-bottom:1px solid rgba(124,238,255,.14);
+}
+.landingCommandBrief span{
+  color:#8cfaff;
+  font-size:10px;
+  font-weight:1000;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+.landingCommandBrief b{
+  color:#f2fdff;
+  font-size:18px;
+}
+.landingCommandBrief ol{
+  list-style:none;
+  display:grid;
+  gap:10px;
+  margin:0;
+  padding:0;
+}
+.landingCommandBrief li{
+  display:grid;
+  gap:4px;
+  padding-left:14px;
+  border-left:2px solid rgba(255,194,71,.58);
+}
+.landingCommandBrief li:nth-child(2){border-left-color:rgba(87,255,163,.55)}
+.landingCommandBrief li:nth-child(3){border-left-color:rgba(177,116,255,.62)}
+.landingCommandBrief strong{
+  color:#f4fdff;
+  font-size:13px;
+  text-transform:uppercase;
+  letter-spacing:.06em;
+}
+.landingCommandBrief small{
+  color:#a8c4ce;
+  line-height:1.38;
+}
+.landingCoreArt{
+  position:relative;
+  width:min(960px,88vw);
+  aspect-ratio:16/8.6;
+  border-radius:26px;
+  overflow:hidden;
+  border:1px solid rgba(124,238,255,.24);
+  background:#020812;
+  box-shadow:0 45px 140px rgba(0,0,0,.58),0 0 90px rgba(95,225,255,.16),inset 0 0 80px rgba(0,0,0,.3);
+}
+.landingCoreArt:before,
+.landingCoreArt:after{
+  content:'';
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  z-index:2;
+}
+.landingCoreArt:before{
+  background:radial-gradient(circle at 50% 48%,transparent 36%,rgba(1,5,12,.42) 80%);
+}
+.landingCoreArt:after{
+  border-radius:inherit;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.08),inset 0 -80px 110px rgba(1,5,10,.52);
+}
+.landingCoreArt>img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block;
+  transform:scale(1.012);
+  animation:landingCoreFloat 14s ease-in-out infinite;
+}
+@keyframes landingCoreFloat{50%{transform:scale(1.045) translate3d(0,-7px,0)}}
+.orbitalRing{
+  position:absolute;
+  left:50%;
+  top:50%;
+  z-index:3;
+  width:66%;
+  aspect-ratio:1;
+  border:1px solid rgba(124,238,255,.28);
+  border-radius:50%;
+  transform:translate(-50%,-50%) rotateX(68deg) rotateZ(-12deg);
+  box-shadow:0 0 38px rgba(93,231,255,.12);
+}
+.ringTwo{
+  width:82%;
+  border-color:rgba(255,194,71,.22);
+  transform:translate(-50%,-50%) rotateX(70deg) rotateZ(22deg);
+}
+.heroRoute{
+  position:absolute;
+  z-index:4;
+  left:12%;
+  right:10%;
+  top:55%;
+  height:2px;
+  background:linear-gradient(90deg,transparent,rgba(96,241,255,.9),rgba(255,194,71,.75),transparent);
+  transform:rotate(-12deg);
+  filter:drop-shadow(0 0 8px rgba(96,241,255,.7));
+  opacity:.76;
+}
+.routeTwo{
+  top:39%;
+  left:19%;
+  right:18%;
+  transform:rotate(17deg);
+  background:linear-gradient(90deg,transparent,rgba(177,116,255,.82),rgba(96,241,255,.72),transparent);
+}
+.heroParticle{
+  position:absolute;
+  z-index:5;
+  width:8px;
+  height:8px;
+  border-radius:50%;
+  background:#dffcff;
+  box-shadow:0 0 16px rgba(124,238,255,.95);
+  animation:landingParticle 5.4s ease-in-out infinite;
+}
+.particleOne{left:28%;top:38%}
+.particleTwo{left:69%;top:58%;animation-delay:1.2s}
+.particleThree{left:52%;top:24%;animation-delay:2.4s}
+@keyframes landingParticle{50%{opacity:.28;transform:translate3d(12px,-8px,0) scale(.72)}}
+.landingHeroMeta{
+  grid-column:1/-1;
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  justify-content:flex-start;
+  align-self:end;
+}
+.landingHeroMeta span{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  min-height:40px;
+  padding:8px 12px;
+  border:1px solid rgba(124,238,255,.18);
+  border-radius:999px;
+  background:rgba(4,16,28,.58);
+  color:#b9d7df;
+  backdrop-filter:blur(12px);
+}
+.landingHeroMeta b{
+  color:#f2fdff;
+}
+.landingScrollCue{
+  display:grid;
+  justify-items:center;
+  gap:8px;
+  margin:-20px auto 30px;
+  color:#91bac8;
+  font-size:11px;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:.12em;
+}
+.landingScrollCue span{
+  width:1px;
+  height:42px;
+  background:linear-gradient(180deg,transparent,#8cfaff,transparent);
+  animation:landingCue 1.8s ease-in-out infinite;
+}
+@keyframes landingCue{50%{opacity:.36;transform:translateY(10px)}}
+.landingStorySection{
+  min-height:104vh;
+  display:grid;
+  grid-template-columns:minmax(320px,1fr) minmax(320px,.85fr);
+  gap:clamp(24px,5vw,76px);
+  align-items:center;
+  width:min(1180px,calc(100vw - 36px));
+  margin:0 auto;
+  padding:86px 0;
+  scroll-margin-top:120px;
+  opacity:.55;
+  transform:translateY(32px);
+  transition:opacity .7s ease,transform .7s ease;
+}
+.landingStorySection.visible{
+  opacity:1;
+  transform:translateY(0);
+}
+.landingStorySection:nth-child(even){
+  grid-template-columns:minmax(320px,.85fr) minmax(320px,1fr);
+}
+.landingStorySection:nth-child(even) .landingStickyVisual{
+  order:2;
+}
+.landingStickyVisual{
+  position:sticky;
+  top:132px;
+  min-height:430px;
+  border:1px solid color-mix(in srgb,var(--section-accent) 35%,transparent);
+  border-radius:26px;
+  background:
+    radial-gradient(circle at 50% 34%,color-mix(in srgb,var(--section-accent) 16%,transparent),transparent 38%),
+    linear-gradient(180deg,rgba(6,20,34,.72),rgba(2,8,16,.88));
+  box-shadow:0 34px 100px rgba(0,0,0,.42),0 0 70px color-mix(in srgb,var(--section-accent) 12%,transparent),inset 0 1px 0 rgba(255,255,255,.05);
+  overflow:hidden;
+}
+.landingStickyVisual:before{
+  content:'';
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  background-image:radial-gradient(rgba(234,252,255,.36) 1px,transparent 1px);
+  background-size:34px 34px;
+  opacity:.12;
+}
+.landingStoryCopy{
+  display:grid;
+  gap:14px;
+}
+.landingStoryCopy h2{
+  margin:0;
+  color:#f2fdff;
+  font-size:clamp(34px,4.7vw,62px);
+  line-height:1;
+  text-transform:none;
+  letter-spacing:0;
+}
+.landingStoryCopy p{
+  margin:0;
+  max-width:540px;
+  color:#c3e0e8;
+  font-size:16px;
+  line-height:1.5;
+}
+.landingFactionVisual{
+  position:absolute;
+  inset:20px;
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:12px;
+  align-items:stretch;
+}
+.landingFactionVisual article{
+  position:relative;
+  display:grid;
+  grid-template-rows:auto 1fr auto auto auto;
+  gap:8px;
+  min-width:0;
+  padding:14px;
+  border:1px solid color-mix(in srgb,var(--faction-accent) 44%,transparent);
+  border-radius:18px;
+  background:radial-gradient(circle at 50% 18%,color-mix(in srgb,var(--faction-accent) 18%,transparent),rgba(2,8,16,.62) 58%);
+}
+.landingFactionEmblem{
+  width:42px;
+  height:42px;
+  object-fit:contain;
+  justify-self:center;
+  filter:drop-shadow(0 0 14px color-mix(in srgb,var(--faction-accent) 54%,transparent));
+}
+.landingFactionShip{
+  width:100%;
+  height:126px;
+  object-fit:contain;
+  padding:8px;
+  filter:drop-shadow(0 0 18px color-mix(in srgb,var(--faction-accent) 32%,transparent));
+}
+.landingFactionVisual b{color:#f5fdff;text-align:center}
+.landingFactionVisual small{color:color-mix(in srgb,var(--faction-accent) 64%,#dffcff);text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+.landingFactionVisual p{margin:0;color:#aac7d0;font-size:12px;line-height:1.35;text-align:center}
+.landingGalaxyVisual,
+.landingTradeVisual,
+.landingWarVisual,
+.landingEventVisual,
+.landingHistoryVisual{
+  position:absolute;
+  inset:0;
+}
+.landingGalaxyVisual .route{
+  position:absolute;
+  height:2px;
+  background:linear-gradient(90deg,transparent,var(--section-accent),rgba(255,194,71,.72),transparent);
+  filter:drop-shadow(0 0 8px var(--section-accent));
+}
+.landingGalaxyVisual .r1{left:14%;right:16%;top:44%;transform:rotate(8deg)}
+.landingGalaxyVisual .r2{left:20%;right:24%;top:62%;transform:rotate(-19deg)}
+.landingGalaxyVisual .r3{left:24%;right:14%;top:30%;transform:rotate(28deg);opacity:.58}
+.landingGalaxyVisual .planet,
+.landingGalaxyVisual .movingShip,
+.landingTradeVisual .tradeNode{
+  position:absolute;
   display:grid;
   place-items:center;
-  overflow:hidden;
-  background:
-    radial-gradient(circle at 50% 42%,rgba(108,246,255,.16),rgba(2,8,16,.92) 70%);
-  box-shadow:inset 0 0 32px rgba(108,246,255,.08);
+  border-radius:50%;
+  background:rgba(1,7,14,.64);
+  border:1px solid rgba(124,238,255,.18);
+  box-shadow:0 0 26px rgba(124,238,255,.13);
 }
-.gameplayLoopImage img{
+.landingGalaxyVisual .planet img,
+.landingTradeVisual .tradeNode img{
   width:100%;
   height:100%;
   object-fit:contain;
-  padding:8px;
-  display:block;
-  filter:drop-shadow(0 0 14px rgba(108,246,255,.28));
+  padding:6px;
 }
-.gameplayLoopCopy{
-  color:#c9e8ef;
+.landingGalaxyVisual .p1{width:100px;height:100px;left:12%;top:44%}
+.landingGalaxyVisual .p2{width:76px;height:76px;right:15%;top:24%}
+.landingGalaxyVisual .p3{width:86px;height:86px;right:26%;bottom:17%}
+.landingGalaxyVisual .movingShip{
+  width:70px;
+  height:48px;
+  border-radius:16px;
+  animation:landingShipDrift 6s ease-in-out infinite;
+}
+.landingGalaxyVisual .movingShip img{width:100%;height:100%;object-fit:contain;padding:5px}
+.landingGalaxyVisual .s1{left:42%;top:40%}
+.landingGalaxyVisual .s2{right:18%;bottom:35%;animation-delay:1.4s}
+.landingGalaxyVisual .hostile{border-color:rgba(255,92,92,.38);box-shadow:0 0 22px rgba(255,92,92,.18)}
+.landingGalaxyVisual em{
+  position:absolute;
+  left:32%;
+  top:22%;
+  width:112px;
+  height:112px;
+  display:grid;
+  place-items:center;
+  border:1px solid rgba(87,255,163,.46);
+  border-radius:50%;
+  color:#caffdf;
+  font-size:10px;
+  font-style:normal;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  animation:landingPing 2.2s ease-in-out infinite;
+}
+@keyframes landingShipDrift{50%{transform:translate3d(18px,-10px,0)}}
+@keyframes landingPing{50%{transform:scale(1.12);opacity:.42}}
+.landingTradeVisual .tradeNode{width:86px;height:86px}
+.landingTradeVisual .n1{left:16%;top:22%}
+.landingTradeVisual .n2{left:24%;bottom:20%}
+.landingTradeVisual .n3{right:22%;top:20%}
+.landingTradeVisual .n4{right:15%;bottom:24%}
+.recipeLine{
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%);
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:10px 14px;
+  border:1px solid rgba(87,255,163,.26);
+  border-radius:999px;
+  background:rgba(2,8,16,.76);
+}
+.recipeLine b{color:#eaffff;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+.recipeLine i{width:38px;height:2px;background:linear-gradient(90deg,#57ffa3,#8cfaff)}
+.tradeShip{
+  position:absolute;
+  left:50%;
+  bottom:13%;
+  width:210px;
+  height:118px;
+  object-fit:contain;
+  transform:translateX(-50%);
+  filter:drop-shadow(0 0 18px rgba(87,255,163,.28));
+}
+.landingWarVisual .border{
+  position:absolute;
+  border:2px solid color-mix(in srgb,var(--section-accent) 68%,transparent);
+  border-radius:42% 58% 48% 52%;
+  filter:drop-shadow(0 0 16px color-mix(in srgb,var(--section-accent) 25%,transparent));
+}
+.landingWarVisual .b1{left:10%;top:18%;width:42%;height:52%;transform:rotate(-18deg)}
+.landingWarVisual .b2{right:10%;top:22%;width:45%;height:50%;transform:rotate(15deg);border-color:rgba(177,116,255,.48)}
+.landingWarVisual .b3{left:24%;bottom:10%;width:52%;height:38%;border-color:rgba(255,194,71,.42)}
+.warShip{
+  position:absolute;
+  width:142px;
+  height:82px;
+  object-fit:contain;
+  filter:drop-shadow(0 0 18px rgba(255,116,77,.26));
+}
+.warShip.a{left:18%;top:30%}
+.warShip.b{right:16%;top:36%}
+.warShip.c{left:42%;bottom:20%}
+.landingWarVisual strong{
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%);
+  padding:8px 12px;
+  border:1px solid rgba(255,116,77,.38);
+  border-radius:999px;
+  background:rgba(2,8,16,.76);
+  color:#ffe1d7;
+  text-transform:uppercase;
+  letter-spacing:.1em;
+  font-size:12px;
+}
+.landingEventVisual .wormhole{
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:270px;
+  height:270px;
+  border-radius:50%;
+  transform:translate(-50%,-50%);
+  background:
+    radial-gradient(circle,#effcff 0 4%,#8cfaff 5% 9%,rgba(177,116,255,.62) 10% 22%,rgba(38,13,74,.4) 23% 45%,transparent 46%),
+    conic-gradient(from 30deg,rgba(140,250,255,.8),rgba(177,116,255,.78),rgba(255,194,71,.35),rgba(140,250,255,.8));
+  filter:blur(.1px) drop-shadow(0 0 32px rgba(177,116,255,.45));
+  animation:landingSpin 18s linear infinite;
+}
+@keyframes landingSpin{to{transform:translate(-50%,-50%) rotate(360deg)}}
+.alienShip{
+  position:absolute;
+  left:17%;
+  top:30%;
+  width:150px;
+  height:96px;
+  object-fit:contain;
+  filter:drop-shadow(0 0 20px rgba(177,116,255,.38));
+}
+.eventPlanet{
+  position:absolute;
+  right:14%;
+  bottom:16%;
+  width:126px;
+  height:126px;
+  object-fit:contain;
+}
+.landingEventVisual b{
+  position:absolute;
+  right:16%;
+  top:20%;
+  color:#f2fdff;
   font-size:13px;
-  line-height:1.45;
+  text-transform:uppercase;
+  letter-spacing:.11em;
+}
+.historyArc{
+  position:absolute;
+  left:50%;
+  top:18%;
+  width:270px;
+  height:270px;
+  transform:translateX(-50%);
+  border:1px solid rgba(140,250,255,.22);
+  border-radius:50%;
+}
+.historyArc span{
+  position:absolute;
+  width:14px;
+  height:14px;
+  border-radius:50%;
+  background:#8cfaff;
+  box-shadow:0 0 18px rgba(140,250,255,.68);
+}
+.historyArc span:nth-child(1){left:50%;top:-7px}
+.historyArc span:nth-child(2){right:10%;top:30%}
+.historyArc span:nth-child(3){left:18%;bottom:8%}
+.historyArc span:nth-child(4){right:22%;bottom:5%;background:#ffbf5a;box-shadow:0 0 18px rgba(255,191,90,.68)}
+.leaderboardCard{
+  position:absolute;
+  left:50%;
+  top:42%;
+  transform:translate(-50%,-50%);
+  display:grid;
+  gap:6px;
+  min-width:230px;
+  padding:16px;
+  border:1px solid rgba(140,250,255,.25);
+  border-radius:18px;
+  background:rgba(2,8,16,.76);
+  text-align:center;
+}
+.leaderboardCard b{color:#8cfaff;font-size:34px}
+.leaderboardCard span{color:#f2fdff;font-weight:900}
+.leaderboardCard i{color:#9fb8c7;font-style:normal}
+.historyLog{
+  position:absolute;
+  left:50%;
+  bottom:18%;
+  width:min(330px,78%);
+  transform:translateX(-50%);
+  display:grid;
+  gap:8px;
+}
+.historyLog span{
+  padding:8px 10px;
+  border:1px solid rgba(140,250,255,.16);
+  border-radius:12px;
+  background:rgba(3,14,24,.68);
+  color:#dffcff;
 }
 @media(max-width:1180px){
-  .loginLandingWrap{grid-template-columns:1fr;max-width:820px}
-  .gameplayLoopDeck{order:-1}
+  .landingTopbar{
+    align-items:stretch;
+  }
+  .landingAuthPanel,
+  .registerMode .landingAuthPanel{
+    width:min(760px,calc(100vw - 250px));
+    grid-template-columns:1fr;
+  }
+  .landingAuthTabs,
+  .landingAuthForm{
+    grid-row:auto;
+  }
+}
+@media(max-width:900px){
+  .novaLandingScreen{
+    display:grid!important;
+    place-items:start center;
+  }
+  .landingTopbar{
+    position:relative;
+    flex-direction:column;
+    align-items:center;
+    padding:12px;
+  }
+  .brandNova-landing{
+    justify-items:center;
+  }
+  .landingAuthPanel,
+  .registerMode .landingAuthPanel{
+    width:min(100%,720px);
+  }
+  .landingHero{
+    grid-template-columns:1fr;
+    min-height:calc(100svh - 24px);
+    padding:42px 14px 42px;
+    align-items:end;
+  }
+  .landingHeroBackdrop{
+    inset:0;
+  }
+  .landingHeroBackdrop:before{
+    background:
+      radial-gradient(circle at 58% 34%,transparent 0 20%,rgba(1,5,11,.30) 44%,rgba(1,5,11,.84) 100%),
+      linear-gradient(180deg,rgba(1,5,11,.30),rgba(1,5,11,.88) 74%,rgba(1,5,11,.96));
+  }
+  .landingHeroCopy{
+    padding-bottom:0;
+  }
+  .landingCommandBrief{
+    justify-self:start;
+    align-self:start;
+  }
+  .landingStorySection,
+  .landingStorySection:nth-child(even){
+    grid-template-columns:1fr;
+    min-height:auto;
+    padding:54px 0;
+  }
+  .landingStorySection:nth-child(even) .landingStickyVisual{
+    order:0;
+  }
+  .landingStickyVisual{
+    position:relative;
+    top:auto;
+    min-height:360px;
+  }
 }
 @media(max-width:640px){
-  .loginScreen{place-items:start center}
-  .loginLandingWrap{width:calc(100vw - 20px);padding:10px 0;gap:10px}
-  .gameplayLoopDeck{padding:16px;border-radius:22px!important}
-  .gameplayLoopIntro h2{font-size:24px}
-  .gameplayLoopExpanded{grid-template-columns:1fr}
-  .gameplayLoopImage{width:100%;aspect-ratio:16/8}
-  .gameplayLoopPanelHead{align-items:flex-start}
+  .landingAuthForm,
+  .registerMode .landingAuthForm{
+    grid-template-columns:1fr;
+  }
+  .landingAuthSubmit,
+  .landingRegisterDetails{
+    grid-column:auto;
+  }
+  .landingGoogleBlock{
+    grid-template-columns:1fr;
+    justify-items:stretch;
+  }
+  .landingGoogleBlock span{
+    max-width:none;
+    text-align:center;
+  }
+  .landingCoreArt{
+    width:100%;
+    border-radius:18px;
+    aspect-ratio:4/3;
+  }
+  .landingHeroMeta span{
+    width:100%;
+    justify-content:center;
+  }
+  .landingRoleCards{
+    grid-template-columns:1fr;
+  }
+  .landingRoleCards span{
+    min-height:0;
+  }
+  .landingCommandBrief{
+    padding:12px;
+  }
+  .landingFactionVisual{
+    position:relative;
+    inset:auto;
+    grid-template-columns:1fr;
+    padding:14px;
+  }
+  .landingFactionVisual article{
+    grid-template-columns:48px 1fr;
+    grid-template-rows:auto auto auto;
+    text-align:left;
+  }
+  .landingFactionEmblem{grid-row:1/4}
+  .landingFactionShip{display:none}
+  .landingFactionVisual b,
+  .landingFactionVisual small,
+  .landingFactionVisual p{text-align:left}
+  .landingStoryCopy p{
+    font-size:14px;
+  }
+}
+@media(prefers-reduced-motion:reduce){
+  .landingStars,
+  .landingStars i,
+  .landingCoreArt>img,
+  .heroParticle,
+  .landingScrollCue span,
+  .landingGalaxyVisual em,
+  .landingGalaxyVisual .movingShip,
+  .landingEventVisual .wormhole{
+    animation:none!important;
+  }
+  .landingStorySection{
+    transition:none;
+  }
 }
 
 /* Map interaction fix: panning owns movement, so browser scroll offsets must not distort click coordinates. */
 .mapShell.phase23bMapShell{position:relative}
 .mapShell.phase23bMapShell .mapViewport{overflow:hidden!important}
 .mapShell.phase23bMapShell .infoMap.openWorldMap.mapWorld,
-.mapShell.phase23bMapShell .infoMap.galaxyMap.openWorldMap.mapWorld{width:12000px!important;height:7800px!important;min-width:12000px!important;min-height:7800px!important}
+.mapShell.phase23bMapShell .infoMap.galaxyMap.openWorldMap.mapWorld{width:24000px!important;height:15600px!important;min-width:24000px!important;min-height:15600px!important}
 .mapShell.phase23bMapShell .mapContextPopup{position:absolute!important}
 .mapShell.phase23bMapShell .mapInspectOverlay{position:absolute!important;inset:0!important}
 .mapShell.phase23bMapShell .mapInspectModal{position:absolute!important}
@@ -4632,6 +5449,345 @@ input,select,textarea{border-radius:12px!important;background:rgba(2,8,16,.72)!i
   .factionBalanceNotes{grid-template-columns:1fr}
 }
 
+/* Research-informed login and registration entry screen */
+.authLoginMode,
+.authRegisterMode{
+  place-items:stretch!important;
+}
+.registrationHero{
+  position:relative;
+  min-height:100vh;
+  min-height:100svh;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(360px,470px);
+  gap:clamp(18px,3.2vw,52px);
+  align-items:stretch;
+  width:100%;
+  padding:clamp(18px,2.3vw,34px);
+  overflow:hidden;
+}
+.registrationHero:before{
+  content:'';
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  background:
+    linear-gradient(90deg,rgba(1,5,11,.92) 0%,rgba(1,5,11,.52) 42%,rgba(1,5,11,.86) 100%),
+    radial-gradient(circle at 22% 80%,rgba(255,194,71,.12),transparent 30%),
+    radial-gradient(circle at 80% 26%,rgba(177,116,255,.16),transparent 34%);
+  z-index:-3;
+}
+.registrationWorldPanel{
+  position:relative;
+  min-width:0;
+  display:grid;
+  grid-template-rows:auto minmax(0,1fr) auto;
+  align-items:end;
+  gap:18px;
+  padding:clamp(18px,3vw,42px);
+  overflow:hidden;
+  isolation:isolate;
+}
+.registrationWorldPanel:after{
+  content:'';
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  z-index:-1;
+  background:
+    linear-gradient(rgba(255,255,255,.035) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(124,238,255,.055) 1px,transparent 1px);
+  background-size:100% 40px,116px 100%;
+  opacity:.34;
+  mask-image:linear-gradient(180deg,rgba(0,0,0,.16),rgba(0,0,0,.96));
+}
+.registrationWorldPanel .brandNova-landing{
+  align-self:start;
+  justify-self:start;
+  min-width:0;
+  padding:10px 12px;
+  border:1px solid rgba(124,238,255,.16);
+  border-radius:8px;
+  background:rgba(2,8,16,.42);
+  backdrop-filter:blur(12px);
+}
+.registrationCoreArt{
+  position:absolute;
+  inset:-4%;
+  z-index:-2;
+  overflow:hidden;
+}
+.registrationCoreArt:before,
+.registrationCoreArt:after{
+  content:'';
+  position:absolute;
+  inset:0;
+  z-index:2;
+  pointer-events:none;
+}
+.registrationCoreArt:before{
+  background:
+    radial-gradient(circle at 64% 44%,transparent 0 28%,rgba(1,5,11,.18) 45%,rgba(1,5,11,.80) 100%),
+    linear-gradient(90deg,rgba(1,5,11,.88),rgba(1,5,11,.30) 54%,rgba(1,5,11,.72));
+}
+.registrationCoreArt:after{
+  box-shadow:inset 0 -190px 180px rgba(1,5,11,.88),inset 0 0 0 1px rgba(255,255,255,.04);
+}
+.registrationCoreArt>img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  object-position:62% 44%;
+  display:block;
+  filter:saturate(1.12) contrast(1.06) brightness(.82);
+  transform:scale(1.04);
+  animation:landingCoreFloat 16s ease-in-out infinite;
+}
+.registrationHeroCopy{
+  display:grid;
+  gap:14px;
+  align-self:center;
+  max-width:680px;
+  padding-bottom:clamp(16px,6vh,74px);
+}
+.registrationHeroCopy>span{
+  width:max-content;
+  max-width:100%;
+  padding:5px 10px;
+  border:1px solid rgba(124,238,255,.28);
+  border-radius:999px;
+  color:#bdf8ff;
+  background:rgba(35,203,235,.07);
+  font-size:11px;
+  font-weight:1000;
+  text-transform:uppercase;
+  letter-spacing:.13em;
+}
+.registrationHeroCopy h1{
+  margin:0;
+  max-width:720px;
+  color:#f2fdff;
+  font-size:clamp(58px,8.6vw,128px);
+  line-height:.86;
+  text-transform:none;
+  letter-spacing:0;
+  text-shadow:0 0 34px rgba(108,246,255,.20),0 22px 90px rgba(0,0,0,.62);
+}
+.registrationHeroCopy p{
+  margin:0;
+  max-width:600px;
+  color:#c5e4ec;
+  font-size:clamp(15px,1.55vw,19px);
+  line-height:1.48;
+}
+.registrationRoleCards{
+  width:min(100%,640px);
+}
+.registrationSignalDeck{
+  align-self:end;
+  justify-self:start;
+  width:min(100%,720px);
+  display:grid;
+  grid-template-columns:minmax(190px,.75fr) minmax(220px,1fr);
+  gap:14px;
+  padding:15px;
+  border:1px solid color-mix(in srgb,var(--faction-accent,#35f2ff) 34%,transparent);
+  border-radius:10px;
+  background:linear-gradient(180deg,rgba(4,14,25,.66),rgba(2,8,16,.52));
+  box-shadow:0 24px 80px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.05);
+  backdrop-filter:blur(14px);
+}
+.registrationSignalDeck>div:first-child{
+  display:grid;
+  gap:5px;
+  align-content:start;
+}
+.registrationSignalDeck span,
+.registrationSignalDeck strong{
+  color:#8cfaff;
+  font-size:10px;
+  font-weight:1000;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+.registrationSignalDeck b{
+  color:#f2fdff;
+  font-size:18px;
+}
+.registrationSignalDeck small{
+  color:#a8c4ce;
+  line-height:1.38;
+}
+.registrationBriefList{
+  list-style:none;
+  display:grid;
+  gap:8px;
+  margin:0;
+  padding:0;
+}
+.registrationBriefList li{
+  display:grid;
+  gap:3px;
+  padding-left:12px;
+  border-left:2px solid rgba(255,194,71,.58);
+}
+.registrationBriefList li:nth-child(2){border-left-color:rgba(87,255,163,.55)}
+.registrationBriefList li:nth-child(3){border-left-color:rgba(177,116,255,.62)}
+.registrationBriefList strong{
+  color:#f4fdff;
+  font-size:12px;
+}
+.registrationMetricRow{
+  grid-column:1/-1;
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:8px;
+}
+.registrationMetricRow span{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  min-height:38px;
+  padding:8px 10px;
+  border:1px solid rgba(124,238,255,.15);
+  border-radius:999px;
+  background:rgba(4,16,28,.48);
+  color:#b9d7df;
+}
+.registrationMetricRow b{
+  color:#f2fdff;
+}
+.registrationConsole{
+  align-self:start;
+  max-height:calc(100svh - clamp(36px,4.6vw,68px));
+  overflow:auto;
+  display:grid;
+  gap:12px;
+  padding:16px;
+  border:1px solid rgba(124,238,255,.22);
+  border-radius:10px;
+  background:linear-gradient(180deg,rgba(4,14,25,.84),rgba(2,8,16,.72));
+  box-shadow:0 28px 90px rgba(0,0,0,.48),inset 0 1px 0 rgba(255,255,255,.05);
+  backdrop-filter:blur(16px);
+}
+.registrationConsoleHeader{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding-bottom:10px;
+  border-bottom:1px solid rgba(124,238,255,.13);
+}
+.registrationConsoleHeader span{
+  color:#8cfaff;
+  font-size:10px;
+  font-weight:1000;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+}
+.registrationConsoleHeader b{
+  color:#f2fdff;
+  font-size:18px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.registrationModeTabs{
+  margin:0;
+}
+.registrationFieldGrid{
+  display:grid;
+  gap:9px;
+}
+.registrationFieldGrid label{
+  display:grid;
+  gap:5px;
+  min-width:0;
+}
+.registrationFieldGrid label span{
+  color:#9dfcff;
+  font-size:10px;
+  font-weight:1000;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+}
+.registrationFieldGrid input{
+  min-width:0;
+  width:100%;
+  height:42px;
+  border-radius:8px;
+  background:rgba(1,7,14,.72);
+}
+.registrationSubmit{
+  width:100%;
+  min-height:44px;
+  border-radius:8px!important;
+}
+.registrationGoogleBlock{
+  margin:0;
+  gap:8px;
+}
+.registrationGoogleBlock span{
+  max-width:100%;
+}
+.registrationOnboarding{
+  display:grid;
+  gap:12px;
+}
+.registrationFactionGrid{
+  grid-template-columns:1fr;
+}
+.registrationFactionGrid .factionChoice{
+  min-height:0;
+  grid-template-columns:58px 1fr;
+  grid-template-rows:auto auto auto auto;
+}
+.registrationFactionGrid .factionChoiceEmblem{
+  grid-row:1/5;
+}
+.registrationFactionGrid .factionChoice span:not(.factionChoiceTop){
+  text-align:left;
+}
+.registrationDecisionPanel,
+.registrationAvatarPicker{
+  border-radius:8px;
+}
+@media(max-width:1180px){
+  .registrationHero{
+    grid-template-columns:1fr;
+    overflow:visible;
+  }
+  .registrationConsole{
+    max-height:none;
+  }
+}
+@media(max-width:720px){
+  .registrationHero{
+    padding:10px;
+  }
+  .registrationWorldPanel{
+    min-height:calc(100svh - 20px);
+    padding:14px;
+  }
+  .registrationHeroCopy{
+    padding-bottom:0;
+  }
+  .registrationHeroCopy h1{
+    font-size:clamp(48px,17vw,76px);
+  }
+  .registrationRoleCards,
+  .registrationMetricRow,
+  .registrationSignalDeck{
+    grid-template-columns:1fr;
+  }
+  .registrationMetricRow{
+    grid-column:auto;
+  }
+  .registrationMetricRow span{
+    justify-content:flex-start;
+  }
+}
+
 /* Security defense grid */
 .trafficShip.securityDefense{
   border-color:#ffc247!important;
@@ -4733,6 +5889,17 @@ input,select,textarea{border-radius:12px!important;background:rgba(2,8,16,.72)!i
   box-shadow:0 0 10px rgba(255,255,255,.85),0 0 26px rgba(255,255,255,.46)!important;
   opacity:1!important;
   pointer-events:none!important;
+}
+.mapShell.phase23bMapShell .shipMarker.selfShip .shipAttachedRadarRing{
+  left:50%!important;
+  top:50%!important;
+  z-index:0!important;
+}
+.mapShell.phase23bMapShell .shipMarker.selfShip .selfShipImg,
+.mapShell.phase23bMapShell .shipMarker.selfShip span,
+.mapShell.phase23bMapShell .shipMarker.selfShip .mapShipLevel{
+  position:relative;
+  z-index:2;
 }
 .mapShell.phase23bMapShell .playerRadarRing:before{
   content:none!important;
@@ -4999,6 +6166,70 @@ body,
   border-color:rgba(77,255,145,.38)!important;
   color:#c7ffdf!important;
 }
+.mapAutoExploreCluster{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  flex:0 0 auto;
+  min-width:0;
+}
+.mapAutoExploreButton{
+  display:inline-flex!important;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  min-height:42px;
+  flex:0 0 auto;
+  border-radius:14px!important;
+  border:1px solid rgba(255,194,71,.34)!important;
+  background:rgba(49,35,7,.62)!important;
+  color:#ffe3a3!important;
+  padding:8px 12px!important;
+  white-space:nowrap;
+}
+.mapAutoExploreButton.active{
+  border-color:rgba(77,255,145,.46)!important;
+  background:linear-gradient(180deg,rgba(24,95,58,.76),rgba(6,35,25,.78))!important;
+  color:#d8ffe5!important;
+  box-shadow:0 0 20px rgba(77,255,145,.18)!important;
+}
+.mapAutoExploreButton span{
+  border:0!important;
+  background:transparent!important;
+  padding:0!important;
+  color:inherit!important;
+  font-size:12px!important;
+  white-space:nowrap;
+}
+.autoExploreStrip{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  gap:8px 12px;
+  align-items:center;
+  padding:9px 16px;
+  border-bottom:1px solid rgba(255,194,71,.22);
+  background:rgba(49,35,7,.32);
+  color:#dffbff;
+}
+.autoExploreStrip b{
+  color:var(--gold);
+  text-transform:uppercase;
+  font-size:11px;
+  letter-spacing:.08em;
+}
+.autoExploreStrip span{
+  min-width:0;
+  overflow-wrap:anywhere;
+  color:#dffbff;
+}
+.autoExploreStrip small{
+  color:var(--muted);
+  text-align:right;
+}
+.autoExploreStrip.active{
+  border-bottom-color:rgba(77,255,145,.24);
+  background:rgba(8,45,31,.34);
+}
 .mapLayerPanel{
   display:flex;
   align-items:center;
@@ -5107,9 +6338,15 @@ body,
   .mapModeSwitch,
   .mapZoomCluster,
   .mapLayerPanel,
+  .mapAutoExploreCluster,
+  .mapAutoExploreButton,
   .mapRadarSummary,
   .mapCommandBar .mapToolbarMissionCooldown{
     width:100%;
+  }
+  .mapAutoExploreCluster{
+    display:grid;
+    grid-template-columns:1fr 1fr;
   }
   .mapModeSwitch button{
     flex:1;
@@ -5127,4 +6364,2306 @@ body,
   .inlineMapLayerToggles{
     width:100%;
   }
+  .autoExploreStrip{
+    grid-template-columns:1fr;
+    padding:9px 10px;
+  }
+  .autoExploreStrip small{
+    text-align:left;
+  }
 }
+
+/* Player map marker: larger self icon with a centered white outer ring. */
+.mapShell.phase23bMapShell .shipMarker.selfShip{
+  width:78px!important;
+  height:78px!important;
+  min-width:78px!important;
+  min-height:78px!important;
+  display:grid!important;
+  place-items:center!important;
+  padding:0!important;
+  border:3px solid rgba(255,255,255,.96)!important;
+  border-radius:999px!important;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(166,92,255,.88) 0 39%, rgba(130,70,255,.42) 44%, rgba(3,10,18,.94) 72%)!important;
+  box-shadow:
+    0 0 0 3px rgba(255,255,255,.16),
+    0 0 26px rgba(255,255,255,.58),
+    0 0 44px rgba(166,92,255,.46)!important;
+}
+
+.mapShell.phase23bMapShell .shipMarker.selfShip .selfShipImg{
+  width:62px!important;
+  height:62px!important;
+  min-width:62px!important;
+  min-height:62px!important;
+  padding:7px!important;
+  border:2px solid rgba(166,92,255,.92)!important;
+  border-radius:999px!important;
+  background:radial-gradient(circle at 50% 50%, rgba(166,92,255,.50), rgba(6,12,25,.22) 70%)!important;
+  box-shadow:inset 0 0 18px rgba(166,92,255,.28),0 0 18px rgba(166,92,255,.45)!important;
+  transform:none!important;
+}
+
+@media(max-width:760px){
+  .mapShell.phase23bMapShell .shipMarker.selfShip{
+    width:66px!important;
+    height:66px!important;
+    min-width:66px!important;
+    min-height:66px!important;
+  }
+  .mapShell.phase23bMapShell .shipMarker.selfShip .selfShipImg{
+    width:52px!important;
+    height:52px!important;
+    min-width:52px!important;
+    min-height:52px!important;
+  }
+}
+
+/* Map marker scale pass: non-player markers +50%, player marker +100%. */
+.mapShell.phase23bMapShell .trafficShip,
+.mapShell.phase23bMapShell .resourceNode{
+  width:78px!important;
+  height:78px!important;
+  min-width:78px!important;
+  min-height:78px!important;
+}
+
+.mapShell.phase23bMapShell .mapViewport.zoomFar .trafficShip,
+.mapShell.phase23bMapShell .mapViewport.zoomFar .resourceNode{
+  width:123px!important;
+  height:123px!important;
+  min-width:123px!important;
+  min-height:123px!important;
+}
+
+.mapShell.phase23bMapShell .mapViewport.zoomNear .trafficShip,
+.mapShell.phase23bMapShell .mapViewport.zoomNear .resourceNode{
+  width:147px!important;
+  height:147px!important;
+  min-width:147px!important;
+  min-height:147px!important;
+}
+
+.mapShell.phase23bMapShell .shipMarker.selfShip{
+  width:156px!important;
+  height:156px!important;
+  min-width:156px!important;
+  min-height:156px!important;
+}
+
+.mapShell.phase23bMapShell .shipMarker.selfShip .selfShipImg{
+  width:124px!important;
+  height:124px!important;
+  min-width:124px!important;
+  min-height:124px!important;
+}
+
+@media(max-width:760px){
+  .mapShell.phase23bMapShell .trafficShip,
+  .mapShell.phase23bMapShell .resourceNode,
+  .mapShell.phase23bMapShell .mapViewport.zoomFar .trafficShip,
+  .mapShell.phase23bMapShell .mapViewport.zoomFar .resourceNode,
+  .mapShell.phase23bMapShell .mapViewport.zoomNear .trafficShip,
+  .mapShell.phase23bMapShell .mapViewport.zoomNear .resourceNode{
+    width:66px!important;
+    height:66px!important;
+    min-width:66px!important;
+    min-height:66px!important;
+  }
+
+  .mapShell.phase23bMapShell .shipMarker.selfShip{
+    width:132px!important;
+    height:132px!important;
+    min-width:132px!important;
+    min-height:132px!important;
+  }
+
+  .mapShell.phase23bMapShell .shipMarker.selfShip .selfShipImg{
+    width:104px!important;
+    height:104px!important;
+    min-width:104px!important;
+    min-height:104px!important;
+  }
+}
+
+/* Lead UI redesign: authenticated command deck */
+.appShell{
+  position:relative;
+  overflow:clip;
+  isolation:isolate;
+  --deck-bg:#02050b;
+  --deck-panel:rgba(7,18,29,.78);
+  --deck-panel-strong:rgba(10,27,42,.92);
+  --deck-line:rgba(125,238,255,.18);
+  --deck-line-hot:color-mix(in srgb,var(--page-accent,#6cf6ff) 48%,rgba(255,255,255,.18));
+  --deck-muted:#8aaabe;
+  --deck-text:#e8fbff;
+  background:
+    radial-gradient(circle at 72% 9%,color-mix(in srgb,var(--page-accent,#6cf6ff) 18%,transparent),transparent 29%),
+    radial-gradient(circle at 4% 86%,rgba(255,191,90,.08),transparent 28%),
+    linear-gradient(115deg,rgba(2,5,11,.98),rgba(3,11,21,.96) 46%,rgba(2,5,11,.98));
+}
+.authBackdrop{
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  z-index:0;
+  overflow:hidden;
+}
+.authBackdrop:before{
+  content:'';
+  position:absolute;
+  inset:-20%;
+  background:
+    linear-gradient(115deg,transparent 0 46%,rgba(108,246,255,.055) 47%,transparent 48% 100%),
+    repeating-linear-gradient(90deg,rgba(255,255,255,.035) 0 1px,transparent 1px 82px),
+    repeating-linear-gradient(0deg,rgba(255,255,255,.024) 0 1px,transparent 1px 82px);
+  opacity:.44;
+  transform:rotate(-4deg);
+}
+.authOrbit{
+  position:absolute;
+  width:46vw;
+  aspect-ratio:1;
+  border:1px solid color-mix(in srgb,var(--page-accent,#6cf6ff) 18%,transparent);
+  border-radius:999px;
+  filter:blur(.2px);
+  opacity:.48;
+}
+.authOrbitOne{right:-12vw;top:8vh;}
+.authOrbitTwo{left:18vw;bottom:-30vw;width:58vw;border-color:rgba(255,191,90,.10);}
+.authScanline{
+  position:absolute;
+  inset:0;
+  background:linear-gradient(180deg,transparent,rgba(255,255,255,.035),transparent);
+  height:38vh;
+  transform:translateY(-100%);
+  animation:authScan 14s linear infinite;
+  opacity:.34;
+}
+@keyframes authScan{to{transform:translateY(330%)}}
+.appShell .sidebar,
+.appShell .main{
+  position:relative;
+  z-index:1;
+}
+.appShell .sidebar{
+  width:292px;
+  padding:18px 14px 22px;
+  background:
+    linear-gradient(180deg,rgba(4,13,23,.96),rgba(4,8,15,.92))!important;
+  border-right:1px solid rgba(125,238,255,.18)!important;
+  box-shadow:26px 0 80px rgba(0,0,0,.44),inset -1px 0 0 rgba(255,255,255,.035);
+}
+.appShell .brandNova-sidebar{
+  position:sticky;
+  top:0;
+  z-index:3;
+  padding:2px 2px 12px;
+  margin-bottom:10px;
+  background:linear-gradient(180deg,rgba(4,13,23,.98),rgba(4,13,23,.82) 72%,transparent);
+}
+.appShell .brandNova-sidebar img{
+  width:214px;
+}
+.appShell .pilotCard{
+  position:relative;
+  overflow:hidden;
+  margin:12px 0 14px;
+  padding:13px;
+  border-radius:18px!important;
+  background:
+    radial-gradient(circle at 92% 0,color-mix(in srgb,var(--page-accent,#6cf6ff) 18%,transparent),transparent 34%),
+    rgba(9,25,39,.72)!important;
+}
+.appShell .pilotCard:after{
+  content:'';
+  position:absolute;
+  right:10px;
+  top:10px;
+  width:8px;
+  height:8px;
+  border-radius:999px;
+  background:#4dff91;
+  box-shadow:0 0 16px rgba(77,255,145,.78);
+}
+.appShell .pilotCard b{
+  color:#f4fdff;
+  font-size:14px;
+}
+.appShell .bars{
+  gap:7px;
+  padding:10px;
+  border:1px solid rgba(125,238,255,.12);
+  border-radius:18px;
+  background:rgba(1,8,15,.42);
+}
+.appShell .bar{
+  grid-template-columns:52px minmax(0,1fr) 74px;
+}
+.appShell .bar span,
+.appShell .bar small{
+  font-size:11px;
+}
+.appShell .bar i{
+  height:7px;
+  border-radius:999px;
+  overflow:hidden;
+  background:rgba(255,255,255,.075);
+  border-color:rgba(125,238,255,.14);
+}
+.appShell .bar b{
+  border-radius:999px;
+  background:linear-gradient(90deg,var(--page-accent,#6cf6ff),#4dff91);
+  box-shadow:0 0 14px color-mix(in srgb,var(--page-accent,#6cf6ff) 42%,transparent);
+}
+.appShell .navRail{
+  display:grid;
+  gap:15px;
+  margin-top:16px;
+}
+.appShell .navGroup{
+  display:grid;
+  gap:4px;
+}
+.appShell .navGroup strong{
+  padding:0 10px 3px;
+  color:#6f91a3;
+  font-size:10px;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:.18em;
+}
+.appShell .navGroup button{
+  position:relative;
+  min-height:38px;
+  padding:9px 11px!important;
+  border-radius:13px!important;
+  color:#b8d6e5;
+  background:transparent!important;
+  border-color:transparent!important;
+  box-shadow:none!important;
+}
+.appShell .navGroup button svg{
+  color:color-mix(in srgb,var(--page-accent,#6cf6ff) 64%,#9eb5c5);
+}
+.appShell .navGroup button:hover{
+  background:rgba(125,238,255,.07)!important;
+}
+.appShell .navGroup button.active{
+  color:#f6fdff;
+  background:
+    linear-gradient(90deg,color-mix(in srgb,var(--page-accent,#6cf6ff) 28%,rgba(8,24,36,.82)),rgba(8,19,31,.56))!important;
+  border-color:var(--deck-line-hot)!important;
+  box-shadow:0 0 28px color-mix(in srgb,var(--page-accent,#6cf6ff) 16%,transparent),inset 0 0 18px rgba(255,255,255,.035)!important;
+}
+.appShell .navGroup button.active:before{
+  content:'';
+  position:absolute;
+  left:-14px;
+  top:8px;
+  bottom:8px;
+  width:3px;
+  border-radius:999px;
+  background:var(--page-accent,#6cf6ff);
+  box-shadow:0 0 16px var(--page-accent,#6cf6ff);
+}
+.appShell .sector{
+  margin-top:18px;
+  border-radius:16px!important;
+  color:#9bb9c9;
+  background:rgba(255,255,255,.035)!important;
+}
+.appShell .topbar{
+  height:76px;
+  padding:0 20px;
+  gap:12px;
+  background:linear-gradient(90deg,rgba(3,10,18,.94),rgba(5,17,29,.74))!important;
+  border-bottom:1px solid rgba(125,238,255,.16)!important;
+}
+.appShell .topbarBrandEmblem{
+  width:48px;
+  height:48px;
+  border-radius:16px;
+  border-color:var(--deck-line-hot);
+  box-shadow:0 0 34px color-mix(in srgb,var(--page-accent,#6cf6ff) 18%,transparent);
+}
+.appShell .identityStat,
+.appShell .stat{
+  border:1px solid rgba(125,238,255,.13);
+  border-radius:16px;
+  padding:7px 10px;
+  background:rgba(2,9,17,.46);
+}
+.appShell .stat{
+  display:grid;
+  grid-template-columns:auto auto;
+  gap:2px 7px;
+  min-width:max-content;
+  border-right:1px solid rgba(125,238,255,.13);
+}
+.appShell .stat svg{
+  grid-row:1 / 3;
+  align-self:center;
+  color:var(--page-accent,#6cf6ff);
+}
+.appShell .stat b{
+  color:#f3fdff;
+}
+.appShell .stat small{
+  grid-column:1 / -1;
+  max-width:210px;
+}
+.appShell .content{
+  width:100%;
+  max-width:1840px;
+  margin:0 auto;
+  padding:22px 22px 68px;
+}
+.appShell .content.wideMapContent{
+  max-width:none;
+}
+.commandRibbon{
+  position:relative;
+  display:grid;
+  grid-template-columns:auto minmax(280px,1fr) minmax(420px,.95fr) auto;
+  gap:18px;
+  align-items:center;
+  min-height:168px;
+  margin:0 0 18px;
+  padding:20px;
+  overflow:hidden;
+  border:1px solid var(--deck-line-hot);
+  border-radius:24px;
+  background:
+    linear-gradient(115deg,color-mix(in srgb,var(--page-accent,#6cf6ff) 15%,rgba(11,28,43,.9)),rgba(5,12,22,.88) 52%,rgba(5,9,16,.92)),
+    url('./assets/backgrounds/starfield.svg') center/cover;
+  box-shadow:0 28px 90px rgba(0,0,0,.36),inset 0 1px 0 rgba(255,255,255,.06);
+}
+.commandRibbon:before{
+  content:'';
+  position:absolute;
+  inset:0;
+  background:
+    linear-gradient(90deg,transparent 0 58%,color-mix(in srgb,var(--page-accent,#6cf6ff) 14%,transparent)),
+    repeating-linear-gradient(115deg,rgba(255,255,255,.06) 0 1px,transparent 1px 28px);
+  mask-image:linear-gradient(90deg,transparent,black 22%,black 90%,transparent);
+  opacity:.32;
+  pointer-events:none;
+}
+.commandRibbon>*{
+  position:relative;
+  z-index:1;
+}
+.commandRibbonVisual{
+  position:relative;
+  width:112px;
+  height:112px;
+  display:grid;
+  place-items:center;
+  border-radius:28px;
+  border:1px solid color-mix(in srgb,var(--page-accent,#6cf6ff) 38%,rgba(255,255,255,.14));
+  background:radial-gradient(circle,color-mix(in srgb,var(--page-accent,#6cf6ff) 22%,rgba(255,255,255,.03)),rgba(1,8,16,.72) 68%);
+  box-shadow:inset 0 0 34px rgba(255,255,255,.045),0 0 44px color-mix(in srgb,var(--page-accent,#6cf6ff) 16%,transparent);
+}
+.commandRibbonVisual img{
+  width:78px;
+  height:78px;
+  object-fit:contain;
+  filter:drop-shadow(0 0 18px color-mix(in srgb,var(--page-accent,#6cf6ff) 42%,transparent));
+}
+.commandRibbonVisual i{
+  position:absolute;
+  inset:-12px;
+  border-radius:32px;
+  border:1px dashed color-mix(in srgb,var(--page-accent,#6cf6ff) 26%,transparent);
+  animation:deckOrbit 16s linear infinite;
+}
+@keyframes deckOrbit{to{transform:rotate(360deg)}}
+.commandRibbonCopy span,
+.pageHead .pageTitleRow:before{
+  color:var(--page-accent,#6cf6ff);
+  text-transform:uppercase;
+  letter-spacing:.16em;
+  font-size:11px;
+  font-weight:1000;
+}
+.commandRibbonCopy h1{
+  margin:4px 0 7px;
+  color:#f4fdff;
+  font-size:clamp(30px,4vw,56px);
+  line-height:.92;
+  text-transform:uppercase;
+  letter-spacing:0;
+}
+.commandRibbonCopy p{
+  max-width:760px;
+  margin:0;
+  color:#b7d0dd;
+  line-height:1.45;
+}
+.commandTelemetry{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:9px;
+}
+.commandTelemetry div{
+  min-width:0;
+  padding:10px 12px;
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:16px;
+  background:rgba(0,0,0,.18);
+}
+.commandTelemetry span{
+  display:block;
+  color:#7f9fb1;
+  font-size:10px;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:.12em;
+}
+.commandTelemetry b{
+  display:block;
+  margin-top:4px;
+  color:#edfbff;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.commandRibbonActions{
+  display:grid;
+  gap:8px;
+  min-width:148px;
+}
+.commandRibbonActions button{
+  min-height:42px;
+}
+.appShell .pageFrame{
+  display:grid;
+  gap:14px;
+}
+.appShell .pageHead{
+  position:relative;
+  overflow:hidden;
+  padding:18px 20px;
+  border-radius:20px!important;
+  background:
+    linear-gradient(90deg,color-mix(in srgb,var(--page-accent,#6cf6ff) 13%,rgba(7,20,32,.84)),rgba(6,12,22,.74))!important;
+}
+.appShell .pageHead:after{
+  content:'';
+  position:absolute;
+  right:16px;
+  top:50%;
+  width:160px;
+  height:160px;
+  transform:translateY(-50%);
+  border-radius:999px;
+  border:1px solid color-mix(in srgb,var(--page-accent,#6cf6ff) 18%,transparent);
+  box-shadow:inset 0 0 34px color-mix(in srgb,var(--page-accent,#6cf6ff) 10%,transparent);
+  opacity:.7;
+}
+.appShell .pageTitleRow:before{
+  content:'Console';
+  display:inline-flex;
+  padding:4px 8px;
+  border:1px solid color-mix(in srgb,var(--page-accent,#6cf6ff) 38%,transparent);
+  border-radius:999px;
+  background:rgba(0,0,0,.18);
+}
+.appShell .pageHead h1{
+  color:#f4fdff;
+  font-size:clamp(25px,2.4vw,40px);
+}
+.appShell .pageHead p{
+  max-width:820px;
+  color:#a9c6d3;
+}
+.appShell .dashboardGrid{
+  grid-template-columns:repeat(12,minmax(0,1fr));
+  gap:16px;
+  align-items:start;
+}
+.appShell .dashboardGrid>.panel{
+  grid-column:span 4;
+}
+.appShell .dashboardGrid>.panel:nth-child(1),
+.appShell .dashboardGrid>.panel:nth-child(2),
+.appShell .dashboardGrid>.panel:nth-child(3){
+  grid-column:span 4;
+}
+.appShell .dashboardGrid>.panel:nth-child(4),
+.appShell .dashboardGrid>.panel:nth-child(7),
+.appShell .dashboardGrid>.panel:nth-child(9),
+.appShell .dashboardGrid>.panel:nth-child(10){
+  grid-column:span 6;
+}
+.appShell .panel{
+  overflow:hidden;
+  border-radius:20px!important;
+  transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;
+}
+.appShell .panel:hover{
+  transform:translateY(-2px);
+  border-color:color-mix(in srgb,var(--page-accent,#6cf6ff) 30%,rgba(255,255,255,.14))!important;
+  box-shadow:0 26px 80px rgba(0,0,0,.38),0 0 38px color-mix(in srgb,var(--page-accent,#6cf6ff) 10%,transparent),inset 0 1px 0 rgba(255,255,255,.05)!important;
+}
+.appShell .panel h2{
+  padding-bottom:9px;
+  border-bottom:1px solid rgba(255,255,255,.07);
+}
+.appShell .panel h2 span{
+  color:#f2fdff;
+  letter-spacing:.08em;
+}
+.appShell .stats{
+  gap:9px;
+}
+.appShell .stats div,
+.appShell .miniItem,
+.appShell .routeList div,
+.appShell .opList div,
+.appShell .itemLine,
+.appShell .feedList>div,
+.appShell .controlActionCard,
+.appShell .recipeCard,
+.appShell .inventoryCard,
+.appShell .equipmentCard,
+.appShell .skillCard,
+.appShell .careerTile,
+.appShell .marketShipCard,
+.appShell .hangarShipCard{
+  border-radius:16px!important;
+  background:
+    linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.018)),
+    rgba(4,14,24,.72)!important;
+  border-color:rgba(125,238,255,.14)!important;
+}
+.appShell .stats div{
+  min-height:68px;
+}
+.appShell .stats span{
+  color:#82a2b4;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+  font-size:10px;
+  font-weight:900;
+}
+.appShell .stats b{
+  color:#f2fdff;
+  font-size:18px;
+}
+.appShell .tagCloud span,
+.appShell .chipRow button,
+.appShell .tabBar button,
+.appShell .moduleRow span{
+  border-radius:999px!important;
+}
+.appShell .chipRow button.active,
+.appShell .tabBar button.active{
+  color:#021017!important;
+  border-color:transparent!important;
+  background:linear-gradient(180deg,#eaffff,var(--page-accent,#6cf6ff))!important;
+}
+.appShell table{
+  border-spacing:0 7px;
+  border-collapse:separate;
+}
+.appShell th{
+  border:0;
+  color:#8db9c9;
+}
+.appShell td{
+  border-top:1px solid rgba(125,238,255,.10);
+  border-bottom:1px solid rgba(125,238,255,.10);
+  background:rgba(4,14,24,.42);
+}
+.appShell tr td:first-child{
+  border-left:1px solid rgba(125,238,255,.10);
+  border-radius:14px 0 0 14px;
+}
+.appShell tr td:last-child{
+  border-right:1px solid rgba(125,238,255,.10);
+  border-radius:0 14px 14px 0;
+}
+.appShell .galaxy{
+  position:relative;
+  overflow:hidden;
+  min-height:190px;
+  border-radius:22px;
+  background:
+    radial-gradient(circle at 72% 16%,color-mix(in srgb,var(--page-accent,#6cf6ff) 32%,transparent),transparent 26%),
+    radial-gradient(circle at 24% 62%,rgba(255,191,90,.16),transparent 28%),
+    url('./assets/backgrounds/starfield.svg') center/cover,
+    #04101c!important;
+}
+.appShell .galaxy:after{
+  content:'';
+  position:absolute;
+  inset:auto -20px -50px auto;
+  width:170px;
+  height:170px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.12);
+}
+.appShell .currentGalaxyCard{
+  grid-template-columns:minmax(260px,.9fr) minmax(280px,1.1fr);
+}
+.appShell .actionLog{
+  left:292px;
+  min-height:42px;
+  padding:8px 14px;
+  background:linear-gradient(90deg,rgba(2,7,13,.9),rgba(5,16,27,.82));
+  border-top:1px solid rgba(125,238,255,.16);
+  box-shadow:0 -18px 50px rgba(0,0,0,.36);
+}
+.appShell .actionLog div{
+  padding:5px 9px;
+  border:1px solid rgba(125,238,255,.12);
+  border-radius:999px;
+  background:rgba(125,238,255,.055);
+  color:#d7f9ff;
+}
+@media(max-width:1500px){
+  .commandRibbon{
+    grid-template-columns:auto minmax(260px,1fr) minmax(320px,.8fr);
+  }
+  .commandRibbonActions{
+    grid-column:2 / -1;
+    grid-template-columns:repeat(2,max-content);
+  }
+}
+@media(max-width:1280px){
+  .appShell .dashboardGrid>.panel,
+  .appShell .dashboardGrid>.panel:nth-child(n){
+    grid-column:span 6;
+  }
+  .commandRibbon{
+    grid-template-columns:auto 1fr;
+  }
+  .commandTelemetry,
+  .commandRibbonActions{
+    grid-column:1 / -1;
+  }
+}
+@media(max-width:1100px){
+  .appShell .sidebar{
+    width:92px;
+    padding:14px 10px;
+  }
+  .appShell .brandNova-sidebar img{
+    width:52px;
+    content:url('./assets/brand/nova-frontiers-emblem.svg');
+  }
+  .appShell .navGroup strong,
+  .appShell .navGroup button span,
+  .appShell .brandNova-sidebar span{
+    display:none;
+  }
+  .appShell .navGroup button{
+    justify-content:center;
+    min-height:46px;
+  }
+  .appShell .actionLog{
+    left:92px;
+  }
+  .appShell .topbar{
+    overflow:auto;
+  }
+  .appShell .content{
+    padding:14px 12px 66px;
+  }
+}
+@media(max-width:820px){
+  .appShell{
+    display:block;
+  }
+  .appShell .sidebar{
+    position:relative;
+    width:100%;
+    height:auto;
+    display:grid;
+    grid-template-columns:auto 1fr;
+    gap:10px;
+  }
+  .appShell .navRail{
+    grid-column:1 / -1;
+    display:flex;
+    overflow-x:auto;
+    gap:10px;
+    margin-top:0;
+    padding-bottom:2px;
+  }
+  .appShell .navGroup{
+    display:flex;
+    gap:6px;
+  }
+  .appShell .navGroup button{
+    min-width:46px;
+  }
+  .appShell .main{
+    min-width:0;
+  }
+  .commandRibbon{
+    grid-template-columns:1fr;
+    padding:16px;
+  }
+  .commandRibbonVisual{
+    width:84px;
+    height:84px;
+  }
+  .commandRibbonVisual img{
+    width:58px;
+    height:58px;
+  }
+  .commandTelemetry{
+    grid-template-columns:1fr;
+  }
+  .commandRibbonActions{
+    grid-template-columns:1fr;
+  }
+  .appShell .dashboardGrid,
+  .appShell .dashboardGrid>.panel,
+  .appShell .dashboardGrid>.panel:nth-child(n){
+    display:grid;
+    grid-template-columns:1fr;
+    grid-column:auto;
+  }
+  .appShell .currentGalaxyCard{
+    grid-template-columns:1fr;
+  }
+  .appShell .actionLog{
+    left:0;
+  }
+}
+
+/* Lead UI map command corrections */
+.mapAutoExploreOverlay{
+  position:absolute;
+  left:16px;
+  right:16px;
+  top:14px;
+  z-index:60;
+  display:flex;
+  align-items:flex-start;
+  justify-content:center;
+  gap:10px;
+  pointer-events:none;
+}
+.mapAutoExploreOverlay .mapAutoExploreCluster,
+.mapAutoExploreOverlay .autoExploreStrip{
+  pointer-events:auto;
+}
+.mapAutoExploreOverlay .mapAutoExploreCluster{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  flex:0 1 auto;
+  min-width:0;
+  padding:6px;
+  border:1px solid rgba(255,194,71,.26);
+  border-radius:16px;
+  background:linear-gradient(180deg,rgba(7,18,25,.82),rgba(2,8,14,.68));
+  box-shadow:0 18px 50px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.04);
+  backdrop-filter:blur(12px);
+}
+.mapAutoExploreOverlay .mapAutoExploreButton{
+  min-height:38px;
+  padding:8px 12px!important;
+  border-radius:12px!important;
+}
+.mapAutoExploreOverlay .autoExploreStrip{
+  display:grid;
+  grid-template-columns:auto minmax(160px,1fr) auto;
+  align-items:center;
+  max-width:min(760px,48vw);
+  padding:9px 12px;
+  border:1px solid rgba(255,194,71,.22);
+  border-radius:16px;
+  background:linear-gradient(180deg,rgba(49,35,7,.72),rgba(6,12,18,.70));
+  box-shadow:0 18px 50px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.04);
+  backdrop-filter:blur(12px);
+}
+.mapAutoExploreOverlay .autoExploreStrip.active{
+  border-color:rgba(77,255,145,.28);
+  background:linear-gradient(180deg,rgba(9,56,37,.76),rgba(4,15,18,.72));
+}
+.mapAutoExploreOverlay .autoExploreStrip b,
+.mapAutoExploreOverlay .autoExploreStrip span,
+.mapAutoExploreOverlay .autoExploreStrip small{
+  min-width:0;
+}
+@media(max-width:1320px){
+  .mapAutoExploreOverlay{
+    justify-content:flex-start;
+    flex-wrap:wrap;
+  }
+  .mapAutoExploreOverlay .autoExploreStrip{
+    max-width:calc(100vw - 360px);
+  }
+}
+@media(max-width:820px){
+  .mapAutoExploreOverlay{
+    left:10px;
+    right:10px;
+    top:10px;
+  }
+  .mapAutoExploreOverlay .mapAutoExploreCluster{
+    width:100%;
+    overflow-x:auto;
+    justify-content:flex-start;
+  }
+  .mapAutoExploreOverlay .autoExploreStrip{
+    width:100%;
+    max-width:none;
+    grid-template-columns:1fr;
+  }
+}
+
+/* Auth facelift: make registration the first-screen experience, not a cramped header widget. */
+.registrationHero{
+  position:relative;
+  z-index:1;
+  min-height:100vh;
+  min-height:100svh;
+  display:grid;
+  grid-template-columns:minmax(360px,.86fr) minmax(560px,1.08fr);
+  gap:clamp(22px,3vw,46px);
+  align-items:center;
+  width:min(1840px,100%);
+  margin:0 auto;
+  padding:clamp(22px,3vw,54px);
+}
+.registrationWorldPanel,
+.registrationConsole{
+  min-width:0;
+}
+.registrationWorldPanel{
+  display:grid;
+  gap:clamp(18px,2.2vw,28px);
+  align-content:center;
+}
+.registrationWorldPanel .brandNova-landing{
+  justify-self:start;
+  align-self:start;
+}
+.registrationHeroCopy{
+  display:grid;
+  gap:14px;
+  max-width:740px;
+}
+.registrationHeroCopy span,
+.registrationConsoleHeader span{
+  width:max-content;
+  max-width:100%;
+  border:1px solid rgba(128,246,255,.28);
+  border-radius:999px;
+  background:rgba(55,229,255,.075);
+  color:#bdf8ff;
+  padding:6px 10px;
+  font-size:11px;
+  font-weight:1000;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+}
+.registrationHeroCopy h1{
+  margin:0;
+  max-width:780px;
+  color:#f4feff;
+  font-size:clamp(52px,5.9vw,116px);
+  line-height:.88;
+  letter-spacing:0;
+  text-transform:none;
+  text-wrap:balance;
+  text-shadow:0 0 34px rgba(108,246,255,.18),0 18px 72px rgba(0,0,0,.52);
+}
+.registrationHeroCopy p{
+  margin:0;
+  max-width:650px;
+  color:#c4deea;
+  font-size:clamp(16px,1.35vw,22px);
+  line-height:1.5;
+}
+.registrationCoreArt{
+  position:relative;
+  inset:auto;
+  z-index:auto;
+  width:min(760px,100%);
+  aspect-ratio:16/10;
+  overflow:hidden;
+  border:1px solid rgba(126,238,255,.24);
+  border-radius:8px;
+  background:#020812;
+  box-shadow:0 36px 110px rgba(0,0,0,.54),0 0 88px rgba(92,222,255,.13),inset 0 0 70px rgba(0,0,0,.34);
+}
+.registrationCoreArt:before,
+.registrationCoreArt:after{
+  content:'';
+  position:absolute;
+  inset:0;
+  z-index:2;
+  pointer-events:none;
+}
+.registrationCoreArt:before{
+  background:radial-gradient(circle at 50% 42%,transparent 31%,rgba(1,5,12,.56) 86%);
+}
+.registrationCoreArt:after{
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.08),inset 0 -80px 110px rgba(1,5,10,.55);
+}
+.registrationCoreArt>img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  display:block;
+  transform:scale(1.02);
+  animation:landingCoreFloat 14s ease-in-out infinite;
+}
+.registrationSignalDeck{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  gap:16px;
+  align-items:end;
+  width:min(760px,100%);
+  padding:16px;
+  border:1px solid color-mix(in srgb,var(--faction-accent,#35f2ff) 36%,rgba(255,255,255,.08));
+  border-radius:8px;
+  background:linear-gradient(135deg,color-mix(in srgb,var(--faction-accent,#35f2ff) 11%,transparent),rgba(3,12,21,.78));
+  box-shadow:inset 0 0 34px rgba(255,255,255,.03);
+}
+.registrationSignalDeck>div:first-child{
+  display:grid;
+  gap:5px;
+}
+.registrationSignalDeck span,
+.registrationSignalDeck small{
+  color:#92b8c7;
+  line-height:1.35;
+}
+.registrationSignalDeck>div:first-child>span{
+  color:var(--faction-accent,#35f2ff);
+  font-size:11px;
+  font-weight:1000;
+  letter-spacing:.12em;
+  text-transform:uppercase;
+}
+.registrationSignalDeck b{
+  color:#f4feff;
+  font-size:18px;
+}
+.registrationMetricRow{
+  display:flex;
+  gap:8px;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+}
+.registrationMetricRow span{
+  min-width:108px;
+  padding:9px 11px;
+  border:1px solid rgba(255,255,255,.10);
+  border-radius:8px;
+  background:rgba(0,0,0,.24);
+  color:#9fb9c7;
+  font-size:12px;
+}
+.registrationMetricRow b{
+  display:block;
+  color:#eaffff;
+  font-size:18px;
+}
+.registrationConsole{
+  position:relative;
+  max-height:none;
+  overflow:visible;
+  display:grid;
+  gap:14px;
+  padding:clamp(18px,2.1vw,30px);
+  border:1px solid rgba(136,244,255,.24);
+  border-radius:8px;
+  background:
+    linear-gradient(180deg,rgba(8,23,37,.92),rgba(2,8,16,.89)),
+    radial-gradient(circle at 84% 18%,rgba(255,194,71,.13),transparent 38%);
+  box-shadow:0 28px 90px rgba(0,0,0,.50),0 0 70px rgba(59,225,255,.10),inset 0 1px 0 rgba(255,255,255,.06);
+}
+.registrationConsole:before{
+  content:'';
+  position:absolute;
+  inset:10px;
+  border:1px solid rgba(255,255,255,.045);
+  border-radius:6px;
+  pointer-events:none;
+}
+.registrationConsoleHeader{
+  position:relative;
+  z-index:1;
+  display:flex;
+  justify-content:space-between;
+  gap:16px;
+  align-items:end;
+}
+.registrationConsoleHeader b{
+  color:#f5fdff;
+  font-size:clamp(28px,2.6vw,44px);
+  line-height:1;
+  letter-spacing:.01em;
+}
+.registrationModeTabs{
+  position:relative;
+  z-index:1;
+  margin:0;
+  border-radius:8px;
+}
+.registrationModeTabs button{
+  border-radius:6px;
+  font-size:12px;
+}
+.registrationAuthForm{
+  position:relative;
+  z-index:1;
+  display:grid;
+  gap:14px;
+}
+.registrationFieldGrid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:12px;
+}
+.authLoginMode .registrationFieldGrid{
+  grid-template-columns:1fr;
+}
+.registrationFieldGrid label{
+  display:grid;
+  gap:7px;
+  min-width:0;
+}
+.registrationFieldGrid label span{
+  color:#9fefff;
+  font-size:11px;
+  font-weight:900;
+  letter-spacing:.10em;
+  text-transform:uppercase;
+}
+.registrationFieldGrid input{
+  width:100%;
+  min-height:48px;
+  border-radius:8px;
+  border-color:rgba(118,235,255,.22);
+  background:rgba(2,9,16,.72);
+  color:#ecfeff;
+  box-shadow:inset 0 0 18px rgba(0,0,0,.18);
+}
+.registrationFieldGrid input:focus{
+  outline:2px solid rgba(92,238,255,.30);
+  border-color:rgba(92,238,255,.62);
+}
+.registrationOnboarding{
+  display:grid;
+  gap:14px;
+  border-top:1px solid rgba(255,255,255,.08);
+  padding-top:14px;
+}
+.registrationFactionGrid{
+  grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:12px;
+}
+.registrationFactionGrid .factionChoice{
+  min-height:230px;
+  border-radius:8px;
+  padding:15px;
+  background:
+    radial-gradient(circle at 50% 0,color-mix(in srgb,var(--faction-accent) 20%,transparent),transparent 45%),
+    linear-gradient(180deg,rgba(9,29,44,.88),rgba(4,12,21,.90));
+}
+.registrationFactionGrid .factionChoiceTop{
+  display:grid;
+  gap:7px;
+  justify-items:center;
+  text-align:center;
+}
+.registrationFactionGrid .factionChoiceTop b{
+  font-size:15px;
+  line-height:1.1;
+}
+.registrationFactionGrid .factionChoice strong{
+  justify-self:center;
+  width:max-content;
+  max-width:100%;
+  padding:4px 8px;
+  border:1px solid color-mix(in srgb,var(--faction-accent) 48%,rgba(255,255,255,.08));
+  border-radius:999px;
+  color:#f3feff;
+  background:rgba(0,0,0,.24);
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.08em;
+}
+.registrationFactionGrid .factionChoice>span:not(.factionChoiceTop):not(.factionChoiceEmblem){
+  padding-right:0;
+  text-align:left;
+}
+.registrationFactionGrid .factionChoice.selected:after{
+  right:10px;
+  top:10px;
+  bottom:auto;
+}
+.registrationDecisionPanel{
+  border-radius:8px;
+}
+.registrationAvatarPicker{
+  display:grid;
+  gap:12px;
+}
+.registrationAvatarGrid{
+  grid-template-columns:repeat(auto-fill,minmax(86px,1fr));
+  gap:10px;
+  max-height:none;
+}
+.registrationAvatarGrid button{
+  border-radius:8px;
+}
+.registrationAvatarGrid img{
+  border-radius:6px;
+}
+.registrationSubmit{
+  min-height:52px;
+  border-radius:8px;
+  color:#001016;
+  font-size:13px;
+  letter-spacing:.08em;
+  box-shadow:0 0 28px rgba(53,242,255,.18);
+}
+.registrationGoogleBlock{
+  position:relative;
+  z-index:1;
+  margin:0;
+  padding-top:2px;
+}
+.registrationGoogleBlock span{
+  max-width:100%;
+}
+.registrationConsole .error{
+  position:relative;
+  z-index:1;
+  margin:0;
+  padding:10px 12px;
+  border:1px solid rgba(255,138,138,.30);
+  border-radius:8px;
+  background:rgba(80,14,24,.34);
+}
+.authLoginMode .registrationHero{
+  grid-template-columns:minmax(480px,1fr) minmax(380px,520px);
+}
+.authLoginMode .registrationConsole{
+  align-self:center;
+}
+.authLoginMode .registrationCoreArt{
+  width:min(860px,100%);
+}
+.authLoginMode .registrationSignalDeck{
+  width:min(860px,100%);
+}
+@media(max-width:1040px){
+  .registrationHero,
+  .authLoginMode .registrationHero{
+    grid-template-columns:1fr;
+    align-items:start;
+  }
+  .registrationWorldPanel{
+    justify-items:center;
+    text-align:center;
+  }
+  .registrationWorldPanel .brandNova-landing{
+    justify-self:center;
+  }
+  .registrationHeroCopy{
+    justify-items:center;
+  }
+  .registrationSignalDeck{
+    text-align:left;
+  }
+}
+@media(max-width:880px){
+  .registrationHero{
+    padding:16px;
+  }
+  .registrationHeroCopy h1{
+    font-size:clamp(42px,13vw,70px);
+  }
+  .registrationSignalDeck,
+  .registrationFieldGrid,
+  .registrationFactionGrid{
+    grid-template-columns:1fr;
+  }
+  .registrationMetricRow{
+    justify-content:stretch;
+  }
+  .registrationMetricRow span{
+    flex:1 1 120px;
+  }
+  .registrationConsoleHeader{
+    display:grid;
+    justify-items:start;
+  }
+  .registrationFactionGrid .factionChoice{
+    min-height:0;
+  }
+}
+@media(max-width:620px){
+  .registrationHero{
+    gap:18px;
+    padding:12px;
+  }
+  .registrationConsole{
+    padding:14px;
+  }
+  .registrationCoreArt{
+    aspect-ratio:4/3;
+    border-radius:8px;
+  }
+  .registrationMetricRow{
+    display:grid;
+    grid-template-columns:1fr;
+  }
+  .registrationAvatarGrid{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
+}
+
+.descriptionBlock{
+  display:grid;
+  grid-template-columns:minmax(260px,.9fr) minmax(320px,1.4fr);
+  gap:16px;
+  margin:0 0 16px;
+  padding:18px;
+  border:1px solid rgba(255,146,112,.42);
+  border-radius:12px;
+  background:
+    linear-gradient(135deg,rgba(255,146,112,.16),rgba(53,242,255,.06) 46%,rgba(4,16,24,.86)),
+    radial-gradient(circle at 10% 12%,rgba(255,194,71,.18),transparent 34%);
+  box-shadow:0 22px 55px rgba(0,0,0,.35),inset 0 0 0 1px rgba(255,255,255,.03);
+}
+.descriptionBlockIntro span{
+  display:inline-flex;
+  width:max-content;
+  margin-bottom:8px;
+  padding:4px 8px;
+  border:1px solid rgba(255,194,71,.34);
+  border-radius:999px;
+  background:rgba(255,194,71,.08);
+  color:#ffd899;
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+}
+.descriptionBlockIntro h2{
+  margin:0 0 10px;
+  color:#fff4df;
+  font-size:22px;
+  line-height:1.15;
+  letter-spacing:0;
+  text-transform:none;
+}
+.descriptionBlockIntro p{
+  margin:0;
+  color:#cfefff;
+  line-height:1.55;
+}
+.descriptionBlockGrid{
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:10px;
+}
+.descriptionBlockGrid>div{
+  min-height:116px;
+  padding:12px;
+  border:1px solid rgba(53,242,255,.18);
+  border-radius:10px;
+  background:rgba(3,13,20,.62);
+}
+.descriptionBlockGrid b{
+  display:block;
+  margin-bottom:6px;
+  color:#dffbff;
+}
+.descriptionBlockGrid p{
+  margin:0;
+  color:#9fb8c7;
+  font-size:12px;
+  line-height:1.45;
+}
+@media(max-width:920px){
+  .descriptionBlock,
+  .descriptionBlockGrid{
+    grid-template-columns:1fr;
+  }
+  .descriptionBlockGrid>div{
+    min-height:0;
+  }
+}
+
+/* Final logged-out entry pass: full-bleed world signal with gated private UI. */
+.novaLandingScreen .registrationHero,
+.novaLandingScreen.authLoginMode .registrationHero{
+  width:100%;
+  max-width:none;
+  min-height:100vh;
+  min-height:100svh;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(360px,470px);
+  gap:clamp(18px,3.2vw,52px);
+  align-items:stretch;
+  margin:0;
+  padding:clamp(18px,2.3vw,34px);
+  overflow:hidden;
+}
+.novaLandingScreen .registrationWorldPanel{
+  position:relative;
+  min-width:0;
+  min-height:calc(100svh - clamp(36px,4.6vw,68px));
+  display:grid;
+  grid-template-rows:auto minmax(0,1fr) auto;
+  align-items:end;
+  justify-items:start;
+  align-content:stretch;
+  gap:18px;
+  padding:clamp(18px,3vw,42px);
+  overflow:hidden;
+  isolation:isolate;
+  text-align:left;
+}
+.novaLandingScreen .registrationCoreArt{
+  position:absolute!important;
+  inset:-4%!important;
+  z-index:-2;
+  width:auto!important;
+  aspect-ratio:auto!important;
+  border:0!important;
+  border-radius:0!important;
+  background:#020812;
+  box-shadow:none!important;
+}
+.novaLandingScreen .registrationCoreArt:before{
+  background:
+    radial-gradient(circle at 64% 44%,transparent 0 28%,rgba(1,5,11,.18) 45%,rgba(1,5,11,.80) 100%),
+    linear-gradient(90deg,rgba(1,5,11,.88),rgba(1,5,11,.30) 54%,rgba(1,5,11,.72))!important;
+}
+.novaLandingScreen .registrationCoreArt:after{
+  box-shadow:inset 0 -190px 180px rgba(1,5,11,.88),inset 0 0 0 1px rgba(255,255,255,.04)!important;
+}
+.novaLandingScreen .registrationCoreArt>img{
+  width:100%;
+  height:100%;
+  object-fit:cover;
+  object-position:62% 44%;
+  filter:saturate(1.12) contrast(1.06) brightness(.82);
+  transform:scale(1.04);
+}
+.novaLandingScreen .registrationHeroCopy{
+  justify-items:start;
+  align-self:center;
+  max-width:680px;
+  padding-bottom:clamp(16px,6vh,74px);
+}
+.novaLandingScreen .registrationHeroCopy h1{
+  font-size:clamp(58px,8.6vw,128px);
+  line-height:.86;
+}
+.novaLandingScreen .registrationSignalDeck{
+  width:min(100%,720px);
+  display:grid;
+  grid-template-columns:minmax(190px,.75fr) minmax(220px,1fr);
+  align-self:end;
+  justify-self:start;
+}
+.novaLandingScreen .registrationBriefList{
+  display:grid;
+}
+.novaLandingScreen .registrationMetricRow{
+  grid-column:1/-1;
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+}
+.novaLandingScreen .registrationConsole{
+  align-self:start;
+  max-height:calc(100svh - clamp(36px,4.6vw,68px));
+  overflow:auto;
+}
+.novaLandingScreen.authLoginMode .registrationConsole{
+  align-self:center;
+}
+@media(max-width:1180px){
+  .novaLandingScreen .registrationHero,
+  .novaLandingScreen.authLoginMode .registrationHero{
+    grid-template-columns:1fr;
+    overflow:visible;
+  }
+  .novaLandingScreen .registrationConsole{
+    max-height:none;
+  }
+}
+@media(max-width:720px){
+  .novaLandingScreen .registrationHero{
+    padding:10px;
+  }
+  .novaLandingScreen .registrationWorldPanel{
+    min-height:auto;
+    padding:14px;
+  }
+  .novaLandingScreen .registrationWorldPanel .brandNova-landing{
+    width:min(270px,100%);
+  }
+  .novaLandingScreen .registrationWorldPanel .brandNova-landing img{
+    width:100%;
+  }
+  .novaLandingScreen .registrationHeroCopy{
+    padding-bottom:0;
+  }
+  .novaLandingScreen .registrationHeroCopy h1{
+    font-size:clamp(44px,15vw,64px);
+    line-height:.9;
+  }
+  .novaLandingScreen .registrationRoleCards{
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:6px;
+  }
+  .novaLandingScreen .registrationRoleCards span{
+    min-height:54px;
+    padding:8px;
+  }
+  .novaLandingScreen .registrationRoleCards small{
+    display:none;
+  }
+  .novaLandingScreen .registrationSignalDeck{
+    display:none;
+  }
+  .novaLandingScreen .registrationSignalDeck,
+  .novaLandingScreen .registrationMetricRow{
+    grid-template-columns:1fr;
+  }
+  .novaLandingScreen .registrationMetricRow{
+    grid-column:auto;
+  }
+  .novaLandingScreen .registrationCoreArt .heroParticle{
+    display:none;
+  }
+}
+
+/* Final auth QA overrides: keep the refreshed register flow spacious and page-scrolled. */
+.novaLandingScreen .registrationHero{
+  overflow:visible!important;
+  align-items:start!important;
+}
+.novaLandingScreen .registrationWorldPanel{
+  align-self:start!important;
+  align-content:start!important;
+  align-items:start!important;
+  grid-template-rows:auto auto auto auto!important;
+  min-height:0!important;
+}
+.novaLandingScreen .registrationCoreArt{
+  position:relative!important;
+  inset:auto!important;
+  z-index:auto!important;
+}
+.novaLandingScreen .registrationHeroCopy{
+  align-self:start!important;
+  padding-bottom:0!important;
+  margin-top:clamp(18px,3vh,34px)!important;
+}
+.novaLandingScreen .registrationConsole{
+  max-height:none!important;
+  overflow:visible!important;
+}
+.novaLandingScreen .registrationFactionGrid{
+  grid-template-columns:repeat(auto-fit,minmax(190px,1fr))!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice{
+  text-transform:none!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice>span:not(.factionChoiceTop):not(.factionChoiceEmblem){
+  display:-webkit-box!important;
+  -webkit-line-clamp:4;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+  text-transform:none!important;
+  line-height:1.28;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice i{
+  text-transform:none!important;
+}
+
+/* Registration hierarchy cleanup: clear blocks, quieter labels, compact faction choices. */
+.novaLandingScreen .registrationConsole{
+  gap:16px!important;
+  padding:clamp(18px,2vw,24px)!important;
+  border-color:rgba(135,219,235,.16)!important;
+  background:linear-gradient(180deg,rgba(7,21,34,.90),rgba(2,8,15,.90))!important;
+  box-shadow:0 24px 72px rgba(0,0,0,.46),inset 0 1px 0 rgba(255,255,255,.05)!important;
+}
+.novaLandingScreen .registrationConsole:before{
+  display:none!important;
+}
+.novaLandingScreen .registrationConsoleHeader{
+  align-items:center!important;
+  padding-bottom:4px;
+}
+.novaLandingScreen .registrationConsoleHeader span{
+  border:0!important;
+  background:transparent!important;
+  padding:0!important;
+  color:#8fb5c4!important;
+  font-size:11px!important;
+  letter-spacing:.04em!important;
+  text-transform:none!important;
+}
+.novaLandingScreen .registrationConsoleHeader b{
+  font-size:clamp(24px,2vw,32px)!important;
+  font-weight:800!important;
+  letter-spacing:0!important;
+}
+.novaLandingScreen .registrationModeTabs{
+  padding:4px!important;
+  border-color:rgba(255,255,255,.08)!important;
+  background:rgba(255,255,255,.035)!important;
+}
+.novaLandingScreen .registrationModeTabs button{
+  min-height:38px!important;
+  padding:8px 12px!important;
+  border-radius:6px!important;
+  font-size:12px!important;
+  letter-spacing:0!important;
+  text-transform:none!important;
+}
+.registrationFormSection{
+  display:grid;
+  gap:12px;
+  padding:0 0 18px;
+  border-bottom:1px solid rgba(255,255,255,.075);
+}
+.registrationFormSection:last-of-type{
+  border-bottom:0;
+  padding-bottom:0;
+}
+.registrationSectionHeader{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  min-height:18px;
+}
+.registrationSectionHeader b{
+  color:#d8edf3;
+  font-size:13px;
+  font-weight:800;
+  letter-spacing:0;
+  text-transform:none;
+}
+.novaLandingScreen .registrationAuthForm{
+  gap:18px!important;
+}
+.novaLandingScreen .registrationFieldGrid{
+  grid-template-columns:repeat(2,minmax(0,1fr))!important;
+  gap:12px!important;
+}
+.novaLandingScreen.authLoginMode .registrationFieldGrid{
+  grid-template-columns:1fr!important;
+}
+.novaLandingScreen .registrationFieldGrid label{
+  gap:5px!important;
+}
+.novaLandingScreen .registrationFieldGrid label span{
+  color:#90aebc!important;
+  font-size:11px!important;
+  font-weight:700!important;
+  letter-spacing:0!important;
+  text-transform:none!important;
+}
+.novaLandingScreen .registrationFieldGrid input{
+  height:48px!important;
+  min-height:48px!important;
+  padding:0 13px!important;
+  border:1px solid rgba(138,207,224,.14)!important;
+  border-radius:7px!important;
+  background:rgba(2,9,16,.58)!important;
+  box-shadow:none!important;
+  color:#eefbff!important;
+}
+.novaLandingScreen .registrationFieldGrid input::placeholder{
+  color:rgba(188,211,220,.46)!important;
+}
+.novaLandingScreen .registrationFieldGrid input:focus{
+  outline:2px solid rgba(92,238,255,.18)!important;
+  outline-offset:1px!important;
+  border-color:rgba(118,226,245,.42)!important;
+}
+.novaLandingScreen .registrationOnboarding{
+  gap:18px!important;
+  padding-top:0!important;
+  border-top:0!important;
+}
+.novaLandingScreen .registrationFactionGrid{
+  grid-template-columns:repeat(3,minmax(0,1fr))!important;
+  gap:12px!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice{
+  min-height:0!important;
+  display:grid!important;
+  grid-template-rows:auto auto auto auto auto;
+  gap:9px!important;
+  padding:14px!important;
+  border:1px solid rgba(255,255,255,.10)!important;
+  border-radius:8px!important;
+  background:linear-gradient(180deg,rgba(9,24,36,.72),rgba(4,12,20,.82))!important;
+  box-shadow:none!important;
+  transform:none!important;
+  transition:transform .14s ease,border-color .14s ease,background .14s ease,box-shadow .14s ease!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice:hover{
+  border-color:color-mix(in srgb,var(--faction-accent) 42%,rgba(255,255,255,.18))!important;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--faction-accent) 7%,rgba(10,25,37,.78)),rgba(4,12,20,.86))!important;
+  box-shadow:0 10px 30px rgba(0,0,0,.18)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice.selected{
+  transform:scale(1.015)!important;
+  border-color:color-mix(in srgb,var(--faction-accent) 58%,#fff 8%)!important;
+  background:linear-gradient(180deg,color-mix(in srgb,var(--faction-accent) 12%,rgba(10,25,37,.82)),rgba(5,14,22,.90))!important;
+  box-shadow:0 12px 34px rgba(0,0,0,.22),inset 0 0 0 1px color-mix(in srgb,var(--faction-accent) 22%,transparent)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice.selected:after{
+  content:''!important;
+  position:absolute;
+  right:11px!important;
+  top:11px!important;
+  width:8px;
+  height:8px;
+  padding:0!important;
+  border:0!important;
+  border-radius:999px!important;
+  background:var(--faction-accent,#35f2ff)!important;
+  box-shadow:0 0 14px color-mix(in srgb,var(--faction-accent) 46%,transparent)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoiceEmblem{
+  width:42px!important;
+  height:42px!important;
+  justify-self:start!important;
+  border-radius:8px!important;
+  border-color:color-mix(in srgb,var(--faction-accent) 28%,rgba(255,255,255,.08))!important;
+  background:rgba(255,255,255,.04)!important;
+  box-shadow:none!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoiceEmblem img{
+  width:30px!important;
+  height:30px!important;
+  filter:none!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoiceTop{
+  display:grid!important;
+  gap:4px!important;
+  justify-items:start!important;
+  text-align:left!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoiceTop b{
+  color:#eefbff!important;
+  font-size:15px!important;
+  line-height:1.15!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoiceTop em{
+  order:3;
+  width:max-content;
+  max-width:100%;
+  padding:3px 7px!important;
+  border:0!important;
+  border-radius:999px!important;
+  background:rgba(255,255,255,.055)!important;
+  color:#9fb9c7!important;
+  font-size:10px!important;
+  font-weight:800!important;
+  letter-spacing:0!important;
+  text-transform:none!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice strong{
+  justify-self:start!important;
+  padding:3px 7px!important;
+  border-color:color-mix(in srgb,var(--faction-accent) 34%,rgba(255,255,255,.08))!important;
+  border-radius:999px!important;
+  background:color-mix(in srgb,var(--faction-accent) 10%,rgba(255,255,255,.04))!important;
+  color:#eefbff!important;
+  font-size:10px!important;
+  letter-spacing:.06em!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice>span:not(.factionChoiceTop):not(.factionChoiceEmblem){
+  display:block!important;
+  min-height:34px;
+  color:#b8d1dc!important;
+  font-size:12px!important;
+  line-height:1.35!important;
+  padding:0!important;
+  overflow:visible!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice i{
+  color:#90aebc!important;
+  font-size:11px!important;
+  letter-spacing:0!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionBalanceBar{
+  height:6px!important;
+  background:rgba(255,255,255,.08)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionBalanceBar span{
+  box-shadow:none!important;
+}
+.novaLandingScreen .registrationDecisionPanel{
+  display:grid!important;
+  gap:14px!important;
+  padding:14px!important;
+  border:0!important;
+  border-radius:8px!important;
+  background:color-mix(in srgb,var(--faction-accent) 7%,rgba(255,255,255,.045))!important;
+  box-shadow:none!important;
+}
+.novaLandingScreen .factionDecisionHero{
+  grid-template-columns:44px minmax(0,1fr)!important;
+  gap:12px!important;
+}
+.novaLandingScreen .factionDecisionHero img{
+  width:44px!important;
+  height:44px!important;
+  padding:7px!important;
+  border-radius:8px!important;
+  box-shadow:none!important;
+}
+.novaLandingScreen .factionDecisionHero b{
+  font-size:16px!important;
+}
+.novaLandingScreen .factionDecisionHero span{
+  display:-webkit-box;
+  -webkit-line-clamp:3;
+  -webkit-box-orient:vertical;
+  overflow:hidden;
+  color:#c5dde7!important;
+  font-size:13px!important;
+  line-height:1.45!important;
+}
+.novaLandingScreen .factionBalanceStats{
+  grid-template-columns:repeat(4,minmax(0,1fr))!important;
+  gap:10px!important;
+}
+.novaLandingScreen .factionBalanceStats span{
+  display:grid;
+  align-content:center;
+  min-height:68px;
+  padding:10px!important;
+  border:0!important;
+  border-radius:7px!important;
+  background:rgba(2,9,16,.42)!important;
+}
+.novaLandingScreen .factionBalanceStats small{
+  margin:0 0 5px!important;
+  color:#8faaba!important;
+  font-size:10px!important;
+  letter-spacing:0!important;
+  text-transform:none!important;
+}
+.novaLandingScreen .factionBalanceStats b{
+  color:#eefbff!important;
+  font-size:15px!important;
+  line-height:1.12!important;
+}
+.novaLandingScreen .registrationSubmit{
+  min-height:48px!important;
+  border-radius:7px!important;
+  font-size:13px!important;
+  letter-spacing:0!important;
+  text-transform:none!important;
+  box-shadow:none!important;
+}
+.novaLandingScreen .registrationGoogleBlock{
+  padding-top:0!important;
+  gap:6px!important;
+}
+.novaLandingScreen .registrationGoogleBlock span{
+  color:#7e9aa8!important;
+  font-size:11px!important;
+}
+@media(max-width:880px){
+  .novaLandingScreen .registrationFieldGrid,
+  .novaLandingScreen .registrationFactionGrid,
+  .novaLandingScreen .factionBalanceStats{
+    grid-template-columns:1fr!important;
+  }
+  .novaLandingScreen .registrationFactionGrid .factionChoice{
+    transform:none!important;
+  }
+  .novaLandingScreen .factionBalanceStats span{
+    min-height:58px;
+  }
+}
+
+/* Landing refinement pass: preserve the current composition, tune rhythm and weight. */
+.novaLandingScreen:before{
+  opacity:.34;
+  background:
+    linear-gradient(rgba(255,255,255,.014) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.011) 1px,transparent 1px);
+  background-size:100% 5px,104px 100%;
+}
+.landingStars,
+.landingStars i{
+  opacity:.18;
+}
+.landingStorySection{
+  min-height:112vh;
+  gap:clamp(38px,5.8vw,96px);
+  padding:clamp(112px,13vh,164px) 0;
+}
+.landingStoryCopy{
+  width:min(100%,520px);
+  gap:16px;
+  align-self:center;
+  justify-self:start;
+}
+.landingStoryCopy>span{
+  margin-bottom:4px;
+  border-color:rgba(124,238,255,.20);
+  background:rgba(35,203,235,.045);
+  color:#aee7f1;
+}
+.landingStoryCopy h2{
+  max-width:620px;
+  text-wrap:balance;
+}
+.landingStoryCopy p{
+  max-width:460px;
+  color:#c4dce4;
+  font-size:15px;
+  line-height:1.42;
+}
+.landingStoryCopy p + p{
+  margin-top:-6px;
+  color:#9fb8c4;
+}
+.landingStickyVisual{
+  border-color:color-mix(in srgb,var(--section-accent) 18%,transparent);
+  border-radius:14px;
+  background:
+    radial-gradient(circle at 50% 34%,color-mix(in srgb,var(--section-accent) 8%,transparent),transparent 42%),
+    linear-gradient(180deg,rgba(6,20,34,.56),rgba(2,8,16,.86));
+  box-shadow:0 28px 76px rgba(0,0,0,.34),0 0 34px color-mix(in srgb,var(--section-accent) 5%,transparent),inset 0 1px 0 rgba(255,255,255,.035);
+}
+.landingStickyVisual:before{
+  opacity:.035;
+}
+.landingStickyVisual:after{
+  content:'';
+  position:absolute;
+  inset:1px;
+  pointer-events:none;
+  border-radius:inherit;
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--section-accent) 8%,transparent);
+  opacity:.6;
+  animation:landingPanelPulse 7.5s ease-in-out infinite;
+}
+@keyframes landingPanelPulse{
+  50%{opacity:.28}
+}
+.landingFactionVisual article,
+.leaderboardCard,
+.historyLog span,
+.recipeLine,
+.landingWarVisual strong{
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035);
+}
+.landingFactionEmblem,
+.landingFactionShip,
+.warShip,
+.alienShip,
+.tradeShip{
+  filter:drop-shadow(0 0 10px color-mix(in srgb,var(--section-accent,#8cfaff) 16%,transparent));
+}
+.landingGalaxyVisual .route{
+  opacity:.60;
+  filter:drop-shadow(0 0 4px color-mix(in srgb,var(--section-accent) 70%,transparent));
+}
+.landingGalaxyVisual .planet,
+.landingGalaxyVisual .movingShip,
+.landingTradeVisual .tradeNode{
+  border-color:rgba(124,238,255,.11);
+  box-shadow:0 0 14px rgba(124,238,255,.055);
+}
+.landingEventVisual .wormhole{
+  filter:blur(.1px) drop-shadow(0 0 20px rgba(177,116,255,.26));
+}
+.historyArc,
+.landingWarVisual .border{
+  opacity:.74;
+}
+.landingFactionVisual article,
+.landingTradeVisual .tradeNode,
+.eventPlanet,
+.landingGalaxyVisual .planet{
+  animation:landingQuietDrift 9s ease-in-out infinite;
+}
+.landingFactionVisual article:nth-child(2),
+.landingTradeVisual .n2,
+.eventPlanet,
+.landingGalaxyVisual .p2{
+  animation-delay:1.6s;
+}
+.landingFactionVisual article:nth-child(3),
+.landingTradeVisual .n3,
+.landingGalaxyVisual .p3{
+  animation-delay:3.1s;
+}
+@keyframes landingQuietDrift{
+  50%{transform:translate3d(0,-5px,0)}
+}
+.registrationHeroCopy{
+  gap:15px;
+}
+.registrationHeroCopy p{
+  max-width:560px;
+  color:#c3dce4;
+  line-height:1.42;
+}
+.registrationRoleCards span{
+  min-height:74px;
+  border-color:rgba(124,238,255,.10);
+  background:rgba(3,13,22,.42);
+}
+.registrationSignalDeck{
+  border-color:color-mix(in srgb,var(--faction-accent,#35f2ff) 18%,rgba(255,255,255,.055));
+  background:linear-gradient(135deg,color-mix(in srgb,var(--faction-accent,#35f2ff) 6%,transparent),rgba(3,12,21,.66));
+}
+.novaLandingScreen .registrationConsole{
+  gap:18px!important;
+  padding:clamp(17px,1.8vw,22px)!important;
+  border-color:rgba(136,244,255,.11)!important;
+  background:linear-gradient(180deg,rgba(7,21,34,.84),rgba(2,8,15,.86))!important;
+  box-shadow:0 20px 56px rgba(0,0,0,.40),0 0 22px rgba(59,225,255,.025),inset 0 1px 0 rgba(255,255,255,.035)!important;
+}
+.novaLandingScreen .registrationAuthForm{
+  gap:20px!important;
+}
+.novaLandingScreen .registrationFieldGrid{
+  gap:14px!important;
+}
+.novaLandingScreen .registrationFieldGrid label{
+  gap:6px!important;
+}
+.novaLandingScreen .registrationFieldGrid input{
+  border-color:rgba(138,207,224,.11)!important;
+  background:rgba(2,9,16,.52)!important;
+}
+.novaLandingScreen .registrationFieldGrid input:focus{
+  outline-color:rgba(92,238,255,.14)!important;
+  border-color:rgba(118,226,245,.34)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice:hover{
+  box-shadow:0 10px 24px rgba(0,0,0,.14)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice.selected{
+  box-shadow:0 10px 26px rgba(0,0,0,.18),inset 0 0 0 1px color-mix(in srgb,var(--faction-accent) 14%,transparent)!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice{
+  border-color:rgba(255,255,255,.085)!important;
+  background:linear-gradient(180deg,rgba(9,24,36,.64),rgba(4,12,20,.78))!important;
+}
+.novaLandingScreen .registrationFactionGrid .factionChoice>span:not(.factionChoiceTop):not(.factionChoiceEmblem){
+  min-height:0;
+  color:#abc5d0!important;
+}
+@media(max-width:900px){
+  .landingStorySection,
+  .landingStorySection:nth-child(even){
+    padding:72px 0;
+  }
+}
+@media(prefers-reduced-motion:reduce){
+  .landingFactionVisual article,
+  .landingTradeVisual .tradeNode,
+  .eventPlanet,
+  .landingGalaxyVisual .planet,
+  .landingStickyVisual:after{
+    animation:none!important;
+  }
+}
+
+/* Mobile command shell and proximity-map pass. */
+html,body,#root{max-width:100%;overflow-x:hidden}
+.mobileBottomTabs,.mobileContextActionBar,.mobileMoreBackdrop,.mobileProximityMap,.mobileObjectSheetBackdrop{display:none}
+
+@media(max-width:760px){
+  body{font-size:14px;background:#02070d}
+  button,input,select{min-height:44px;font-size:14px}
+  .appShell{display:block;min-height:100dvh;padding-bottom:142px}
+  .sidebar,.topbar,.actionLog{display:none!important}
+  .main{width:100%;min-width:0}
+  .content,.content.wideMapContent{padding:0 10px 16px;max-width:100%;overflow-x:hidden}
+  .commandRibbon{
+    position:sticky;top:0;z-index:30;margin:0 -10px 10px;padding:10px 12px;
+    display:grid;grid-template-columns:1fr;gap:8px;border-bottom:1px solid rgba(69,216,255,.18);
+    background:linear-gradient(180deg,rgba(4,17,26,.98),rgba(4,17,26,.92));
+    backdrop-filter:blur(12px)
+  }
+  .commandRibbonVisual,.commandRibbonCopy p,.commandRibbonActions{display:none}
+  .commandRibbonCopy h1{font-size:18px;line-height:1.15;letter-spacing:0}
+  .commandRibbonCopy span{font-size:11px;color:#8fd9e8}
+  .commandTelemetry{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+  .commandTelemetry div{min-width:0;padding:7px;border:1px solid #123849;background:#06141e}
+  .commandTelemetry span{display:block;font-size:10px;color:var(--muted)}
+  .commandTelemetry b{display:block;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pageHead{
+    position:sticky;top:86px;z-index:24;margin:0 -2px 10px;padding:10px 0;
+    border-width:0 0 1px;background:rgba(2,7,13,.96);backdrop-filter:blur(10px)
+  }
+  .pageTitleRow h1,.pageHead h1{font-size:17px;line-height:1.15;letter-spacing:0}
+  .pageHead p{font-size:12px;line-height:1.35}
+  .panel{padding:12px;margin-bottom:10px;border-radius:8px;box-shadow:none;background:linear-gradient(180deg,#071925,#05111a)}
+  .panel h2{font-size:14px;letter-spacing:0;margin-bottom:10px}
+  .cards2,.cards3,.dashboardGrid,.fightTop,.fightLayout,.hangarLayout,.inventoryLayout,.tradeLayout,.travelStatusGrid{grid-template-columns:1fr!important}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .stats div{min-width:0;padding:8px}
+  .stats b{font-size:14px;word-break:break-word}
+  .itemLine,.routeList div,.opList div,.warCard{align-items:stretch;flex-direction:column;gap:6px}
+  table,thead,tbody,tr,th,td{display:block;width:100%}
+  thead{display:none}
+  tr{margin:0 0 10px;padding:10px;border:1px solid #123849;background:#06141e;border-radius:8px}
+  td{border:0;padding:6px 0;min-width:0}
+  td:not(:last-child){border-bottom:1px solid rgba(255,255,255,.06)}
+  td .itemNameCell{min-width:0}
+  .inventoryToolbar,.advancedInventoryToolbar,.inventorySelectRow,.galaxyMarketFilters{display:grid!important;grid-template-columns:1fr!important;gap:8px}
+  .chipRow{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
+  .chipRow::-webkit-scrollbar{display:none}
+  .chipRow button{flex:0 0 auto;border-radius:999px;text-transform:none;letter-spacing:0}
+  .inventoryCardGrid,.deepInventoryGrid,.targetGrid,.tradeInventoryGrid{grid-template-columns:1fr!important}
+  .inventoryCard{grid-template-columns:auto minmax(0,1fr)!important;gap:9px;border-radius:8px}
+  .inventoryCardMain p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .inventoryStats,.inventoryFlags,.inventoryCard .actions{grid-column:1 / -1}
+  .inventoryStats{display:inline-grid;grid-template-columns:1fr 1fr;text-align:left}
+  .actions,.inventoryActions,.fightActions,.buttonRow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .actions button,.inventoryActions button,.fightActions button,.buttonRow button{width:100%;min-height:46px}
+  .mobileBottomTabs{
+    position:fixed;left:0;right:0;bottom:0;z-index:80;display:grid;grid-template-columns:repeat(5,1fr);
+    gap:0;margin:0;padding:6px 6px calc(6px + env(safe-area-inset-bottom));
+    border-top:1px solid rgba(69,216,255,.22);background:rgba(3,12,20,.98);backdrop-filter:blur(14px)
+  }
+  .mobileBottomTabs button{
+    min-width:0;min-height:58px;padding:6px 3px;border:0;background:transparent;color:#86aab8;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;text-transform:none;letter-spacing:0;font-size:11px
+  }
+  .mobileBottomTabs button.active{color:#dffbff;background:#082332;border:1px solid #164e63;border-radius:8px;box-shadow:none}
+  .mobileContextActionBar{
+    position:fixed;left:8px;right:8px;bottom:74px;z-index:70;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;
+    padding:8px;border:1px solid rgba(69,216,255,.22);border-radius:8px;background:rgba(4,17,26,.96);box-shadow:0 10px 28px rgba(0,0,0,.35)
+  }
+  .mobileContextActionBar div{min-width:0}
+  .mobileContextActionBar b,.mobileContextActionBar span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobileContextActionBar b{font-size:12px;color:#dffbff}
+  .mobileContextActionBar span{font-size:11px;color:var(--muted)}
+  .mobileContextActionBar button{min-height:42px;padding:8px 10px;font-size:11px}
+  .mobileMoreBackdrop{
+    position:fixed;inset:0;z-index:75;display:flex;align-items:flex-end;background:rgba(0,5,12,.55);backdrop-filter:blur(6px)
+  }
+  .mobileMoreSheet{
+    width:100%;max-height:74dvh;overflow:auto;border-radius:14px 14px 0 0;border:1px solid #164e63;background:#04111a;padding:12px 12px calc(86px + env(safe-area-inset-bottom))
+  }
+  .mobileMoreSheet header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+  .mobileMoreSheet header button{width:44px;padding:0;display:grid;place-items:center}
+  .mobileMoreGroups{display:grid;gap:12px}
+  .mobileMoreGroup strong{display:block;color:#8fd9e8;font-size:11px;text-transform:uppercase;margin-bottom:6px}
+  .mobileMoreGroup>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .mobileMoreGroup button{display:flex;align-items:center;gap:8px;text-align:left;text-transform:none;letter-spacing:0;border-radius:8px}
+  .mobileMoreGroup button span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobileMoreGroup button.active{border-color:var(--cyan2);background:#0b2b39}
+  .mobileProximityMap{display:grid;gap:10px}
+  .mapCommandBar,.mapViewport,.mapContextPopup,.mapInspectOverlay,.routeLegend .solid,.routeLegend .dash,.routeLegend .activeLine{display:none!important}
+  .mobileMapModeRow{display:grid;grid-template-columns:1fr auto;gap:8px}
+  .mobileMapModeRow .mapModeSwitch{display:grid;grid-template-columns:1fr 1fr;border:1px solid #164e63;border-radius:8px;overflow:hidden;background:#06141e}
+  .mobileMapModeRow .mapModeSwitch button{border:0;border-radius:0;text-transform:none;letter-spacing:0}
+  .mobileMapModeRow .mapModeSwitch button.active{background:#0d5363;color:#dffbff}
+  .mobileMapLocate{display:flex;align-items:center;gap:6px;border-radius:8px;text-transform:none;letter-spacing:0}
+  .mobileMapStats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+  .mobileMapStats span{border:1px solid #123849;background:#06141e;border-radius:8px;padding:8px;font-size:11px;color:var(--muted);min-width:0}
+  .mobileMapStats b{display:block;color:#dffbff;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobileMapFilterChips{display:flex;gap:7px;overflow-x:auto;scrollbar-width:none}
+  .mobileMapFilterChips::-webkit-scrollbar{display:none}
+  .mobileMapFilterChips button{flex:0 0 auto;min-height:40px;border-radius:999px;text-transform:none;letter-spacing:0}
+  .mobileMapFilterChips button.active{background:#0d5363;color:#dffbff}
+  .mobileObjectList{display:grid;gap:8px}
+  .mobileObjectCard{
+    width:100%;display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:10px;align-items:center;text-align:left;
+    padding:10px;border-radius:8px;border-color:#164e63;background:linear-gradient(180deg,#071925,#05111a);
+    border-left:4px solid var(--faction-accent,#45d8ff);text-transform:none;letter-spacing:0
+  }
+  .mobileObjectCard.hostile{border-color:#7d2639;border-left-color:#ff4d6d;background:linear-gradient(180deg,#21101a,#06121c)}
+  .mobileObjectIcon{width:38px;height:38px;border-radius:8px;display:grid;place-items:center;background:#031019;border:1px solid #1d637a;color:#9dfcff;font-size:11px;font-weight:900}
+  .mobileObjectMain,.mobileObjectMeta{min-width:0}
+  .mobileObjectMain b,.mobileObjectMain small,.mobileObjectMeta b,.mobileObjectMeta small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobileObjectMain b{color:#dffbff;font-size:14px}
+  .mobileObjectMain small,.mobileObjectMeta small{color:var(--muted);font-size:11px}
+  .mobileObjectMeta{text-align:right}
+  .mobileObjectMeta b{color:#dffbff;font-size:13px}
+  .mobileMapEmpty{padding:18px;border:1px solid #123849;background:#06141e;border-radius:8px;color:var(--muted);text-align:center}
+  .mobileObjectSheetBackdrop{position:fixed;inset:0;z-index:85;display:flex;align-items:flex-end;background:rgba(0,5,12,.62);backdrop-filter:blur(7px)}
+  .mobileObjectSheet{
+    width:100%;max-height:70dvh;overflow:auto;border-radius:14px 14px 0 0;border:1px solid #164e63;background:#04111a;
+    padding:12px 12px calc(88px + env(safe-area-inset-bottom))
+  }
+  .mobileObjectSheet.hostile{border-color:#7d2639}
+  .mobileObjectSheet header{display:flex;justify-content:space-between;gap:12px;align-items:start;margin-bottom:10px}
+  .mobileObjectSheet header div{min-width:0}
+  .mobileObjectSheet header b,.mobileObjectSheet header span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mobileObjectSheet header b{font-size:18px;color:#dffbff}
+  .mobileObjectSheet header span{color:var(--muted)}
+  .mobileObjectSheet header button{width:44px;padding:0;display:grid;place-items:center}
+  .mobileObjectSheetBadges{display:flex;gap:7px;overflow-x:auto;margin-bottom:10px}
+  .mobileObjectSheetBadges span{flex:0 0 auto;border:1px solid #123849;background:#06141e;border-radius:999px;padding:6px 9px;color:#9dfcff;font-size:12px}
+  .mobileObjectSheetActions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+  .mobileObjectSheetActions button{width:100%;min-height:48px;border-radius:8px;text-transform:none;letter-spacing:0}
+  .battleModalBackdrop{padding:0!important;align-items:stretch!important}
+  .battleModal{width:100vw!important;max-height:100dvh!important;border-radius:0!important}
+  .battleEnergyStrip,.battleEnergyStripWithEscape{grid-template-columns:1fr!important;gap:8px;padding:10px!important}
+  .battleEnergyCenterControls{display:grid;grid-template-columns:1fr;gap:8px}
+  .interactiveStage,.battleArenaRow,.battleControlRow{grid-template-columns:1fr!important;display:grid!important}
+  .battleArenaRow{gap:8px}
+  .enemyBattleColumn{order:1}.stableBattleLane{order:2}.playerBattleColumn{order:3}.battleControlRow{order:4}
+  .battleShipAnchor,.stableBattleLane{height:auto!important;min-height:156px!important;max-height:none!important}
+  .battleControlSlot{min-width:0}
+  .battleActionDeck{position:sticky;bottom:0;z-index:6;border-radius:12px 12px 0 0}
+  .weaponButtonGrid,.utilityButtonGrid,.specialActionRow{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+  .combatActionBtn{min-height:58px!important}
+}
+
+.novaModalOverlay{
+  position:fixed;
+  inset:0;
+  z-index:1200;
+  display:grid;
+  place-items:center;
+  padding:18px;
+  background:rgba(0,6,14,.72);
+  backdrop-filter:blur(10px);
+}
+.novaModalShell{
+  width:min(520px,100%);
+  max-height:min(82dvh,680px);
+  overflow:auto;
+  border:1px solid rgba(95,232,255,.34);
+  border-radius:8px;
+  background:
+    linear-gradient(180deg,rgba(8,27,42,.98),rgba(3,11,20,.98)),
+    radial-gradient(circle at 12% 0,rgba(53,242,255,.18),transparent 36%);
+  box-shadow:0 28px 90px rgba(0,0,0,.58),0 0 0 1px rgba(255,255,255,.035) inset,0 0 42px rgba(53,242,255,.09);
+  color:var(--text);
+  padding:18px;
+}
+.novaModalShell:focus{outline:2px solid rgba(99,241,255,.38);outline-offset:3px}
+.novaModalShell.danger{
+  border-color:rgba(255,95,105,.55);
+  background:linear-gradient(180deg,rgba(44,14,23,.98),rgba(5,11,20,.98));
+  box-shadow:0 28px 90px rgba(0,0,0,.62),0 0 44px rgba(255,77,87,.12);
+}
+.novaModalHeader{
+  display:grid;
+  grid-template-columns:auto minmax(0,1fr) auto;
+  gap:12px;
+  align-items:start;
+}
+.novaModalHeader h2{
+  margin:0;
+  font-size:18px;
+  line-height:1.2;
+  letter-spacing:0;
+}
+.novaModalHeader small{
+  display:block;
+  margin-top:4px;
+  color:#8fd9e8;
+}
+.novaModalIcon{
+  width:42px;
+  height:42px;
+  display:grid;
+  place-items:center;
+  border:1px solid rgba(95,232,255,.32);
+  border-radius:8px;
+  color:var(--cyan);
+  background:rgba(2,9,16,.74);
+}
+.novaModalShell.danger .novaModalIcon{
+  color:#ff9aa5;
+  border-color:rgba(255,95,105,.48);
+}
+.novaModalClose{
+  width:40px;
+  height:40px;
+  display:grid;
+  place-items:center;
+  padding:0;
+  border-radius:8px;
+}
+.novaModalMessage{
+  margin:16px 0 0;
+  color:#cfe8f1;
+  line-height:1.45;
+}
+.novaModalField{
+  display:grid;
+  gap:7px;
+  margin-top:16px;
+  color:#9dfcff;
+  font-weight:800;
+  font-size:12px;
+  text-transform:uppercase;
+}
+.novaModalField input{
+  width:100%;
+  border-radius:8px;
+}
+.novaModalHint{
+  margin-top:8px;
+  color:#ffb9bf;
+  font-size:12px;
+}
+.novaModalActions{
+  display:flex;
+  justify-content:flex-end;
+  gap:10px;
+  margin-top:18px;
+  flex-wrap:wrap;
+}
+.novaModalActions button{
+  border-radius:8px;
+  min-width:128px;
+}
+.novaModalSecondary{
+  background:#06131c;
+  color:#aac8d4;
+}
+.novaModalPrimary{
+  background:linear-gradient(180deg,#28d9df,#0d788b);
+  color:#001014;
+}
+.novaModalShell.danger .novaModalPrimary{
+  background:linear-gradient(180deg,#ff6d77,#a9172a);
+  color:white;
+  border-color:#ff9aa5;
+}
+@media(max-width:640px){
+  .novaModalOverlay{place-items:end center;padding:10px}
+  .novaModalShell{width:100%;max-height:86dvh;padding:15px}
+  .novaModalActions{display:grid;grid-template-columns:1fr;gap:8px}
+  .novaModalActions button{width:100%}
+}
+/* Auth cleanup and profile deletion */
+.authStatus{border:1px solid rgba(87,255,163,.34);background:rgba(10,48,36,.62);color:#caffdf;padding:9px 11px;font-size:12px;line-height:1.35}
+.authClearGoogle{border:0;background:transparent;color:#9dfcff;padding:4px 6px;text-transform:none;letter-spacing:0;box-shadow:none}
+.googleButtonSlot.loading{opacity:.55;pointer-events:none}
+.profileDangerZone{display:flex;align-items:center;justify-content:space-between;gap:14px;border:1px solid rgba(255,77,87,.35);background:linear-gradient(180deg,rgba(73,13,22,.55),rgba(8,18,27,.72));padding:14px}
+.profileDangerZone b{display:block;color:#ffd5d5}.profileDangerZone span{display:block;color:#e69fa6;margin-top:4px}
+.deleteProfileButton,.deleteProfileModal .dangerBtn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border-color:#ff5b66;background:linear-gradient(180deg,#69202a,#2a0710);color:#ffe7e7}
+.deleteProfileModal{max-width:560px}.deleteProfileHeader{display:flex;align-items:center;gap:12px;color:#ff9aa2}.deleteProfileHeader h2{margin:0}
+.deleteConfirmField{display:grid;gap:6px;color:#ffd5d5;font-weight:900;text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:720px){.profileDangerZone{align-items:stretch;flex-direction:column}.deleteProfileButton{width:100%}}

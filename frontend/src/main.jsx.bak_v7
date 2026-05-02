@@ -484,9 +484,9 @@ function Market({state,act}) {
   };
   const listItem = (item, defaultQty=1) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(legacyTextInput(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
     const base = Number(item.base_value || item.avg_cost || 100);
-    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const unitPrice = Math.max(1, Number(legacyTextInput('Unit price', String(base))) || base);
     const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice };
     act('create_player_listing', payload);
   };
@@ -649,9 +649,9 @@ function Inventory({state,act}) {
   };
   const listItem = (item) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, '1')) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(legacyTextInput(`Quantity to list for ${item.name}`, '1')) || 1));
     const base = Number(item.market_sell_estimate?.unit || item.base_value || item.avg_cost || 100);
-    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const unitPrice = Math.max(1, Number(legacyTextInput('Unit price', String(base))) || base);
     act('create_player_listing', { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice });
   };
   const canUse = (i) => i.usable && (i.available_qty || 0) > 0 && i.source !== 'cargo_hold';
@@ -695,7 +695,7 @@ function Inventory({state,act}) {
           {canUse(i) && <button onClick={()=>act('use_inventory_item',{item_code:i.item_code,qty:1})}>Use</button>}
           {canEquip(i) && <button onClick={()=>act('equip_inventory_item',{item_code:i.item_code})}>Equip</button>}
           {i.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:i.item_code})}>Upgrade</button>}
-          {i.salvage_preview && <button onClick={()=>confirm(`Salvage ${i.name}?`) && act('salvage_inventory_item',{item_code:i.item_code,qty:1})}>Salvage</button>}
+          {i.salvage_preview && <button onClick={()=>legacyDecision(`Salvage ${i.name}?`) && act('salvage_inventory_item',{item_code:i.item_code,qty:1})}>Salvage</button>}
         </div>
       </div>)}</div>
       <InventoryDetails item={selected || filteredItems[0]} act={act} sellItem={sellItem} listItem={listItem} />
@@ -729,7 +729,7 @@ function InventoryDetails({item, act, sellItem, listItem}) {
         {item.usable && <button disabled={(item.available_qty||0)<=0 || item.source==='cargo_hold'} onClick={()=>act('use_inventory_item',{item_code:item.item_code,qty:1})}>Use</button>}
         {item.equippable && <button disabled={(item.available_qty||0)<=0 || item.source!=='inventory'} onClick={()=>act('equip_inventory_item',{item_code:item.item_code})}>Equip</button>}
         {item.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:item.item_code})}>Upgrade Tier</button>}
-        {item.salvage_preview && <button onClick={()=>confirm(`Salvage ${item.name}?`) && act('salvage_inventory_item',{item_code:item.item_code,qty:1})}>Salvage</button>}
+        {item.salvage_preview && <button onClick={()=>legacyDecision(`Salvage ${item.name}?`) && act('salvage_inventory_item',{item_code:item.item_code,qty:1})}>Salvage</button>}
       </div>
     </div>
   </Panel>
@@ -2304,3 +2304,4 @@ function opIcon(type) { const k=String(type||'').toLowerCase(); if(k.includes('m
 function factorPct(v) { if (v===undefined || v===null) return '—'; const n = Number(v); if (!Number.isFinite(n)) return '—'; return `${Math.round(n*100)}%`; }
 
 createRoot(document.getElementById('root')).render(<App/>);
+

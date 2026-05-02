@@ -1202,7 +1202,7 @@ function SystemMap({state,act,clock,mapMode,onMapModeChange,onViewGalaxy}) {
         onScanSite={(site)=>act('scan_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onInvestigate={(site)=>act('investigate_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onEnterPirateStation={(station)=>act('enter_pirate_station',{station_id:station.stationId || station.id})}
-        onPlaceBase={(pos)=>act('place_player_base',{...pos,map_type:'system',name:prompt('Base name','Private Base') || 'Private Base'})}
+        onPlaceBase={(pos)=>act('place_player_base',{...pos,map_type:'system',name:legacyTextInput('Base name','Private Base') || 'Private Base'})}
         onDockBase={(base)=>act('dock_player_base',{base_id:base.baseId || base.id})}
         onMissionTravel={(node,mission)=>act('start_planet_mission_travel',{planet_id:node.id,mission_key:mission.key})}
         onPilotTrade={(p)=>act('trade_invite',{playerId:p.playerId})}
@@ -1287,23 +1287,23 @@ function ServerCalendar({state,act,clock,setPage}) {
   const eventTypes = ['alien_raid','wormhole_control','convoy_breakthrough','mining_surge','derelict_armada','warfront_surge'];
 
   const scan = () => {
-    const x = Number(prompt('Scan X percent', '50')) || 50;
-    const y = Number(prompt('Scan Y percent', '50')) || 50;
+    const x = Number(legacyTextInput('Scan X percent', '50')) || 50;
+    const y = Number(legacyTextInput('Scan Y percent', '50')) || 50;
     act('scan_area', {map_type:'system', x_pct:x, y_pct:y});
   };
   const contribute = () => {
-    const item_code = prompt('Material/item code to contribute', 'scrap') || 'scrap';
-    const qty = Number(prompt('Quantity', '10')) || 10;
+    const item_code = legacyTextInput('Material/item code to contribute', 'scrap') || 'scrap';
+    const qty = Number(legacyTextInput('Quantity', '10')) || 10;
     act('contribute_war_supply', {item_code, qty});
   };
   const createBounty = () => {
-    const target_player_id = Number(prompt('Target player ID', '2')) || 0;
-    const reward = Number(prompt('Reward credits', '10000')) || 10000;
+    const target_player_id = Number(legacyTextInput('Target player ID', '2')) || 0;
+    const reward = Number(legacyTextInput('Reward credits', '10000')) || 10000;
     if (target_player_id) act('create_player_bounty', {target_player_id, reward});
   };
   const refine = () => {
-    const input_code = prompt('Raw ore/material code', 'ore') || 'ore';
-    const qty = Number(prompt('Quantity', '10')) || 10;
+    const input_code = legacyTextInput('Raw ore/material code', 'ore') || 'ore';
+    const qty = Number(legacyTextInput('Quantity', '10')) || 10;
     act('start_refinery_job', {input_code, qty});
   };
 
@@ -1471,15 +1471,15 @@ function Market({state,act}) {
   };
   const listItem = (item, defaultQty=1) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(legacyTextInput(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
     const base = Number(item.base_value || item.avg_cost || 100);
-    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const unitPrice = Math.max(1, Number(legacyTextInput('Unit price', String(base))) || base);
     const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice };
     act('create_player_listing', payload);
   };
   const storeItem = (item, defaultQty=1) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to store at current planet for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(legacyTextInput(`Quantity to store at current planet for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
     const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty };
     act('store_item', payload);
   };
@@ -1490,7 +1490,7 @@ function Market({state,act}) {
   };
   const withdrawStorage = (item, defaultQty=1) => {
     if (!item.can_modify) return;
-    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(prompt(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)))) || 1));
+    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(legacyTextInput(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)))) || 1));
     act('withdraw_storage_item', {storage_id:item.id, qty});
   };
 
@@ -1742,9 +1742,9 @@ function Inventory({state,act}) {
   };
   const listItem = (item) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, '1')) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(legacyTextInput(`Quantity to list for ${item.name}`, '1')) || 1));
     const base = Number(item.market_sell_estimate?.unit || item.base_value || item.avg_cost || 100);
-    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const unitPrice = Math.max(1, Number(legacyTextInput('Unit price', String(base))) || base);
     act('create_player_listing', { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice });
   };
   const canUse = (i) => i.usable && (i.available_qty || 0) > 0 && i.source !== 'cargo_hold';
@@ -1788,7 +1788,7 @@ function Inventory({state,act}) {
           {canUse(i) && <button onClick={()=>act('use_inventory_item',{item_code:i.item_code,qty:1})}>Use</button>}
           {canEquip(i) && <button onClick={()=>act('equip_inventory_item',{item_code:i.item_code})}>Equip</button>}
           {i.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:i.item_code})}>Upgrade</button>}
-          {i.salvage_preview && <button onClick={()=>confirm(`Salvage ${i.name}?`) && act('salvage_inventory_item',{item_code:i.item_code,qty:1})}>Salvage</button>}
+          {i.salvage_preview && <button onClick={()=>legacyDecision(`Salvage ${i.name}?`) && act('salvage_inventory_item',{item_code:i.item_code,qty:1})}>Salvage</button>}
         </div>
       </div>)}</div>
       <InventoryDetails item={selected || filteredItems[0]} act={act} sellItem={sellItem} listItem={listItem} />
@@ -1822,7 +1822,7 @@ function InventoryDetails({item, act, sellItem, listItem}) {
         {item.usable && <button disabled={(item.available_qty||0)<=0 || item.source==='cargo_hold'} onClick={()=>act('use_inventory_item',{item_code:item.item_code,qty:1})}>Use</button>}
         {item.equippable && <button disabled={(item.available_qty||0)<=0 || item.source!=='inventory'} onClick={()=>act('equip_inventory_item',{item_code:item.item_code})}>Equip</button>}
         {item.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:item.item_code})}>Upgrade Tier</button>}
-        {item.salvage_preview && <button onClick={()=>confirm(`Salvage ${item.name}?`) && act('salvage_inventory_item',{item_code:item.item_code,qty:1})}>Salvage</button>}
+        {item.salvage_preview && <button onClick={()=>legacyDecision(`Salvage ${item.name}?`) && act('salvage_inventory_item',{item_code:item.item_code,qty:1})}>Salvage</button>}
       </div>
     </div>
   </Panel>
@@ -2331,7 +2331,7 @@ function Properties({state,act}) {
     {tab === 'base' && <>
       <div className="cards3">
         <Panel title="Private Base Status" help="Build from a blank point on the System Map. Clearance requires two icon-spaces from planets, stations, nodes, pirate bases, and other bases.">
-          {base ? <div className="baseStatusCard"><b>{base.name}</b><span>{base.galaxy_name} • anchored near {base.anchor_planet_name || 'open space'} • {Number(base.x_pct).toFixed(1)} / {Number(base.y_pct).toFixed(1)}</span><button onClick={()=>act('collect_base_output')}>Collect Passive Output</button></div> : <div className="baseStatusCard"><b>No Base Built</b><span>Open the System Map, click an empty area, then use Build Base Here. Placement cost: {fmt(baseState.placement?.cost || 2500000)} credits.</span><button onClick={()=>act('place_player_base',{x_pct:50,y_pct:50,map_type:'system',name:prompt('Base name','Private Base') || 'Private Base'})}>Emergency Place Near Center</button></div>}
+          {base ? <div className="baseStatusCard"><b>{base.name}</b><span>{base.galaxy_name} • anchored near {base.anchor_planet_name || 'open space'} • {Number(base.x_pct).toFixed(1)} / {Number(base.y_pct).toFixed(1)}</span><button onClick={()=>act('collect_base_output')}>Collect Passive Output</button></div> : <div className="baseStatusCard"><b>No Base Built</b><span>Open the System Map, click an empty area, then use Build Base Here. Placement cost: {fmt(baseState.placement?.cost || 2500000)} credits.</span><button onClick={()=>act('place_player_base',{x_pct:50,y_pct:50,map_type:'system',name:legacyTextInput('Base name','Private Base') || 'Private Base'})}>Emergency Place Near Center</button></div>}
         </Panel>
         <Panel title="Long-Term Completion"><Stats pairs={{Research:`${fmt(baseState.summary?.research_complete || 0)} / ${fmt(baseState.summary?.research_total || 0)}`, Buildings:`${fmt(baseState.summary?.complete_buildings || 0)} / ${fmt(baseState.summary?.total_buildings || 0)}`, Clearance:`${baseState.placement?.clearance_spaces || 2} spaces`, Rule:'One base only'}} /></Panel>
         <Panel title="Active Work">{activeResearch ? <div className="itemLine"><b>{activeResearch.name}</b><span>Researching • {clockTimeLeft(activeResearch.complete_at)}</span></div> : <p className="muted">No active research.</p>}{activeBuilding ? <div className="itemLine"><b>{activeBuilding.name}</b><span>Building • {clockTimeLeft(activeBuilding.complete_at)}</span></div> : <p className="muted">No active construction.</p>}</Panel>
@@ -3212,7 +3212,7 @@ function MissionScreen({state,act,clock}) {
       act('return_to_map_after_mission', {mission_id:mission.id});
       return;
     }
-    if (window.confirm('You will expedite returning to your ship and leaving your rewards behind, continue?')) {
+    if (legacyDecision('You will expedite returning to your ship and leaving your rewards behind, continue?')) {
       act('cancel_planet_mission', {});
     }
   };
@@ -4340,3 +4340,4 @@ function opIcon(type) { const k=String(type||'').toLowerCase(); if(k.includes('m
 function factorPct(v) { if (v===undefined || v===null) return '—'; const n = Number(v); if (!Number.isFinite(n)) return '—'; return `${Math.round(n*100)}%`; }
 
 createRoot(document.getElementById('root')).render(<App/>);
+

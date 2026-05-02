@@ -6,15 +6,16 @@ import {
   Hammer, Brain, Building2, Mail, Trophy, Settings, Shield, Zap, Info, Plus,
   ShipWheel, HeartPulse, AlertTriangle, Coins, Fuel, Package, Clock, Swords,
   UserRound, MessageCircle, Send, Save, CalendarDays, Minus, RotateCcw,
-  LocateFixed, Radar, Layers
+  LocateFixed, Radar, Layers, MoreHorizontal, X
 } from 'lucide-react';
 import './styles.css';
 import { resolveAsset, imageFallbackFor, brandAssets, factionAssets } from './assets/gameAssets';
+import novaFrontiersCore from './assets/generated/landing/nova-frontiers-core.png';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || '';
 const uid = () => crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
-const SILENT_ACTION_TYPES = new Set(['advance_combat_battle']);
+const SILENT_ACTION_TYPES = new Set(['advance_combat_battle', 'auto_explore_battle_tick']);
 const NO_AUTO_STATE_REFRESH_ACTION_TYPES = new Set(['advance_combat_battle', 'combat_action']);
 const BACKGROUND_REFRESH_ACTION_TYPES = new Set([
   'go_here', 'travel', 'galaxy_travel', 'cancel_travel', 'cancel_cargo_operation',
@@ -22,9 +23,30 @@ const BACKGROUND_REFRESH_ACTION_TYPES = new Set([
   'intercept_traveler', 'resolve_intercept_now',
   'mine_ore_site', 'salvage_site',
   'enter_pirate_station', 'place_player_base', 'dock_player_base',
-  'start_planet_mission_travel'
+  'start_planet_mission_travel', 'auto_explore_battle_tick'
+]);
+const MAP_SLICE_REFRESH_ACTION_TYPES = new Set([
+  'go_here', 'travel', 'galaxy_travel', 'cancel_travel',
+  'scan_area', 'scan_object', 'scan_exploration_site', 'investigate_exploration_site',
+  'intercept_traveler', 'resolve_intercept_now',
+  'mine_ore_site', 'salvage_site',
+  'enter_pirate_station', 'place_player_base', 'dock_player_base',
+  'start_planet_mission_travel', 'auto_explore_battle_tick'
+]);
+const CLIENT_VISUAL_TRAVEL_ACTION_TYPES = new Set(['go_here', 'travel', 'galaxy_travel', 'intercept_traveler']);
+const SERVER_VALIDATED_EVENT_ACTION_TYPES = new Set([
+  'mine_ore_site', 'salvage_site', 'scan_exploration_site', 'investigate_exploration_site',
+  'resolve_intercept_now'
 ]);
 const AUTO_BATTLE_INACTIVITY_MS = 60 * 1000;
+const AUTO_EXPLORE_TICK_MS = 2500;
+const AUTO_EXPLORE_MODE_OPTIONS = [
+  {key:'pirate', label:'Pirate AFK', activeLabel:'Stop Pirate AFK', statusActive:'Auto Pirate AFK active', statusPaused:'Auto Pirate AFK paused', start:'Starting pirate-only patrol.', idle:'Pirate-only patrol idle.', target:'pirates only', tooltip:'Auto pirate AFK patrol'},
+  {key:'salvage', label:'Salvage AFK', activeLabel:'Stop Salvage AFK', statusActive:'Auto Salvage AFK active', statusPaused:'Auto Salvage AFK paused', start:'Starting salvage AFK sweep.', idle:'Salvage AFK idle.', target:'wrecks', tooltip:'Auto salvage AFK'},
+  {key:'anomaly', label:'Anomaly AFK', activeLabel:'Stop Anomaly AFK', statusActive:'Auto Anomaly AFK active', statusPaused:'Auto Anomaly AFK paused', start:'Starting anomaly AFK sweep.', idle:'Anomaly AFK idle.', target:'anomalies', tooltip:'Auto anomaly AFK'},
+  {key:'mining', label:'Mining AFK', activeLabel:'Stop Mining AFK', statusActive:'Auto Mining AFK active', statusPaused:'Auto Mining AFK paused', start:'Starting mining AFK sweep.', idle:'Mining AFK idle.', target:'ore sites', tooltip:'Auto mining AFK'}
+];
+const AUTO_EXPLORE_MODE_BY_KEY = Object.fromEntries(AUTO_EXPLORE_MODE_OPTIONS.map(mode => [mode.key, mode]));
 
 function initialAuthToken() {
   const saved = sessionStorage.getItem('nova_token') || localStorage.getItem('nova_token') || '';
@@ -41,6 +63,24 @@ function storeAuthToken(value) {
 function clearAuthToken() {
   sessionStorage.removeItem('nova_token');
   localStorage.removeItem('nova_token');
+}
+
+function storeGoogleEmailHint(value) {
+  const email = String(value || '').trim();
+  if (email) sessionStorage.setItem('nova_google_email_hint', email);
+  else sessionStorage.removeItem('nova_google_email_hint');
+}
+
+function clearGoogleClientState() {
+  try {
+    const hint = sessionStorage.getItem('nova_google_email_hint') || '';
+    window.google?.accounts?.id?.disableAutoSelect?.();
+    window.google?.accounts?.id?.cancel?.();
+    if (hint && window.google?.accounts?.id?.revoke) {
+      window.google.accounts.id.revoke(hint, () => {});
+    }
+  } catch {}
+  sessionStorage.removeItem('nova_google_email_hint');
 }
 
 function factionCssColor(value) {
@@ -166,6 +206,11 @@ function buildOptimisticTravelState(prevState, actionType, payload = {}) {
     if (!node) return null;
     dest = {x_pct:clampPct(node.x_pct), y_pct:clampPct(node.y_pct)};
     destinationLabel = node.name || p.label || 'Galaxy';
+  } else if (type === 'intercept_traveler') {
+    mapType = String(p.map_type || p.mapType || '').toLowerCase() === 'galaxy' ? 'galaxy' : 'system';
+    mode = 'intercept';
+    dest = {x_pct:clampPct(p.x_pct ?? p.x ?? p.target_x_pct), y_pct:clampPct(p.y_pct ?? p.y ?? p.target_y_pct)};
+    destinationLabel = p.label || p.name || p.ship_name || 'Intercept target';
   } else {
     return null;
   }
@@ -175,6 +220,7 @@ function buildOptimisticTravelState(prevState, actionType, payload = {}) {
   const seconds = Math.max(2, Math.ceil((distancePct(origin, dest) * 5.8) / speed));
   const startedAt = new Date();
   const arrivalAt = new Date(startedAt.getTime() + seconds * 1000);
+  const visualId = `client-visual:${type}:${startedAt.getTime()}:${Math.random().toString(36).slice(2)}`;
   return {
     ...prevState,
     travel_state: {
@@ -183,6 +229,9 @@ function buildOptimisticTravelState(prevState, actionType, payload = {}) {
       docked: false,
       open_space: false,
       optimistic: true,
+      client_visual: true,
+      client_visual_id: visualId,
+      client_action_type: type,
       mode,
       map_type: mapType,
       started_at: startedAt.toISOString(),
@@ -197,6 +246,19 @@ function buildOptimisticTravelState(prevState, actionType, payload = {}) {
       origin_galaxy_id: prevState?.galaxy_map?.current_galaxy_id ?? prevState?.location?.galaxy_id,
       destination_planet_id: p.planet_id ?? prevState?.travel_state?.destination_planet_id,
       destination_galaxy_id: p.galaxy_id ?? prevState?.travel_state?.destination_galaxy_id,
+      intercept_target_ref: p.target_ref ?? prevState?.travel_state?.intercept_target_ref,
+      intercept_target_name: mode === 'intercept' ? destinationLabel : prevState?.travel_state?.intercept_target_name,
+    }
+  };
+}
+
+function applyClientVisualTravelState(baseState, visualTravel) {
+  if (!baseState || !visualTravel?.active || !visualTravel?.client_visual) return baseState;
+  return {
+    ...baseState,
+    travel_state: {
+      ...(baseState.travel_state || {}),
+      ...visualTravel,
     }
   };
 }
@@ -261,6 +323,253 @@ const nav = [
   ['Medical', HeartPulse], ['Messages', Mail], ['Leaderboards', Trophy], ['Admin', Settings]
 ];
 
+const NAV_GROUPS = [
+  { label:'Command', pages:['Dashboard','Map','Calendar','Messages'] },
+  { label:'Pilot', pages:['Profile','Chat','Party','Social','Medical'] },
+  { label:'Shipyard', pages:['Ships & Hangar','Inventory','Market','Crafting','Industry'] },
+  { label:'Frontier', pages:['Contracts','Jobs','Skills','Properties','Leaderboards'] },
+  { label:'War Room', pages:['Fight','Guild','Faction War','Warfare','Planet Control'] },
+  { label:'Control', pages:['Admin'] },
+];
+
+const PAGE_INTEL = {
+  Dashboard: { eyebrow:'Live Command', title:'Bridge Overview', deck:'The full pulse of your pilot, ship, market, route, and local sector pressure.', accent:'#6cf6ff' },
+  Profile: { eyebrow:'Pilot Identity', title:'Public Signal', deck:'Shape how other captains see you across chat, social, achievements, and the frontier record.', accent:'#b174ff' },
+  Chat: { eyebrow:'Comms', title:'Open Channel', deck:'Live station noise, pilot chatter, and social signals from the edge.', accent:'#7df5a8' },
+  Party: { eyebrow:'Squad', title:'Crew Coordination', deck:'Invite allies, form runs, and keep your group ready for contracts or combat.', accent:'#ffbf5a' },
+  Social: { eyebrow:'Network', title:'Pilot Contacts', deck:'Friends, public profiles, trade invites, and reputation ties in one place.', accent:'#8cfaff' },
+  Map: { eyebrow:'Navigation', title:'Living Star Map', deck:'Scan, route, intercept, mine, salvage, and read the pressure systems before committing.', accent:'#58e6ff' },
+  Calendar: { eyebrow:'Operations', title:'Server Calendar', deck:'Events, anomalies, raids, wormholes, and timed opportunities shaping the galaxy.', accent:'#b174ff' },
+  'Pirate Station': { eyebrow:'Black Dock', title:'Pirate Station', deck:'A dangerous private dock for illicit trade, heat, recovery, and risk.', accent:'#ff4d9d' },
+  Market: { eyebrow:'Economy', title:'Trade Floor', deck:'Legal and illegal markets, heat, custody risk, local pressure, and margins.', accent:'#57ffa3' },
+  Inventory: { eyebrow:'Cargo', title:'Hold Manifest', deck:'Every item, module, rarity, recipe hook, value signal, and risky asset you own.', accent:'#ffc247' },
+  'Ships & Hangar': { eyebrow:'Shipyard', title:'Hangar Bay', deck:'Choose a hull, fit modules, repair, insure, and understand what your ship is built to do.', accent:'#6cf6ff' },
+  Fight: { eyebrow:'Combat', title:'Battle Desk', deck:'Targets, recent outcomes, action energy, and battlefield readiness.', accent:'#ff744d' },
+  Guild: { eyebrow:'Guild', title:'Faction Table', deck:'Organize treasury, territory, defense, influence, and shared power.', accent:'#a9e86f' },
+  'Faction War': { eyebrow:'Warfront', title:'Faction War', deck:'Conflict theaters, active pressure, contested space, and the faction map.', accent:'#ff744d' },
+  Warfare: { eyebrow:'Strategy', title:'Warfare Console', deck:'Threat posture, defenses, deployments, and galaxy-scale pressure.', accent:'#ff9270' },
+  'Planet Control': { eyebrow:'Territory', title:'Planet Control', deck:'Influence, taxes, conflict, defense, economy, and control actions.', accent:'#58e6ff' },
+  Contracts: { eyebrow:'Work Board', title:'Contracts', deck:'Credit routes, missions, and local opportunities with operational context.', accent:'#ffbf5a' },
+  Jobs: { eyebrow:'Career', title:'Job Terminal', deck:'Active career identity, bonuses, tasks, and next-run decisions.', accent:'#7df5a8' },
+  Skills: { eyebrow:'Progression', title:'Skill Matrix', deck:'Spend points, compare trees, and sharpen the way your pilot bends the game.', accent:'#b174ff' },
+  Industry: { eyebrow:'Production', title:'Industrial Yard', deck:'Refining, base economy, materials, and infrastructure momentum.', accent:'#cfd7df' },
+  Crafting: { eyebrow:'Fabrication', title:'Craft Bench', deck:'Recipes, queue, missing materials, output previews, and upgrade paths.', accent:'#ffc247' },
+  Properties: { eyebrow:'Holdings', title:'Property Ledger', deck:'Bases, storage, ownership, and orbital claims across the frontier.', accent:'#a9e86f' },
+  Medical: { eyebrow:'Recovery', title:'Med Bay', deck:'Hospital timers, surgery options, and return-to-flight readiness.', accent:'#ff92ae' },
+  Messages: { eyebrow:'Inbox', title:'Signal Inbox', deck:'Actionable messages, alerts, social events, and server dispatches.', accent:'#8cfaff' },
+  Leaderboards: { eyebrow:'Rankings', title:'Frontier Legends', deck:'Guild standings, planetary control, and the players shaping the server story.', accent:'#ffc247' },
+  Admin: { eyebrow:'Control Room', title:'Admin Console', deck:'World tuning, security, economy, spawns, missions, and live operation tools.', accent:'#ff744d' },
+};
+
+const STATE_SLICE_ENDPOINTS = {
+  profile: '/api/state/profile',
+  chat: '/api/state/chat',
+  map: '/api/map/snapshot',
+  party: '/api/state/party',
+  social: '/api/state/social',
+  public_profiles: '/api/profile/public-profiles',
+};
+
+const DEFERRED_STATE_KEYS = ['achievements', 'avatar_options', 'chat_messages', 'galaxy_map', 'map_operation', 'map_snapshot', 'party', 'planet_missions', 'public_profiles', 'social', 'system_map', 'player_core', 'active_battle'];
+
+function mergeDeferredState(prev, next) {
+  if (!prev || !next || typeof next !== 'object') return next;
+  const merged = {...next};
+  DEFERRED_STATE_KEYS.forEach(key => {
+    if (merged[key] === undefined && prev[key] !== undefined) merged[key] = prev[key];
+  });
+  if (prev.profile && next.profile) merged.profile = {...prev.profile, ...next.profile};
+  return merged;
+}
+
+function mergeMapPingState(prev, data) {
+  if (!prev || !data || typeof data !== 'object') return prev;
+  const next = {...prev};
+  if (data.player_core !== undefined) next.player_core = data.player_core;
+  if (data.location !== undefined) next.location = {...(next.location || {}), ...(data.location || {})};
+  if (data.active_battle !== undefined) next.active_battle = data.active_battle;
+  if (data.travel_state !== undefined) next.travel_state = data.travel_state;
+  if (data.map_operation !== undefined) next.map_operation = data.map_operation;
+  if (data.planet_missions !== undefined) next.planet_missions = data.planet_missions;
+  for (const mapKey of ['system_map', 'galaxy_map']) {
+    const delta = data.map_delta?.[mapKey];
+    if (delta && typeof delta === 'object') next[mapKey] = {...(next[mapKey] || {}), ...delta};
+    else if (data[mapKey] && typeof data[mapKey] === 'object') next[mapKey] = data[mapKey];
+  }
+  if (data.map_snapshot) next.map_snapshot = {...(next.map_snapshot || {}), ...data.map_snapshot};
+  if (data.server_time) next.server_time = data.server_time;
+  return next;
+}
+
+function mapSnapshotObjectRevision(snapshot) {
+  return snapshot?.version || snapshot?.objectRevision || snapshot?.object_revision || snapshot?.revision || '';
+}
+
+function mapSnapshotGroupHashes(snapshot) {
+  return snapshot?.groupHashes || snapshot?.group_hashes || {};
+}
+
+function mapPollingCadenceMs(state, pageName, hasActiveBattle, tabHidden) {
+  const polling = state?.map_snapshot?.polling || {};
+  const n = (value, fallback) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+  if (tabHidden) return n(polling.backgroundMs, 30000);
+  if (hasActiveBattle) return Math.max(750, Math.min(1500, n(polling.combatMs, 1000)));
+  if (pageName === 'Map') return Math.max(2500, Math.min(5000, n(polling.activeMapMs, 3500)));
+  return Math.max(8000, Math.min(15000, n(polling.dockedMs, 12000)));
+}
+
+function actionPayloadDedupeKey(type, payload) {
+  try {
+    return `${type}:${JSON.stringify(payload || {})}`;
+  } catch {
+    return `${type}:pending`;
+  }
+}
+
+function sliceNamesForPage(pageName) {
+  if (pageName === 'Profile') return ['profile'];
+  if (pageName === 'Chat') return ['chat', 'public_profiles'];
+  if (pageName === 'Party') return ['party', 'public_profiles'];
+  if (pageName === 'Social') return ['social'];
+  if (pageName === 'Map') return ['map', 'party', 'public_profiles'];
+  return [];
+}
+
+function sliceNamesForAction(type) {
+  if (['update_profile', 'set_achievement_badge'].includes(type)) return ['profile'];
+  if (type === 'send_chat_message') return ['chat', 'public_profiles'];
+  if (String(type || '').startsWith('party_')) return ['party', 'public_profiles'];
+  if (String(type || '').startsWith('social_')) return ['social', 'public_profiles'];
+  if (String(type || '').startsWith('trade_')) return ['social'];
+  return [];
+}
+
+const MODAL_FOCUSABLE_SELECTOR = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]:not([tabindex="-1"])'
+].join(',');
+
+function NovaDialogModal({dialog, onCancel, onConfirm, onInputChange}) {
+  const shellRef = useRef(null);
+  const inputRef = useRef(null);
+  const lastActiveRef = useRef(null);
+  const behaviorRef = useRef({allowEscape:false, canConfirm:false, onCancel, onConfirm});
+  const kind = dialog?.kind || 'info';
+  const dangerous = kind === 'danger';
+  const hasInput = kind === 'prompt' || !!dialog?.confirmationPhrase;
+  const typedConfirmation = String(dialog?.confirmationValue || '').trim();
+  const expectedConfirmation = String(dialog?.confirmationPhrase || '').trim();
+  const confirmationMatches = !expectedConfirmation || typedConfirmation === expectedConfirmation;
+  const canConfirm = !dialog?.loading && confirmationMatches;
+  const allowEscape = dialog?.allowEscape !== false && !dialog?.loading;
+  const title = dialog?.title || (dangerous ? 'Confirm Critical Action' : kind === 'prompt' ? 'Input Required' : kind === 'confirm' ? 'Confirm Action' : 'Transmission');
+  const confirmLabel = dialog?.confirmLabel || (dangerous ? 'Confirm' : kind === 'prompt' ? 'Submit' : kind === 'confirm' ? 'Confirm' : 'Acknowledge');
+  const cancelLabel = dialog?.cancelLabel || 'Cancel';
+
+  useEffect(() => {
+    behaviorRef.current = {allowEscape, canConfirm, onCancel, onConfirm};
+  }, [allowEscape, canConfirm, onCancel, onConfirm]);
+
+  useEffect(() => {
+    if (!dialog) return undefined;
+    lastActiveRef.current = document.activeElement;
+    const focusTarget = inputRef.current || shellRef.current?.querySelector(MODAL_FOCUSABLE_SELECTOR) || shellRef.current;
+    window.setTimeout(() => focusTarget?.focus?.(), 0);
+    const onKeyDown = (event) => {
+      const shell = shellRef.current;
+      if (!shell) return;
+      const behavior = behaviorRef.current;
+      if (event.key === 'Escape' && behavior.allowEscape) {
+        event.preventDefault();
+        behavior.onCancel();
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey && behavior.canConfirm) {
+        const tag = String(event.target?.tagName || '').toLowerCase();
+        if (tag !== 'textarea') {
+          event.preventDefault();
+          behavior.onConfirm();
+          return;
+        }
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(shell.querySelectorAll(MODAL_FOCUSABLE_SELECTOR))
+        .filter(el => !el.hasAttribute('disabled') && el.offsetParent !== null);
+      if (!focusable.length) {
+        event.preventDefault();
+        shell.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      lastActiveRef.current?.focus?.();
+    };
+  }, [dialog?.id]);
+
+  if (!dialog) return null;
+  return <div
+    className={`novaModalOverlay ${dangerous ? 'danger' : kind}`}
+    role="presentation"
+    onMouseDown={(event) => {
+      if (event.target === event.currentTarget && allowEscape && !dangerous) onCancel();
+    }}
+  >
+    <section
+      className={`novaModalShell ${dangerous ? 'danger' : kind}`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="nova-modal-title"
+      aria-describedby="nova-modal-message"
+      ref={shellRef}
+      tabIndex={-1}
+      onMouseDown={event => event.stopPropagation()}
+    >
+      <div className="novaModalHeader">
+        <span className="novaModalIcon" aria-hidden="true">{dangerous ? <AlertTriangle size={20}/> : <Info size={20}/>}</span>
+        <div>
+          <h2 id="nova-modal-title">{title}</h2>
+          {dialog?.eyebrow && <small>{dialog.eyebrow}</small>}
+        </div>
+        {allowEscape && <button type="button" className="novaModalClose" onClick={onCancel} aria-label="Close"><X size={18}/></button>}
+      </div>
+      <p id="nova-modal-message" className="novaModalMessage">{dialog.message}</p>
+      {hasInput && <label className="novaModalField">
+        <span>{dialog.inputLabel || (expectedConfirmation ? `Type ${expectedConfirmation} to confirm` : 'Response')}</span>
+        <input
+          ref={inputRef}
+          value={expectedConfirmation ? (dialog.confirmationValue ?? '') : (dialog.inputValue ?? '')}
+          placeholder={dialog.placeholder || dialog.defaultValue || expectedConfirmation}
+          disabled={dialog.loading}
+          onChange={event => onInputChange(event.target.value)}
+        />
+      </label>}
+      {expectedConfirmation && !confirmationMatches && <div className="novaModalHint">Confirmation phrase must match exactly.</div>}
+      <div className="novaModalActions">
+        {kind !== 'info' && <button type="button" className="novaModalSecondary" disabled={dialog.loading} onClick={onCancel}>{cancelLabel}</button>}
+        <button type="button" className="novaModalPrimary" disabled={!canConfirm} onClick={onConfirm}>{dialog.loading ? (dialog.loadingLabel || 'Working...') : confirmLabel}</button>
+      </div>
+    </section>
+  </div>;
+}
+
 function App() {
   const [token, setToken] = useState(initialAuthToken);
   const [state, setState] = useState(null);
@@ -273,15 +582,104 @@ function App() {
   const [tradeModalId, setTradeModalId] = useState(null);
   const [toasts, setToasts] = useState([]);
   const [mapFocus, setMapFocus] = useState(null);
+  const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
+  const [clientVisualTravel, setClientVisualTravel] = useState(null);
+  const [dialog, setDialog] = useState(null);
+  const [tabHidden, setTabHidden] = useState(() => typeof document !== 'undefined' ? document.hidden : false);
+  const [autoExploreMode, setAutoExploreMode] = useState(() => {
+    const saved = localStorage.getItem('nova_auto_explore_mode') || '';
+    if (AUTO_EXPLORE_MODE_BY_KEY[saved]) return saved;
+    return localStorage.getItem('nova_auto_explore_pirates') === '1' ? 'pirate' : '';
+  });
+  const [autoExploreLastMode, setAutoExploreLastMode] = useState(() => localStorage.getItem('nova_auto_explore_last_mode') || 'pirate');
+  const [autoExploreStatus, setAutoExploreStatus] = useState(() => localStorage.getItem('nova_auto_explore_status') || '');
   const seenBattleRef = useRef(null);
   const toastSeenRef = useRef(new Set());
   const friendOnlineRef = useRef(new Map());
   const actionInFlightRef = useRef(false);
   const actionInFlightCountRef = useRef(0);
   const actionDedupeRef = useRef(new Set());
+  const autoExploreBusyRef = useRef(false);
+  const actRef = useRef(null);
   const loadInFlightRef = useRef(null);
+  const sliceInFlightRef = useRef(new Map());
+  const sliceLoadedAtRef = useRef(new Map());
   const loadSeqRef = useRef(0);
   const battleAlertInFlightRef = useRef(false);
+  const clientVisualTravelRef = useRef(null);
+  const stateRef = useRef(null);
+  const dialogResolveRef = useRef(null);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  const setClientVisualTravelState = useCallback((travel) => {
+    clientVisualTravelRef.current = travel || null;
+    setClientVisualTravel(travel || null);
+  }, []);
+
+  const closeDialog = useCallback((value) => {
+    const resolve = dialogResolveRef.current;
+    dialogResolveRef.current = null;
+    setDialog(null);
+    resolve?.(value);
+  }, []);
+
+  const openDialog = useCallback((config) => new Promise(resolve => {
+    dialogResolveRef.current = resolve;
+    setDialog({
+      id: uid(),
+      kind: 'info',
+      message: '',
+      loading: false,
+      ...config,
+      inputValue: config?.defaultValue ?? config?.inputValue ?? '',
+      confirmationValue: ''
+    });
+  }), []);
+
+  const novaDialog = useMemo(() => ({
+    info(message, options = {}) {
+      return openDialog({kind:'info', title:'Transmission', confirmLabel:'Acknowledge', ...options, message}).then(() => undefined);
+    },
+    decision(message, options = {}) {
+      return openDialog({kind:'confirm', title:'Confirm Action', confirmLabel:'Confirm', ...options, message}).then(Boolean);
+    },
+    textInput(message, defaultValue = '', options = {}) {
+      return openDialog({kind:'prompt', title:'Input Required', confirmLabel:'Submit', ...options, message, defaultValue}).then(value => value);
+    },
+    critical(message, options = {}) {
+      return openDialog({
+        kind:'danger',
+        title:'Confirm Critical Action',
+        confirmLabel:'Confirm',
+        confirmationPhrase: options.confirmationPhrase || 'DELETE',
+        allowEscape: options.allowEscape ?? true,
+        ...options,
+        message
+      }).then(Boolean);
+    }
+  }), [openDialog]);
+
+  const clearClientVisualTravel = useCallback((visualId = '') => {
+    if (visualId && clientVisualTravelRef.current?.client_visual_id !== visualId) return;
+    setClientVisualTravelState(null);
+  }, [setClientVisualTravelState]);
+
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('nova:auth-changed', {
+      detail: { authenticated: !!token }
+    }));
+    if (!token) setState(null);
+  }, [token]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+    const onVisibilityChange = () => setTabHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
 
   async function completeAuth(res) {
     if (!res.ok) {
@@ -295,6 +693,7 @@ function App() {
     }
     const data = await res.json();
     storeAuthToken(data.token);
+    storeGoogleEmailHint(data.user?.google_email || '');
     setToken(data.token);
     return data;
   }
@@ -308,7 +707,58 @@ function App() {
   }
 
   async function googleLogin(credential, payload={}) {
-    return completeAuth(await fetch(`${API}/api/auth/google`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({credential, ...payload}) }));
+    return completeAuth(await fetch(`${API}/api/auth/google/login`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({credential, ...payload}) }));
+  }
+
+  async function googleRegisterStart(credential) {
+    const res = await fetch(`${API}/api/auth/google/register-start`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({credential}) });
+    if (!res.ok) {
+      const text = await res.text();
+      let message = text || 'Google registration failed';
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed.detail || message;
+      } catch {}
+      throw new Error(message);
+    }
+    const data = await res.json();
+    storeGoogleEmailHint(data.email || '');
+    return data;
+  }
+
+  async function clearGoogleRegistration(googleRegistrationToken='') {
+    clearGoogleClientState();
+    await fetch(`${API}/api/auth/google/clear`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({google_registration_token:googleRegistrationToken}) }).catch(()=>null);
+  }
+
+  async function logout() {
+    const currentToken = sessionStorage.getItem('nova_token') || token || '';
+    clearAuthToken();
+    clearGoogleClientState();
+    setToken('');
+    setState(null);
+    setBootError('');
+    await fetch(`${API}/api/auth/logout`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json', ...(currentToken ? {Authorization:`Bearer ${currentToken}`} : {})},
+      body:JSON.stringify({})
+    }).catch(()=>null);
+  }
+
+  async function deleteProfile(confirmation) {
+    const currentToken = sessionStorage.getItem('nova_token') || token || '';
+    const res = await fetch(`${API}/api/profile/delete`, { method:'DELETE', headers:{'Content-Type':'application/json', Authorization:`Bearer ${currentToken}`}, body:JSON.stringify({confirmation}) });
+    if (!res.ok) {
+      const text = await res.text();
+      let message = text || 'Profile deletion failed';
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed.detail || message;
+      } catch {}
+      throw new Error(message);
+    }
+    await logout();
+    return res.json().catch(()=>({ok:true}));
   }
 
   function pushToast(toast) {
@@ -352,13 +802,17 @@ function App() {
     if (skipDuringAction && actionInFlightRef.current) return null;
     if (!force && loadInFlightRef.current) return loadInFlightRef.current;
     const loadSeq = ++loadSeqRef.current;
-    const stateUrl = force ? `${API}/api/state?refresh=${encodeURIComponent(uid())}` : `${API}/api/state`;
+    const params = new URLSearchParams();
+    if (force) params.set('refresh', uid());
+    if (options.maps === false) params.set('maps', '0');
+    const stateUrl = `${API}/api/state${params.toString() ? `?${params.toString()}` : ''}`;
     const run = (async () => {
       try {
         const res = await fetch(stateUrl, { headers:{Authorization:`Bearer ${token}`} });
         if (!res.ok) {
           if (res.status === 401 || res.status === 403) {
             clearAuthToken();
+            clearGoogleClientState();
             setToken('');
             setState(null);
           }
@@ -367,7 +821,8 @@ function App() {
         const nextState = await res.json();
         if (nextState && typeof nextState === 'object') {
           setBootError('');
-          if (loadSeq === loadSeqRef.current) setState(nextState);
+          if (nextState.system_map || nextState.galaxy_map) sliceLoadedAtRef.current.set('map', Date.now());
+          if (loadSeq === loadSeqRef.current) setState(prev => mergeDeferredState(prev, nextState));
           return nextState;
         }
         throw new Error('State endpoint returned an empty response.');
@@ -386,21 +841,112 @@ function App() {
     return run;
   }
 
+  async function loadStateSlice(name, options = {}) {
+    if (!token || !state) return null;
+    const endpoint = STATE_SLICE_ENDPOINTS[name];
+    if (!endpoint) return null;
+    const force = !!options.force;
+    const ttlMs = Number(options.ttlMs ?? 30000);
+    const loadedAt = Number(sliceLoadedAtRef.current.get(name) || 0);
+    if (!force && loadedAt && Date.now() - loadedAt < ttlMs) return null;
+    if (!force && sliceInFlightRef.current.has(name)) return sliceInFlightRef.current.get(name);
+    const run = (async () => {
+      try {
+        const sep = endpoint.includes('?') ? '&' : '?';
+        const url = force && name === 'map' ? `${API}${endpoint}${sep}refresh=1` : `${API}${endpoint}`;
+        const res = await fetch(url, { headers:{Authorization:`Bearer ${token}`} });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || data.error || `Failed to load ${name}`);
+        sliceLoadedAtRef.current.set(name, Date.now());
+        setState(prev => prev ? mergeDeferredState(prev, {...prev, ...data}) : prev);
+        return data;
+      } catch (err) {
+        if (!options.silent) setLog(l => [`ERROR: ${err.message}`, ...l].slice(0, 8));
+        return null;
+      } finally {
+        if (sliceInFlightRef.current.get(name) === run) sliceInFlightRef.current.delete(name);
+      }
+    })();
+    sliceInFlightRef.current.set(name, run);
+    return run;
+  }
+
+  async function pingMapSlice(options = {}) {
+    const currentState = stateRef.current || state;
+    if (!token || !currentState) return null;
+    const ttlMs = Number(options.ttlMs ?? 0);
+    const loadedAt = Number(sliceLoadedAtRef.current.get('map') || 0);
+    if (!options.force && ttlMs > 0 && loadedAt && Date.now() - loadedAt < ttlMs) return null;
+    const snapshot = currentState.map_snapshot || {};
+    const revision = mapSnapshotObjectRevision(snapshot);
+    const hashes = mapSnapshotGroupHashes(snapshot);
+    if (!revision || !Object.keys(hashes).length) {
+      return loadStateSlice('map', {silent:true, force:true, ttlMs:0});
+    }
+    if (!options.force && sliceInFlightRef.current.has('map-ping')) return sliceInFlightRef.current.get('map-ping');
+    const run = (async () => {
+      try {
+        const params = new URLSearchParams({
+          revision,
+          lastKnownVersion: revision,
+          map_type: options.mapType || window.__novaActiveMapType || 'all',
+          group_hashes: JSON.stringify(hashes),
+        });
+        const res = await fetch(`${API}/api/map/delta?${params.toString()}`, { headers:{Authorization:`Bearer ${token}`} });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || data.error || 'Failed to ping map');
+        sliceLoadedAtRef.current.set('map', Date.now());
+        if (data.resyncRequired) return loadStateSlice('map', {silent:true, force:true, ttlMs:0});
+        if (data.changed) setState(prev => mergeMapPingState(prev, data));
+        else if (data.map_snapshot || data.server_time) setState(prev => prev ? {
+          ...prev,
+          server_time: data.server_time || prev.server_time,
+          map_snapshot: data.map_snapshot ? {...(prev.map_snapshot || {}), ...data.map_snapshot} : prev.map_snapshot,
+        } : prev);
+        return data;
+      } catch (err) {
+        if (!options.silent) setLog(l => [`ERROR: ${err.message}`, ...l].slice(0, 8));
+        return null;
+      } finally {
+        if (sliceInFlightRef.current.get('map-ping') === run) sliceInFlightRef.current.delete('map-ping');
+      }
+    })();
+    sliceInFlightRef.current.set('map-ping', run);
+    return run;
+  }
+
+  function refreshStateSlices(names, options = {}) {
+    [...new Set(names || [])].forEach(name => {
+      loadStateSlice(name, options);
+    });
+  }
+
   function scheduleStateRefresh(options = {}, delay = 250) {
     window.setTimeout(() => {
       load({ silent:true, skipDuringAction:false, ...options });
     }, delay);
   }
 
+  function scheduleMapRefresh(options = {}, delay = 250) {
+    window.setTimeout(() => {
+      pingMapSlice({silent:true, force:!!options.force, ttlMs:Number(options.ttlMs ?? 0)});
+    }, delay);
+  }
+
   async function act(type, payload={}, options={}) {
     const silent = !!options.silent || SILENT_ACTION_TYPES.has(type);
     const skipRefresh = !!options.skipRefresh || NO_AUTO_STATE_REFRESH_ACTION_TYPES.has(type);
-    const dedupeKey = options.dedupeKey || '';
+    const dedupeKey = options.dedupeKey || actionPayloadDedupeKey(type, payload);
     if (dedupeKey && actionDedupeRef.current.has(dedupeKey)) return null;
     if (dedupeKey) actionDedupeRef.current.add(dedupeKey);
     const previousStateForOptimisticTravel = state;
     const optimisticTravelState = buildOptimisticTravelState(previousStateForOptimisticTravel, type, payload);
-    if (optimisticTravelState) setState(optimisticTravelState);
+    const optimisticTravel = optimisticTravelState?.travel_state || null;
+    const optimisticVisualId = optimisticTravel?.client_visual_id || '';
+    if (optimisticTravelState) {
+      setClientVisualTravelState(optimisticTravel);
+      setState(prev => applyClientVisualTravelState(prev || previousStateForOptimisticTravel, optimisticTravel));
+    }
     actionInFlightCountRef.current += 1;
     actionInFlightRef.current = true;
     if (!silent) setLoading(true);
@@ -412,36 +958,57 @@ function App() {
       const hasState = data.state && typeof data.state === 'object';
       if (hasState) {
         loadSeqRef.current += 1;
-        setState(data.state);
+        setState(prev => mergeDeferredState(prev, data.state));
       }
+      const resultSlice = {};
+      DEFERRED_STATE_KEYS.forEach(key => {
+        if (result[key] !== undefined) resultSlice[key] = result[key];
+      });
+      if (Object.keys(resultSlice).length) setState(prev => prev ? mergeDeferredState(prev, {...prev, ...resultSlice}) : prev);
       if (result.openTradeId) setTradeModalId(Number(result.openTradeId));
       if (result.battle?.id) {
         seenBattleRef.current = result.battle.id;
+        clearClientVisualTravel();
         if (!['start_combat','advance_combat_battle','attempt_combat_escape'].includes(type)) setGlobalBattle(result.battle);
+      }
+      if (type === 'cancel_travel' || SERVER_VALIDATED_EVENT_ACTION_TYPES.has(type)) {
+        clearClientVisualTravel();
       }
       if (result.openPage) { const mapPages = new Set(['Galaxies','System Map','Star Map']); setPage(mapPages.has(result.openPage) ? 'Map' : result.openPage); }
       if (!silent) setLog(l => [result.message || `${type} complete`, ...l].slice(0, 8));
+      refreshStateSlices(sliceNamesForAction(type), {force:true, silent:true});
       if (!hasState && data.refresh !== false && !skipRefresh) {
         const forceRefresh = type === 'admin_spawn_map_objects' || !!result.forceStateRefresh;
         const refreshInBackground = options.backgroundRefresh || BACKGROUND_REFRESH_ACTION_TYPES.has(type);
         if (refreshInBackground) {
           setState(prev => withImmediateMapResult(prev, type, payload, result));
-          scheduleStateRefresh({ force:forceRefresh }, optimisticTravelState ? 650 : 180);
+          if (MAP_SLICE_REFRESH_ACTION_TYPES.has(type)) {
+            if (!SERVER_VALIDATED_EVENT_ACTION_TYPES.has(type) && (!optimisticTravelState || !CLIENT_VISUAL_TRAVEL_ACTION_TYPES.has(type))) {
+              scheduleMapRefresh({ force:forceRefresh }, 320);
+            }
+          } else {
+            scheduleStateRefresh({ force:forceRefresh, maps:false }, optimisticTravelState ? 650 : 180);
+          }
           return data;
         }
         if (optimisticTravelState) {
-          scheduleStateRefresh({ force:forceRefresh }, 650);
           return data;
         }
         actionInFlightCountRef.current = Math.max(0, actionInFlightCountRef.current - 1);
         actionInFlightRef.current = actionInFlightCountRef.current > 0;
-        await load({ silent:true, skipDuringAction:false, force:forceRefresh });
+        await load({ silent:true, skipDuringAction:false, force:forceRefresh, maps:false });
         actionInFlightCountRef.current += 1;
         actionInFlightRef.current = true;
       }
       return data;
     } catch (e) {
-      if (optimisticTravelState && previousStateForOptimisticTravel) setState(previousStateForOptimisticTravel);
+      if (optimisticTravelState && previousStateForOptimisticTravel) {
+        clearClientVisualTravel(optimisticVisualId);
+        setState(previousStateForOptimisticTravel);
+      } else if (SERVER_VALIDATED_EVENT_ACTION_TYPES.has(type) && clientVisualTravelRef.current?.active) {
+        clearClientVisualTravel();
+        scheduleMapRefresh({ force:true }, 0);
+      }
       if (!silent) setLog(l => [`ERROR: ${e.message}`, ...l].slice(0, 8));
       return null;
     } finally {
@@ -451,6 +1018,23 @@ function App() {
       if (!silent) setLoading(false);
     }
   }
+  actRef.current = act;
+
+  useEffect(() => {
+    if (!token || !clientVisualTravel?.active || !clientVisualTravel?.arrival_at) return;
+    const arrivalMs = new Date(clientVisualTravel.arrival_at).getTime();
+    if (!Number.isFinite(arrivalMs)) return;
+    let closed = false;
+    const delay = Math.max(80, arrivalMs - Date.now() + 150);
+    const id = window.setTimeout(async () => {
+      const data = await pingMapSlice({silent:true, force:true, ttlMs:0});
+      if (!closed && data) clearClientVisualTravel(clientVisualTravel.client_visual_id);
+    }, delay);
+    return () => {
+      closed = true;
+      window.clearTimeout(id);
+    };
+  }, [token, clientVisualTravel?.client_visual_id, clientVisualTravel?.arrival_at, clearClientVisualTravel]);
 
   useEffect(() => { load(); }, [token]);
   useEffect(() => {
@@ -489,9 +1073,71 @@ function App() {
     state?.player?.callsign
   ]);
   useEffect(() => { const id = setInterval(() => setClock(Date.now()), 250); return () => clearInterval(id); }, []);
-  const refreshSeconds = Math.max(1, Number(state?.game_tuning?.client_runtime?.state_refresh_seconds || 10));
-  const battleAlertPollMs = Math.max(2000, Number(state?.game_tuning?.client_runtime?.battle_alert_poll_ms || 3000));
-  useEffect(() => { if (token) { const id = setInterval(() => load({ silent:true }), refreshSeconds * 1000); return () => clearInterval(id); }}, [token, refreshSeconds]);
+  useEffect(() => {
+    if (autoExploreMode) localStorage.setItem('nova_auto_explore_mode', autoExploreMode);
+    else localStorage.removeItem('nova_auto_explore_mode');
+    if (autoExploreMode) {
+      localStorage.setItem('nova_auto_explore_last_mode', autoExploreMode);
+      setAutoExploreLastMode(autoExploreMode);
+    }
+    localStorage.removeItem('nova_auto_explore_pirates');
+  }, [autoExploreMode]);
+  useEffect(() => {
+    if (autoExploreStatus) localStorage.setItem('nova_auto_explore_status', autoExploreStatus);
+  }, [autoExploreStatus]);
+  useEffect(() => {
+    if (!token || !state || !autoExploreMode) return;
+    let closed = false;
+    const activeMode = autoExploreMode;
+    const activeConfig = AUTO_EXPLORE_MODE_BY_KEY[activeMode] || AUTO_EXPLORE_MODE_BY_KEY.pirate;
+    const runTick = async () => {
+      if (closed || autoExploreBusyRef.current || !actRef.current) return;
+      autoExploreBusyRef.current = true;
+      try {
+        const data = await actRef.current('auto_explore_battle_tick', {mode:activeMode, pirates_only:activeMode === 'pirate'}, {
+          silent:true,
+          dedupeKey:`auto-explore-${activeMode}`,
+          backgroundRefresh:true
+        });
+        const result = data?.result || {};
+        if (!data) {
+          setAutoExploreStatus(`${activeConfig.statusPaused} after an action error.`);
+          setAutoExploreMode('');
+          return;
+        }
+        setAutoExploreStatus(result.message || data.detail || `${activeConfig.label} tick complete.`);
+        if (result.stopAutoExplore || result.nonPirateBattle || result.docked) {
+          setAutoExploreMode('');
+        }
+      } catch (err) {
+        setAutoExploreStatus(String(err?.message || err || `${activeConfig.statusPaused} after an error.`));
+        setAutoExploreMode('');
+      } finally {
+        window.setTimeout(() => {
+          autoExploreBusyRef.current = false;
+        }, 250);
+      }
+    };
+    runTick();
+    const id = window.setInterval(runTick, AUTO_EXPLORE_TICK_MS);
+    return () => {
+      closed = true;
+      window.clearInterval(id);
+    };
+  }, [token, !!state, autoExploreMode]);
+  const effectivePage = state?.active_pirate_station ? 'Pirate Station' : page;
+  const activeMapBattle = !!(globalBattle?.id || state?.active_battle?.id || state?.fight?.latestBattle?.id);
+  const refreshSeconds = Math.max(20, Number(state?.game_tuning?.client_runtime?.state_refresh_seconds || 45));
+  const mapRefreshMs = mapPollingCadenceMs(state, effectivePage, activeMapBattle, tabHidden);
+  const battleAlertPollMs = activeMapBattle
+    ? mapRefreshMs
+    : Math.max(5000, Number(state?.game_tuning?.client_runtime?.battle_alert_poll_ms || 10000));
+  useEffect(() => {
+    if (!token) return undefined;
+    const intervalMs = tabHidden ? 30000 : refreshSeconds * 1000;
+    const id = setInterval(() => load({ silent:true, maps:false }), intervalMs);
+    return () => clearInterval(id);
+  }, [token, refreshSeconds, tabHidden]);
   useEffect(() => {
     const latest = state?.fight?.latestBattle;
     if (!latest?.id) return;
@@ -584,7 +1230,27 @@ function App() {
     };
   }, [token, state?.travel_state?.open_space, battleAlertPollMs, globalBattle?.id]);
 
-  if (!token) return <Login onLogin={login} onRegister={register} onGoogleLogin={googleLogin} />;
+  useEffect(() => {
+    if (!token || !state) return;
+    refreshStateSlices(sliceNamesForPage(effectivePage), {silent:true});
+    if (!['Chat', 'Party', 'Social', 'Map'].includes(effectivePage)) return;
+    const intervalMs = effectivePage === 'Chat'
+      ? (tabHidden ? 30000 : 5000)
+      : effectivePage === 'Map'
+        ? mapRefreshMs
+        : (tabHidden ? 30000 : 15000);
+    const id = setInterval(() => {
+      if (effectivePage === 'Map') {
+        pingMapSlice({silent:true, ttlMs:Math.max(1000, mapRefreshMs - 250)});
+        if (!tabHidden) refreshStateSlices(['party', 'public_profiles'], {force:true, silent:true});
+      } else {
+        refreshStateSlices(sliceNamesForPage(effectivePage), {force:true, silent:true});
+      }
+    }, intervalMs);
+    return () => clearInterval(id);
+  }, [token, !!state, effectivePage, mapRefreshMs, tabHidden]);
+
+  if (!token) return <Login onLogin={login} onRegister={register} onGoogleLogin={googleLogin} onGoogleRegisterStart={googleRegisterStart} onClearGoogle={clearGoogleRegistration} />;
   if (!state) return <div className="boot">
     <div className="bootCard">
       <b>{bootError ? 'Unable to Load Nova Frontiers' : 'Loading Nova Frontiers...'}</b>
@@ -592,50 +1258,103 @@ function App() {
         <p>{bootError}</p>
         <div className="bootActions">
           <button className="primary" onClick={() => load({ force:true, skipDuringAction:false })}>Retry</button>
-          <button onClick={() => { clearAuthToken(); setToken(''); setBootError(''); }}>Log Out</button>
+          <button onClick={logout}>Log Out</button>
         </div>
       </>}
     </div>
   </div>;
 
-  const ctx = { state, act, loading, log, setPage, clock, setTradeModalId, token, mapFocus, openServerEventOnMap };
-  return <div className="appShell">
-    <Sidebar page={page} setPage={setPage} state={state} />
+  const renderState = applyClientVisualTravelState(state, clientVisualTravel);
+  const stationMapLocked = !!renderState.active_pirate_station;
+  const visiblePage = effectivePage;
+  const guardedSetPage = (nextPage) => {
+    if (stationMapLocked && nextPage !== 'Pirate Station') {
+      setPage('Pirate Station');
+      syncFeatureHash('Pirate Station');
+      return;
+    }
+    setPage(nextPage);
+    syncFeatureHash(nextPage);
+  };
+  const toggleAutoExploreMode = (mode) => {
+    const config = AUTO_EXPLORE_MODE_BY_KEY[mode] || AUTO_EXPLORE_MODE_BY_KEY.pirate;
+    const enabling = autoExploreMode !== mode;
+    setAutoExploreStatus(enabling ? config.start : 'Paused by pilot.');
+    if (enabling) setAutoExploreLastMode(mode);
+    setAutoExploreMode(enabling ? mode : '');
+  };
+  const ctx = {
+    state: renderState,
+    act,
+    loading,
+    log,
+    setPage: guardedSetPage,
+    clock,
+    setTradeModalId,
+    token,
+    mapFocus,
+    openServerEventOnMap,
+    autoExploreMode,
+    autoExploreLastMode,
+    autoExploreStatus,
+    onToggleAutoExploreMode: toggleAutoExploreMode,
+    dialogs: novaDialog
+  };
+  const cancelDialog = () => closeDialog(dialog?.kind === 'prompt' ? null : false);
+  const confirmDialog = () => closeDialog(dialog?.kind === 'prompt' ? (dialog.inputValue ?? '') : true);
+  const updateDialogInput = (value) => {
+    setDialog(prev => prev ? {
+      ...prev,
+      [prev.confirmationPhrase ? 'confirmationValue' : 'inputValue']: value
+    } : prev);
+  };
+  return <div className={`appShell page-${pageSlug(visiblePage)}`} style={{'--page-accent':pageIntel(visiblePage).accent}}>
+    <div className="authBackdrop" aria-hidden="true">
+      <span className="authOrbit authOrbitOne" />
+      <span className="authOrbit authOrbitTwo" />
+      <span className="authScanline" />
+    </div>
+    <Sidebar page={visiblePage} setPage={guardedSetPage} state={renderState} />
+    <MobileMoreMenu open={mobileMoreOpen} page={visiblePage} setPage={guardedSetPage} onClose={()=>setMobileMoreOpen(false)} />
     <main className="main">
-      <Topbar state={state} onLogout={() => { clearAuthToken(); setToken(''); }} />
-      <div className={`content ${page === 'Map' ? 'wideMapContent' : ''}`}>
-        {page === 'Dashboard' && <Dashboard {...ctx} />}
-        {page === 'Profile' && <Profile {...ctx} />}
-        {page === 'Chat' && <Chat {...ctx} />}
-        {page === 'Party' && <Party {...ctx} />}
-        {page === 'Social' && <Social {...ctx} />}
-        {page === 'Map' && <StarMap {...ctx} />}
-        {page === 'Calendar' && <ServerCalendar {...ctx} />}
-        {page === 'Pirate Station' && <PirateStation {...ctx} />}
-        {page === 'Market' && <Market {...ctx} />}
-        {page === 'Inventory' && <Inventory {...ctx} />}
-        {page === 'Ships & Hangar' && <Ships {...ctx} />}
-        {page === 'Fight' && <Fight {...ctx} />}
-        {page === 'Guild' && <Guild {...ctx} />}
-        {page === 'Faction War' && <FactionWar {...ctx} />}
-        {page === 'Warfare' && <Warfare {...ctx} />}
-        {page === 'Planet Control' && <PlanetControl {...ctx} />}
-        {page === 'Contracts' && <Contracts {...ctx} />}
-        {page === 'Jobs' && <Jobs {...ctx} />}
-        {page === 'Skills' && <Skills {...ctx} />}
-        {page === 'Industry' && <Industry {...ctx} />}
-        {page === 'Crafting' && <Crafting {...ctx} />}
-        {page === 'Properties' && <Properties {...ctx} />}
-        {page === 'Medical' && <Medical {...ctx} />}
-        {page === 'Messages' && <Messages {...ctx} />}
-        {page === 'Leaderboards' && <Leaderboards {...ctx} />}
-        {page === 'Admin' && <Admin {...ctx} />}
+      <Topbar state={renderState} onLogout={logout} />
+      <div className={`content ${visiblePage === 'Map' ? 'wideMapContent' : ''}`}>
+        <CommandRibbon state={renderState} page={visiblePage} setPage={guardedSetPage} clock={clock} />
+        {visiblePage === 'Dashboard' && <Dashboard {...ctx} />}
+        {visiblePage === 'Profile' && <Profile {...ctx} onDeleteProfile={deleteProfile} />}
+        {visiblePage === 'Chat' && <Chat {...ctx} />}
+        {visiblePage === 'Party' && <Party {...ctx} />}
+        {visiblePage === 'Social' && <Social {...ctx} />}
+        {visiblePage === 'Map' && <StarMap {...ctx} />}
+        {visiblePage === 'Calendar' && <ServerCalendar {...ctx} />}
+        {visiblePage === 'Pirate Station' && <PirateStation {...ctx} />}
+        {visiblePage === 'Market' && <Market {...ctx} />}
+        {visiblePage === 'Inventory' && <Inventory {...ctx} />}
+        {visiblePage === 'Ships & Hangar' && <Ships {...ctx} />}
+        {visiblePage === 'Fight' && <Fight {...ctx} />}
+        {visiblePage === 'Guild' && <Guild {...ctx} />}
+        {visiblePage === 'Faction War' && <FactionWar {...ctx} />}
+        {visiblePage === 'Warfare' && <Warfare {...ctx} />}
+        {visiblePage === 'Planet Control' && <PlanetControl {...ctx} />}
+        {visiblePage === 'Contracts' && <Contracts {...ctx} />}
+        {visiblePage === 'Jobs' && <Jobs {...ctx} />}
+        {visiblePage === 'Skills' && <Skills {...ctx} />}
+        {visiblePage === 'Industry' && <Industry {...ctx} />}
+        {visiblePage === 'Crafting' && <Crafting {...ctx} />}
+        {visiblePage === 'Properties' && <Properties {...ctx} />}
+        {visiblePage === 'Medical' && <Medical {...ctx} />}
+        {visiblePage === 'Messages' && <Messages {...ctx} />}
+        {visiblePage === 'Leaderboards' && <Leaderboards {...ctx} />}
+        {visiblePage === 'Admin' && <Admin {...ctx} />}
       </div>
       <ActionLog log={log} />
     </main>
+    <MobileContextActionBar state={renderState} page={visiblePage} setPage={guardedSetPage} />
+    <MobileBottomNav page={visiblePage} setPage={guardedSetPage} moreOpen={mobileMoreOpen} setMoreOpen={setMobileMoreOpen} />
     <ToastStack toasts={toasts} dismissToast={dismissToast} />
-    <TradeModal trade={(state.trade?.trades || []).find(t=>Number(t.id)===Number(tradeModalId)) || (tradeModalId ? state.trade?.current : null)} state={state} act={act} onClose={()=>setTradeModalId(null)} />
+    <TradeModal trade={(renderState.trade?.trades || []).find(t=>Number(t.id)===Number(tradeModalId)) || (tradeModalId ? renderState.trade?.current : null)} state={renderState} act={act} onClose={()=>setTradeModalId(null)} />
     {globalBattle && <GlobalBattleModal battle={globalBattle} act={act} onClose={()=>setGlobalBattle(null)} />}
+    <NovaDialogModal dialog={dialog} onCancel={cancelDialog} onConfirm={confirmDialog} onInputChange={updateDialogInput} />
   </div>;
 }
 
@@ -650,6 +1369,60 @@ function BrandLockup({size='default'}) {
   </div>;
 }
 
+function pageSlug(pageName='dashboard') {
+  return String(pageName || 'dashboard').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'dashboard';
+}
+
+function pageIntel(pageName='Dashboard') {
+  return PAGE_INTEL[pageName] || {
+    eyebrow:'Frontier Console',
+    title:pageName || 'Command',
+    deck:'Live tools, pilot state, and frontier operations.',
+    accent:'#6cf6ff',
+  };
+}
+
+function quickActionForPage(pageName, setPage) {
+  if (pageName === 'Map') return { label:'Open Hangar', onClick:()=>setPage('Ships & Hangar') };
+  if (pageName === 'Market') return { label:'Open Cargo', onClick:()=>setPage('Inventory') };
+  if (pageName === 'Inventory') return { label:'Open Crafting', onClick:()=>setPage('Crafting') };
+  if (pageName === 'Ships & Hangar') return { label:'Open Market', onClick:()=>setPage('Market') };
+  if (pageName === 'Fight') return { label:'Open Warfront', onClick:()=>setPage('Faction War') };
+  if (pageName === 'Dashboard') return { label:'Open Map', onClick:()=>setPage('Map') };
+  return { label:'Bridge Overview', onClick:()=>setPage('Dashboard') };
+}
+
+function CommandRibbon({state, page, setPage, clock}) {
+  const intel = pageIntel(page);
+  const p = state.player || {};
+  const ship = state.active_ship || {};
+  const travel = state.travel_state || {};
+  const factionKey = String(state.profile?.factionKey || state.player?.faction_key || state.player?.faction || '').toLowerCase();
+  const factionAsset = factionAssets[factionKey] || Object.values(factionAssets).find(f => String(f.name || '').toLowerCase() === factionKey) || null;
+  const action = quickActionForPage(page, setPage);
+  return <section className="commandRibbon" style={{'--page-accent':intel.accent}}>
+    <div className="commandRibbonVisual" aria-hidden="true">
+      {factionAsset?.emblem ? <img src={factionAsset.emblem} alt="" /> : <GameImage src="" assetType="ship" category={ship.role || ship.class_name || 'frontier command ship'} alt="" />}
+      <i />
+    </div>
+    <div className="commandRibbonCopy">
+      <span>{intel.eyebrow}</span>
+      <h1>{intel.title}</h1>
+      <p>{intel.deck}</p>
+    </div>
+    <div className="commandTelemetry">
+      <div><span>Location</span><b>{state.location?.name || state.location?.galaxy_name || 'Unknown'}</b></div>
+      <div><span>Ship</span><b>{ship.name || 'No active ship'}</b></div>
+      <div><span>Credits</span><b>{fmt(p.credits)}</b></div>
+      <div><span>Status</span><b>{travel.active ? `${label(travel.mode)} ${clockTimeLeft(travel.arrival_at)}` : `Synced ${new Date(clock).toLocaleTimeString()}`}</b></div>
+    </div>
+    <div className="commandRibbonActions">
+      <button className="primary" onClick={action.onClick}>{action.label}</button>
+      {page !== 'Messages' && <button onClick={()=>setPage('Messages')}>Signals</button>}
+    </div>
+  </section>;
+}
+
 function FactionIdentityStrip() {
   return <div className="factionIdentityStrip">
     {Object.values(factionAssets).map(f => <span key={f.key} style={{'--faction-accent':f.color}}>
@@ -661,17 +1434,17 @@ function FactionIdentityStrip() {
 
 const factionOnboardingCopy = {
   solar_accord: {
-    about: 'The Solar Accord is a civic navy wrapped around merchant houses and frontier towns. They reward clean trade, escort work, patrol contracts, and players who want allies before enemies.',
+    about: 'Safe lanes. Clean markets. Fleet backing.',
     bonuses: ['+8% patrol and escort payouts', '+5% lawful market prices', 'Starter systems begin with higher security'],
     debuffs: ['-6% illicit market margins', 'Hostile pirate space escalates faster'],
   },
   iron_meridian: {
-    about: 'The Iron Meridian is a machine polity of foundries, convoy logic, and armored logistics. They are for pilots who like mining routes, big hulls, and winning through infrastructure.',
+    about: 'Heavy hulls. Hard industry. Patient power.',
     bonuses: ['+8% mining and refinery yield', '+6% hull repair efficiency', 'Guild industry projects complete faster'],
     debuffs: ['-5% evasion in light ships', 'Diplomacy checks start colder in free ports'],
   },
   umbral_veil: {
-    about: 'The Umbral Veil is a quiet swarm of alien houses, smugglers, spies, and deep-space scouts. They thrive on risky routes, ambush timing, and knowing the map before anyone else does.',
+    about: 'Risky routes. Sharp scans. Quiet exits.',
     bonuses: ['+9% smuggling and salvage payouts', '+6% scan range in unstable space', 'Lower black-market heat from first offenses'],
     debuffs: ['-7% lawful faction standing gains', 'Security patrols inspect them more often'],
   },
@@ -680,11 +1453,65 @@ const factionOnboardingCopy = {
 function factionCopyFor(faction) {
   const key = String(faction?.code || faction?.key || '').toLowerCase();
   return factionOnboardingCopy[key] || {
-    about: faction?.description || faction?.guidance?.youAreChoosing || 'A frontier faction with its own allies, enemies, routes, and war priorities.',
+    about: faction?.description || faction?.guidance?.youAreChoosing || 'Pick your allies. Accept your enemies.',
     bonuses: faction?.bonuses || ['Balanced starter position'],
     debuffs: faction?.debuffs || ['No special drawbacks reported'],
   };
 }
+
+function factionShortLine(faction) {
+  const key = String(faction?.code || faction?.key || '').toLowerCase();
+  return ({
+    solar_accord: 'Safe lanes. Fleet backing.',
+    iron_meridian: 'Heavy hulls. Hard industry.',
+    umbral_veil: 'Sharp scans. Quiet exits.',
+  })[key] || faction?.guidance?.short || factionCopyFor(faction).about;
+}
+
+function factionDecisionLine(faction) {
+  const key = String(faction?.code || faction?.key || '').toLowerCase();
+  return ({
+    solar_accord: 'Patrol law, clean markets, convoy allies.',
+    iron_meridian: 'Ore, armor, infrastructure.',
+    umbral_veil: 'Scouting, salvage, timing.',
+  })[key] || factionCopyFor(faction).about;
+}
+
+function factionDescriptor(faction) {
+  return factionShortLine(faction);
+}
+
+const REGISTRATION_FALLBACK_FACTIONS = ['solar_accord', 'iron_meridian', 'umbral_veil'].map((code, index) => {
+  const asset = factionAssets[code];
+  const copy = factionOnboardingCopy[code];
+  return {
+    id: index + 1,
+    code,
+    key: code,
+    name: asset.name,
+    species: asset.species,
+    color: asset.color,
+    emblem: asset.emblem,
+    avatar_options: asset.avatarOptions,
+    avatarOptions: asset.avatarOptions,
+    description: copy.about,
+    guidance: {
+      short: {
+        solar_accord: 'Safe lanes. Fleet backing.',
+        iron_meridian: 'Heavy hulls. Hard industry.',
+        umbral_veil: 'Sharp scans. Quiet exits.',
+      }[code],
+      youAreChoosing: copy.about,
+    },
+    balance_label: 'Balanced',
+    players: 1,
+    online_players: 1,
+    player_percent: 33.3,
+    galaxy_control_percent: 33.3,
+    bonuses: copy.bonuses,
+    debuffs: copy.debuffs,
+  };
+});
 
 function listText(value, fallback = 'None reported') {
   if (Array.isArray(value) && value.length) return value.join(' / ');
@@ -692,61 +1519,204 @@ function listText(value, fallback = 'None reported') {
   return fallback;
 }
 
-const LOGIN_GAMEPLAY_LOOPS = [
+const LANDING_FACTIONS = [
   {
-    key: 'travel',
-    title: 'Travel & Scout',
-    kicker: 'Move, dock, scan',
-    body: 'Pick a route, read the local danger, then dock or scan before you commit cargo, fuel, or hull to the next move.',
-    image: { assetType: 'ship', category: 'exploration pathfinder frontier endeavor', hint: 'map travel scout ship' },
+    key: 'solar_accord',
+    title: 'Solar Accord',
+    label: 'Patrol law and clean trade',
+    color: '#ffbf5a',
+    shipRole: 'frigate',
+    line: 'Safe lanes. Fleet backing.',
   },
   {
-    key: 'trade',
-    title: 'Trade Runs',
-    kicker: 'Buy low, haul, sell',
-    body: 'Watch supply, demand, cargo space, and customs risk. Profitable routes start small, then stretch into faction space once your ship can survive the trip.',
-    image: { assetType: 'ship', category: 'trade cargo freighter freightline 77', hint: 'market hauling cargo ship' },
+    key: 'iron_meridian',
+    title: 'Iron Meridian',
+    label: 'Foundries and heavy hulls',
+    color: '#c9d2d8',
+    shipRole: 'battleship',
+    line: 'Build slow. Hit hard.',
   },
   {
-    key: 'work',
-    title: 'Jobs & Operations',
-    kicker: 'Short contracts',
-    body: 'Take recommended work when you want a clean objective. Jobs feed credits, XP, materials, and career progress without forcing one permanent class.',
-    image: { assetType: 'module', category: 'scanner array merchant ledger ai', hint: 'operations contract command console' },
-  },
-  {
-    key: 'combat',
-    title: 'Combat',
-    kicker: 'Energy, shields, loot',
-    body: 'Choose sane targets, spend attack energy deliberately, then repair and refit from the loot before chasing stronger ships.',
-    image: { assetType: 'ship', category: 'combat fighter eclipse hunter vanguard', hint: 'fighter combat ship' },
-  },
-  {
-    key: 'mining',
-    title: 'Mining & Salvage',
-    kicker: 'Find raw value',
-    body: 'Scan for ore, wrecks, and derelicts, then turn field work into cargo, parts, and upgrade materials for the rest of your economy.',
-    image: { assetType: 'ship', category: 'mining salvage reclaimer deepcore 19', hint: 'salvage mining ship' },
-  },
-  {
-    key: 'crafting',
-    title: 'Crafting',
-    kicker: 'Scraps to modules',
-    body: 'Refine materials into parts, start timed recipes, then equip or sell the finished modules that make your next loop stronger.',
-    image: { assetType: 'module', category: 'fabricator core nanoforge bay reactor', hint: 'crafting module fabricator' },
-  },
-  {
-    key: 'faction',
-    title: 'Faction War',
-    kicker: 'Supply, fight, control',
-    body: 'When your income is steady, push borders through supply runs, battles, and planet control to shape who owns the frontier.',
-    image: { assetType: 'ship', category: 'faction war capital helios crown dreadnought varn orebreaker colossus', hint: 'faction war capital ship' },
+    key: 'umbral_veil',
+    title: 'Umbral Veil',
+    label: 'Scouts and shadow routes',
+    color: '#b174ff',
+    shipRole: 'fighter',
+    line: 'See first. Leave quietly.',
   },
 ];
 
-function Login({onLogin, onRegister, onGoogleLogin}) {
+const LANDING_SECTIONS = [
+  {
+    key: 'factions',
+    eyebrow: 'Alignment',
+    title: 'Choose Your Faction',
+    accent: '#ffbf5a',
+    visual: 'factions',
+    lines: [
+      'Three powers. Three kinds of trouble.',
+      'Pick your allies. Choose your enemies.',
+    ],
+  },
+  {
+    key: 'galaxy',
+    eyebrow: 'Open World',
+    title: 'Explore a Living Galaxy',
+    accent: '#58e6ff',
+    visual: 'galaxy',
+    lines: [
+      'Everything moves.',
+      "Scan first. Quiet lanes don't stay quiet.",
+    ],
+  },
+  {
+    key: 'trade',
+    eyebrow: 'Economy',
+    title: 'Trade, Craft, and Build Power',
+    accent: '#57ffa3',
+    visual: 'trade',
+    lines: [
+      'Move smart. Profit more.',
+      'Timing beats cargo space.',
+    ],
+  },
+  {
+    key: 'territory',
+    eyebrow: 'Warfront',
+    title: 'Fight for Territory',
+    accent: '#ff744d',
+    visual: 'war',
+    lines: [
+      'Location changes everything.',
+      'Pick your fights.',
+    ],
+  },
+  {
+    key: 'events',
+    eyebrow: 'Live Events',
+    title: 'Server Events',
+    accent: '#b174ff',
+    visual: 'events',
+    lines: [
+      'The map turns without warning.',
+      'Raids. Wormholes. Rare drops.',
+    ],
+  },
+  {
+    key: 'history',
+    eyebrow: 'Persistence',
+    title: 'Your Story Persists',
+    accent: '#8cfaff',
+    visual: 'history',
+    lines: [
+      'You leave a mark.',
+      "It doesn't reset.",
+    ],
+  },
+];
+
+function LandingScrollSection({ section, index }) {
+  const ref = useRef(null);
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return undefined;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting) setVisible(true);
+    }, { threshold: 0.26, rootMargin: '0px 0px -12% 0px' });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  return <section
+    ref={ref}
+    className={`landingStorySection ${visible ? 'visible' : ''}`}
+    style={{ '--section-accent': section.accent, '--section-index': index }}
+  >
+    <div className="landingStickyVisual" aria-hidden="true">
+      {renderLandingVisual(section)}
+    </div>
+    <div className="landingStoryCopy">
+      <span>{section.eyebrow}</span>
+      <h2>{section.title}</h2>
+      {section.lines.map(line => <p key={line}>{line}</p>)}
+    </div>
+  </section>;
+}
+
+function renderLandingVisual(section) {
+  if (section.visual === 'factions') {
+    return <div className="landingFactionVisual">
+      {LANDING_FACTIONS.map(faction => {
+        const asset = factionAssets[faction.key];
+        return <article key={faction.key} style={{ '--faction-accent': faction.color }}>
+          <img className="landingFactionEmblem" src={asset?.emblem} alt="" loading="lazy" />
+          <GameImage className="landingFactionShip" src={asset?.ships?.[faction.shipRole]} assetType="ship" category={faction.key} hint={`${faction.key} ${faction.shipRole}`} alt="" loading="lazy" />
+          <b>{faction.title}</b>
+          <small>{faction.label}</small>
+          <p>{faction.line}</p>
+        </article>;
+      })}
+    </div>;
+  }
+
+  if (section.visual === 'galaxy') {
+    return <div className="landingGalaxyVisual">
+      <i className="route r1" /><i className="route r2" /><i className="route r3" />
+      <span className="planet p1"><GameImage src="" assetType="planet" category="terran" hint="terran trade planet" alt="" loading="lazy" /></span>
+      <span className="planet p2"><GameImage src="" assetType="planet" category="ice research" hint="ice research planet" alt="" loading="lazy" /></span>
+      <span className="planet p3"><GameImage src="" assetType="planet" category="lava industrial" hint="industrial lava planet" alt="" loading="lazy" /></span>
+      <span className="movingShip s1"><GameImage src="" assetType="ship" category="freighter cargo" hint="freighter cargo ship" alt="" loading="lazy" /></span>
+      <span className="movingShip s2 hostile"><GameImage src="" assetType="ship" category="pirate interceptor" hint="pirate interceptor" alt="" loading="lazy" /></span>
+      <em>Scan ping</em>
+    </div>;
+  }
+
+  if (section.visual === 'trade') {
+    return <div className="landingTradeVisual">
+      {['ore blue crystal', 'cargo cache', 'fabricator core', 'shield emitter'].map((hint, idx) => (
+        <span key={hint} className={`tradeNode n${idx + 1}`}>
+          <GameImage src="" assetType={idx < 2 ? 'material' : 'module'} category={hint} hint={hint} alt="" loading="lazy" />
+        </span>
+      ))}
+      <div className="recipeLine"><b>Hold</b><i /><b>Refine</b><i /><b>Upgrade</b></div>
+      <GameImage className="tradeShip" src="" assetType="ship" category="cargo freighter freightline 77" hint="trade freighter" alt="" loading="lazy" />
+    </div>;
+  }
+
+  if (section.visual === 'war') {
+    return <div className="landingWarVisual">
+      <span className="border b1" /><span className="border b2" /><span className="border b3" />
+      <GameImage className="warShip a" src="" assetType="ship" category="helios solar lancer combat" hint="solar faction fighter" alt="" loading="lazy" />
+      <GameImage className="warShip b" src="" assetType="ship" category="varn battleship iron meridian" hint="iron meridian battleship" alt="" loading="lazy" />
+      <GameImage className="warShip c" src="" assetType="ship" category="nyx stealth fighter" hint="umbral veil fighter" alt="" loading="lazy" />
+      <strong>Contested Orbit</strong>
+    </div>;
+  }
+
+  if (section.visual === 'events') {
+    return <div className="landingEventVisual">
+      <span className="wormhole" />
+      <GameImage className="alienShip" src="" assetType="ship" category="alien xeno raid" hint="alien raid ship" alt="" loading="lazy" />
+      <GameImage className="eventPlanet" src="" assetType="planet" category="singularity anomaly" hint="wormhole anomaly" alt="" loading="lazy" />
+      <b>Rare signal detected</b>
+    </div>;
+  }
+
+  return <div className="landingHistoryVisual">
+    <div className="historyArc"><span /><span /><span /><span /></div>
+    <div className="leaderboardCard"><b>#07</b><span>Convoy Breaker</span><i>Faction impact rising</i></div>
+    <div className="historyLog">
+      <span>Founded route</span>
+      <span>Won siege</span>
+      <span>Recovered relic</span>
+    </div>
+  </div>;
+}
+
+function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onClearGoogle}) {
   const [mode,setMode] = useState('login');
-  const [activeLoop,setActiveLoop] = useState(LOGIN_GAMEPLAY_LOOPS[0]?.key || '');
   const [u,setU] = useState('');
   const [p,setP] = useState('');
   const [callsign,setCallsign] = useState('');
@@ -755,20 +1725,19 @@ function Login({onLogin, onRegister, onGoogleLogin}) {
   const [selectedAvatar,setSelectedAvatar] = useState('');
   const [factionBalance,setFactionBalance] = useState(null);
   const [err,setErr] = useState('');
+  const [status,setStatus] = useState('');
   const [busy,setBusy] = useState(false);
+  const [googleBusy,setGoogleBusy] = useState(false);
+  const [pendingGoogle,setPendingGoogle] = useState(null);
   const [googleReady,setGoogleReady] = useState(false);
   const googleButtonRef = useRef(null);
 
-  const factions = factionBalance?.factions || [];
+  const factions = factionBalance?.factions?.length ? factionBalance.factions : REGISTRATION_FALLBACK_FACTIONS;
   useEffect(() => {
     let closed = false;
     fetch(`${API}/api/auth/factions`).then(r=>r.ok ? r.json() : null).then(data => {
       if (closed || !data) return;
       setFactionBalance(data);
-      if (!selectedFaction && data.factions?.[0]?.id) {
-        setSelectedFaction(String(data.factions[0].id));
-        setSelectedAvatar((data.factions[0].avatar_options || data.factions[0].avatarOptions || [])[0]?.id || '');
-      }
     }).catch(()=>{});
     return () => { closed = true; };
   }, []);
@@ -780,11 +1749,12 @@ function Login({onLogin, onRegister, onGoogleLogin}) {
       callback: async (response) => {
         if (!response?.credential) return;
         await submitGoogle(response.credential);
-      }
+      },
+      auto_select: false
     });
     googleButtonRef.current.innerHTML = '';
-    window.google.accounts.id.renderButton(googleButtonRef.current, { theme:'filled_black', size:'large', text:'continue_with', shape:'pill', width: 320 });
-  }, [googleReady, mode, selectedFaction, callsign]);
+    window.google.accounts.id.renderButton(googleButtonRef.current, { theme:'filled_black', size:'large', text:mode === 'register' ? 'signup_with' : 'signin_with', shape:'pill', width: 320 });
+  }, [googleReady, mode, selectedFaction, callsign, pendingGoogle?.token]);
 
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID) return;
@@ -801,11 +1771,26 @@ function Login({onLogin, onRegister, onGoogleLogin}) {
 
   async function runAuth(fn) {
     setErr('');
+    setStatus('');
     setBusy(true);
     try { await fn(); }
     catch(ex) { setErr(String(ex.message || ex).replace(/^\{"detail":"?|"?\}$/g, '')); }
     finally { setBusy(false); }
   }
+
+  async function clearPendingGoogle(showMessage=false) {
+    const token = pendingGoogle?.token || '';
+    setPendingGoogle(null);
+    if (showMessage) setStatus('Google login cleared.');
+    if (token || showMessage) await onClearGoogle?.(token);
+  }
+
+  const switchMode = async (nextMode) => {
+    if (nextMode !== mode) await clearPendingGoogle(false);
+    setErr('');
+    setStatus('');
+    setMode(nextMode);
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -813,137 +1798,182 @@ function Login({onLogin, onRegister, onGoogleLogin}) {
       if (mode === 'login') {
         await onLogin(u,p);
       } else {
-        await onRegister({ username:u, password:p, callsign:callsign || u, email, faction_id:Number(selectedFaction), avatar_id:selectedAvatar });
+        if (!selectedFaction) throw new Error('Choose a faction to continue.');
+        try {
+          await onRegister({ username:u, password:p, callsign:callsign || u, email, faction_id:Number(selectedFaction), avatar_id:selectedAvatar, google_registration_token:pendingGoogle?.token || '' });
+        } catch(ex) {
+          if (pendingGoogle?.token) await clearPendingGoogle(false);
+          throw ex;
+        }
       }
     });
   };
 
   async function submitGoogle(credential) {
-    await runAuth(async () => {
-      await onGoogleLogin(credential, { callsign:callsign || (mode === 'register' ? u : 'Nova Pilot'), faction_id:Number(selectedFaction), avatar_id:selectedAvatar });
-    });
+    setErr('');
+    setStatus('');
+    setGoogleBusy(true);
+    try {
+      if (mode === 'login') {
+        await onGoogleLogin(credential);
+        return;
+      }
+      const data = await onGoogleRegisterStart(credential);
+      setPendingGoogle({ token:data.google_registration_token, email:data.email || '', displayName:data.display_name || '' });
+      if (data.email) setEmail(data.email);
+      if (!callsign && data.display_name) setCallsign(data.display_name.slice(0, 32));
+      setStatus(data.message || 'Google account linked. Finish creating your profile.');
+    } catch(ex) {
+      setErr(String(ex.message || ex).replace(/^\{"detail":"?|"?\}$/g, ''));
+      clearGoogleClientState();
+    } finally {
+      setGoogleBusy(false);
+    }
   }
 
-  const selectedFactionData = factions.find(f => String(f.id) === String(selectedFaction)) || factions[0] || null;
+  const selectedFactionData = factions.find(f => String(f.id) === String(selectedFaction)) || null;
   const selectedFactionAvatars = selectedFactionData?.avatar_options || selectedFactionData?.avatarOptions || [];
   useEffect(() => {
     if (mode !== 'register' || !selectedFactionAvatars.length) return;
     if (!selectedFactionAvatars.some(a => a.id === selectedAvatar)) setSelectedAvatar(selectedFactionAvatars[0].id);
   }, [mode, selectedFactionData?.id, selectedFactionAvatars.length, selectedAvatar]);
-  return <div className="loginScreen">
-    <div className="loginLandingWrap">
-      <div className="loginCard panel registrationCard loginLandingAuth">
-        <BrandLockup size="hero" />
-        <p className="muted">Persistent space trading, PvE, illicit market risk, guild warfare, ships, crafting, and solo-friendly NPC systems.</p>
+  const selectedFactionColor = selectedFactionData?.color || '#35f2ff';
+  return <div className={`loginScreen novaLandingScreen ${mode === 'register' ? 'authRegisterMode' : 'authLoginMode'}`}>
+    <div className="landingStars" aria-hidden="true"><i /><i /><i /></div>
 
-        <div className="authModeTabs">
-          <button type="button" className={mode==='login'?'active':''} onClick={()=>setMode('login')}>Login</button>
-          <button type="button" className={mode==='register'?'active':''} onClick={()=>setMode('register')}>Create Pilot</button>
+    <main className="landingExperience">
+      <section className="registrationHero" aria-labelledby="nova-login-title">
+        <div className="registrationWorldPanel">
+          <BrandLockup size="landing" />
+          <div className="registrationHeroCopy">
+            <span>Persistent browser MMO</span>
+            <h1 id="nova-login-title">Nova Frontiers</h1>
+            <p>{mode === 'register' ? 'Create a pilot. Choose a faction. The frontier keeps moving.' : 'Your routes, cargo, claims, and enemies are still out there.'}</p>
+            <div className="landingRoleCards registrationRoleCards" aria-label="Starter career paths">
+              <span><b>Haul</b><small>Move cargo. Read the lane.</small></span>
+              <span><b>Salvage</b><small>Find wrecks. Keep what lasts.</small></span>
+              <span><b>Fight</b><small>Push borders. Hold ground.</small></span>
+            </div>
+          </div>
+          <div className="registrationCoreArt" aria-label="Nova Frontiers galaxy, factions, trade routes, and wormhole energy">
+            <img src={novaFrontiersCore} alt="Cinematic Nova Frontiers galaxy with planets, ships, trade routes, and wormhole energy" loading="eager" fetchPriority="high" />
+            <span className="orbitalRing ringOne" />
+            <span className="orbitalRing ringTwo" />
+            <span className="heroRoute routeOne" />
+            <span className="heroRoute routeTwo" />
+            <span className="heroParticle particleOne" />
+            <span className="heroParticle particleTwo" />
+            <span className="heroParticle particleThree" />
+          </div>
+          <div className="registrationSignalDeck" style={{'--faction-accent': selectedFactionColor}}>
+            <div>
+              <span>Command briefing</span>
+              <b>{selectedFactionData?.name || 'VX-9 / Echo Frontier'}</b>
+              <small>{mode === 'register' ? (selectedFactionData ? factionDecisionLine(selectedFactionData) : 'Choose who gets your first signal.') : 'Your ship is quiet. The world is not.'}</small>
+            </div>
+            <ol className="registrationBriefList">
+              <li><strong>Border unstable</strong><small>Convoys are getting scanned.</small></li>
+              <li><strong>Market open</strong><small>Fuel and alloys are paying.</small></li>
+              <li><strong>Relic ping</strong><small>Something woke past patrol range.</small></li>
+            </ol>
+            <div className="registrationMetricRow" aria-label="World summary">
+              <span><b>3</b> factions</span>
+              <span><b>Live</b> economy</span>
+              <span><b>Persistent</b> wars</span>
+            </div>
+          </div>
         </div>
 
-        <form onSubmit={submit} className="loginForm registerForm">
-          <input value={u} onChange={e=>setU(e.target.value)} placeholder="username" autoComplete="username" />
-          {mode === 'register' && <input value={callsign} onChange={e=>setCallsign(e.target.value)} placeholder="pilot callsign shown in-game" autoComplete="nickname" />}
-          {mode === 'register' && <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="email (optional)" type="email" autoComplete="email" />}
-          <input value={p} onChange={e=>setP(e.target.value)} placeholder="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
+        <div className="registrationConsole" aria-label="Account access">
+          <div className="registrationConsoleHeader">
+            <span>{mode === 'register' ? 'Pilot dossier' : 'Command access'}</span>
+            <b>{mode === 'register' ? 'Register' : 'Login'}</b>
+          </div>
+          <div className="authModeTabs registrationModeTabs">
+            <button type="button" className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>Login</button>
+            <button type="button" className={mode==='register'?'active':''} onClick={()=>switchMode('register')}>Register</button>
+          </div>
 
-          {mode === 'register' && <div className="factionPickerBlock">
-            <div className="authSectionHeader">
-              <b>Pick your faction</b>
-              <span>This decides your starter territory, early allies, likely enemies, and the kind of trouble the game points you toward first.</span>
-            </div>
-            <div className="factionBalanceGrid">
-              {factions.map(f => <button key={f.id} type="button" aria-expanded={String(selectedFaction)===String(f.id)} className={`factionChoice ${String(selectedFaction)===String(f.id)?'selected':''}`} onClick={()=>setSelectedFaction(String(f.id))} style={{'--faction-accent':f.color || '#35f2ff'}}>
-                <span className="factionChoiceEmblem"><img src={factionAssets[f.code]?.emblem || f.emblem || factionAssets.solar_accord.emblem} alt="" /></span>
-                <span className="factionChoiceTop"><b>{f.name}</b><em>{f.balance_label || 'Open'}</em></span>
-                <strong>{f.species || 'Pilot'}</strong>
-                <span>{f.guidance?.short || f.description || factionCopyFor(f).about}</span>
-                <i>{fmt(f.players || 0)} players / {fmt(f.online_players || 0)} online / {Number(f.player_percent || 0).toFixed(1)}%</i>
-                <div className="factionBalanceBar"><span style={{width:`${Math.max(4, Math.min(100, Number(f.player_percent || 0)))}%`}} /></div>
-              </button>)}
-            </div>
-            {selectedFactionData && <div className="factionDecisionPanel" style={{'--faction-accent':selectedFactionData.color || '#35f2ff'}}>
-              <div className="factionDecisionHero">
-                <img src={factionAssets[selectedFactionData.code]?.emblem || selectedFactionData.emblem || factionAssets.solar_accord.emblem} alt="" />
-                <div>
-                  <b>{selectedFactionData.name}</b>
-                  <span>{selectedFactionData.guidance?.youAreChoosing || factionCopyFor(selectedFactionData).about}</span>
+          <form onSubmit={submit} className="loginForm registrationAuthForm">
+            <section className="registrationFormSection registrationAccountSection" aria-labelledby="registration-account-title">
+              {mode === 'register' && <div className="registrationSectionHeader">
+                <b id="registration-account-title">Account Info</b>
+              </div>}
+              <div className="registrationFieldGrid">
+                <label>
+                  <span>Username</span>
+                  <input value={u} onChange={e=>setU(e.target.value)} placeholder="username" autoComplete="username" />
+                </label>
+                {mode === 'register' && <label>
+                  <span>Callsign</span>
+                  <input value={callsign} onChange={e=>setCallsign(e.target.value)} placeholder="callsign" autoComplete="nickname" />
+                </label>}
+                {mode === 'register' && <label>
+                  <span>Email</span>
+                  <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="email" type="email" autoComplete="email" />
+                </label>}
+                <label>
+                  <span>Password</span>
+                  <input value={p} onChange={e=>setP(e.target.value)} placeholder={mode === 'register' && pendingGoogle ? 'optional with Google' : 'password'} type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
+                </label>
+              </div>
+            </section>
+
+            {mode === 'register' && <div className="registrationOnboarding">
+              <section className="registrationFormSection registrationFactionSection" aria-labelledby="registration-faction-title">
+                <div className="registrationSectionHeader">
+                  <b id="registration-faction-title">Faction Selection</b>
                 </div>
-              </div>
-              <p>{factionCopyFor(selectedFactionData).about}</p>
-              <div className="factionBalanceStats">
-                <span><small>Players</small><b>{fmt(selectedFactionData.players || 0)}</b></span>
-                <span><small>Online</small><b>{fmt(selectedFactionData.online_players || 0)}</b></span>
-                <span><small>Galaxy Control</small><b>{Number(selectedFactionData.galaxy_control_percent ?? selectedFactionData.control_percent ?? 0).toFixed(1)}%</b></span>
-                <span><small>Balance</small><b>{selectedFactionData.balance_label || 'Open'}</b></span>
-              </div>
-              <div className="factionBalanceNotes">
-                <span><b>Bonuses</b>{listText(selectedFactionData.bonuses || factionCopyFor(selectedFactionData).bonuses)}</span>
-                <span><b>Debuffs</b>{listText(selectedFactionData.debuffs || factionCopyFor(selectedFactionData).debuffs)}</span>
-              </div>
-              <small>{selectedFactionData.guidance?.watchOut || 'Your faction matters most on the map, in war, and around faction-controlled space.'}</small>
+                <div className="factionBalanceGrid registrationFactionGrid">
+                  {factions.map(f => <button key={f.id} type="button" aria-expanded={String(selectedFaction)===String(f.id)} className={`factionChoice ${String(selectedFaction)===String(f.id)?'selected':''}`} onClick={()=>setSelectedFaction(String(f.id))} style={{'--faction-accent':f.color || '#35f2ff'}}>
+                    <span className="factionChoiceEmblem"><img src={factionAssets[f.code]?.emblem || f.emblem || factionAssets.solar_accord.emblem} alt="" /></span>
+                    <span className="factionChoiceTop"><b>{f.name}</b><em>{f.balance_label || 'Open'}</em></span>
+                    <strong>{f.species || 'Pilot'}</strong>
+                    <span>{factionDescriptor(f)}</span>
+                    <i>{Number(f.player_percent || 0).toFixed(1)}% balance</i>
+                    <div className="factionBalanceBar"><span style={{width:`${Math.max(4, Math.min(100, Number(f.player_percent || 0)))}%`}} /></div>
+                  </button>)}
+                </div>
+              </section>
+              {selectedFactionData && <section className="registrationFormSection registrationDetailsSection" aria-labelledby="registration-details-title">
+                <div className="registrationSectionHeader">
+                  <b id="registration-details-title">Faction Details</b>
+                </div>
+                <div className="factionDecisionPanel registrationDecisionPanel" style={{'--faction-accent':selectedFactionColor}}>
+                  <div className="factionDecisionHero">
+                    <img src={factionAssets[selectedFactionData.code]?.emblem || selectedFactionData.emblem || factionAssets.solar_accord.emblem} alt="" />
+                    <div>
+                      <b>{selectedFactionData.name}</b>
+                      <span>{factionDecisionLine(selectedFactionData)}</span>
+                    </div>
+                  </div>
+                  <div className="factionBalanceStats">
+                    <span><small>Players</small><b>{fmt(selectedFactionData.players || 0)}</b></span>
+                    <span><small>Online</small><b>{fmt(selectedFactionData.online_players || 0)}</b></span>
+                    <span><small>Control</small><b>{Number(selectedFactionData.galaxy_control_percent ?? selectedFactionData.control_percent ?? 0).toFixed(1)}%</b></span>
+                    <span><small>Balance</small><b>{selectedFactionData.balance_label || 'Open'}</b></span>
+                  </div>
+                </div>
+              </section>}
             </div>}
-            {!!selectedFactionAvatars.length && <div className="factionAvatarPicker" style={{'--faction-accent':selectedFactionData?.color || '#35f2ff'}}>
-              <div className="authSectionHeader">
-                <b>{selectedFactionData?.species || 'Pilot'} avatars</b>
-                <span>{selectedFactionData?.name || 'Faction'} pilots can choose from these 12 portraits.</span>
-              </div>
-              <div className="factionAvatarGrid">
-                {selectedFactionAvatars.map(a => <button key={a.id} type="button" className={selectedAvatar===a.id?'selectedAvatar':''} onClick={()=>setSelectedAvatar(a.id)}>
-                  <GameImage src={a.url} assetType="avatar" category={a.id} hint={a.id} alt={a.label} />
-                  <span>{a.label}</span>
-                  <small>{label(a.gender)}</small>
-                </button>)}
-              </div>
-            </div>}
-          </div>}
 
-          <button className="primary" disabled={busy}>{busy ? 'Working...' : mode === 'login' ? 'Login' : 'Create Pilot + Launch'}</button>
-        </form>
+            <button className="primary registrationSubmit" disabled={busy || googleBusy}>{busy ? 'Working...' : mode === 'login' ? 'Launch' : 'Create Account'}</button>
+          </form>
 
-        <div className="googleAuthBlock">
-          {GOOGLE_CLIENT_ID ? <div ref={googleButtonRef} className="googleButtonSlot" /> : <button type="button" disabled className="googleDisabled">Google login not configured</button>}
-          <span>{GOOGLE_CLIENT_ID ? 'Google is free here; it only needs a Google OAuth Client ID in the frontend and API environment.' : 'To enable free Google login, set VITE_GOOGLE_CLIENT_ID on the frontend and GOOGLE_CLIENT_ID on the API.'}</span>
+          <div className="googleAuthBlock registrationGoogleBlock">
+            {GOOGLE_CLIENT_ID ? <div ref={googleButtonRef} className={`googleButtonSlot ${googleBusy ? 'loading' : ''}`} /> : <button type="button" disabled className="googleDisabled">Google unavailable</button>}
+            <span>{GOOGLE_CLIENT_ID ? (mode === 'register' ? 'Register with Google links the account after Create Account succeeds.' : 'Google login only works for already linked pilots.') : 'Google sign-in is not configured.'}</span>
+            {googleBusy && <span className="authStatus">Verifying Google...</span>}
+            {pendingGoogle && <button type="button" className="linkButton authClearGoogle" onClick={()=>clearPendingGoogle(true)}>Clear Google login</button>}
+          </div>
+          {status && <div className="authStatus">{status}</div>}
+          {err && <div className="error">{err}</div>}
         </div>
+      </section>
 
-        {err && <div className="error">{err}</div>}
-        <div className="note">New pilots are auto-approved for now. After registration, the game logs them in and the tutorial opens once the player state loads.</div>
-      </div>
-
-      <aside className="gameplayLoopDeck panel" aria-label="Nova Frontiers gameplay loops">
-        <div className="gameplayLoopIntro">
-          <span>Choose your rhythm</span>
-          <h2>Every pilot has a loop.</h2>
-          <p>Tap a panel to see how each path feeds the next one.</p>
-        </div>
-        <div className="gameplayLoopList">
-          {LOGIN_GAMEPLAY_LOOPS.map(loop => {
-            const active = activeLoop === loop.key;
-            return <button
-              key={loop.key}
-              type="button"
-              className={`gameplayLoopPanel ${active ? 'active' : ''}`}
-              onClick={() => setActiveLoop(active ? '' : loop.key)}
-              aria-expanded={active}
-            >
-              <span className="gameplayLoopPanelHead">
-                <span>
-                  <b>{loop.title}</b>
-                  <small>{loop.kicker}</small>
-                </span>
-                <em>{active ? 'Close' : 'Open'}</em>
-              </span>
-              {active && <span className="gameplayLoopExpanded">
-                <span className="gameplayLoopImage">
-                  <GameImage src="" assetType={loop.image.assetType} category={loop.image.category} hint={loop.image.hint} alt={loop.title} />
-                </span>
-                <span className="gameplayLoopCopy">{loop.body}</span>
-              </span>}
-            </button>;
-          })}
-        </div>
-      </aside>
-    </div>
+      <div className="landingScrollCue" aria-hidden="true"><span />Survey the frontier</div>
+      {LANDING_SECTIONS.map((section, index) => <LandingScrollSection key={section.key} section={section} index={index} />)}
+    </main>
   </div>;
 }
 
@@ -981,9 +2011,83 @@ function Sidebar({page,setPage,state}) {
       <Bar label="Energy" value={state.player.energy} max={state.player.max_energy} />
       <Bar label="Cargo" value={state.cargo_usage?.total ?? state.player.cargo} max={state.cargo_usage?.max ?? state.player.max_cargo} />
     </div>
-    <nav>{nav.map(([n,Icon]) => <button key={n} data-page={n} className={page===n?'active':''} onClick={()=>selectPage(n)}><Icon size={18}/><span>{n}</span>{n==='Messages' && <em>8</em>}</button>)}</nav>
+    <nav className="navRail">
+      {NAV_GROUPS.map(group => <div className="navGroup" key={group.label}>
+        <strong>{group.label}</strong>
+        {group.pages.map(n => {
+          const Icon = (nav.find(([name]) => name === n) || [n, Home])[1];
+          return <button key={n} data-page={n} className={page===n?'active':''} onClick={()=>selectPage(n)}><Icon size={18}/><span>{n}</span>{n==='Messages' && <em>8</em>}</button>;
+        })}
+      </div>)}
+    </nav>
     <div className="sector">UTC {new Date(state.server_time).toLocaleTimeString()}<br/>Sector VX-9 / ECHO</div>
   </aside>
+}
+
+const MOBILE_PRIMARY_TABS = [
+  {label:'Map', page:'Map', pages:['Map'], icon:Globe2},
+  {label:'Ship', page:'Ships & Hangar', pages:['Ships & Hangar','Fight'], icon:Rocket},
+  {label:'Inventory', page:'Inventory', pages:['Inventory','Market','Crafting'], icon:Package},
+  {label:'Missions', page:'Contracts', pages:['Contracts','Jobs','Calendar'], icon:Briefcase},
+];
+
+function MobileBottomNav({page,setPage,moreOpen,setMoreOpen}) {
+  const selectTab = (tab) => {
+    setMoreOpen(false);
+    setPage(tab.page);
+  };
+  return <nav className="mobileBottomTabs" aria-label="Primary mobile navigation">
+    {MOBILE_PRIMARY_TABS.map(tab => {
+      const Icon = tab.icon;
+      const active = tab.pages.includes(page);
+      return <button key={tab.label} className={active ? 'active' : ''} aria-current={active ? 'page' : undefined} onClick={()=>selectTab(tab)}>
+        <Icon size={20}/><span>{tab.label}</span>
+      </button>;
+    })}
+    <button className={moreOpen || !MOBILE_PRIMARY_TABS.some(tab => tab.pages.includes(page)) ? 'active' : ''} onClick={()=>setMoreOpen(v=>!v)} aria-expanded={moreOpen}>
+      <MoreHorizontal size={20}/><span>More</span>
+    </button>
+  </nav>;
+}
+
+function MobileMoreMenu({open,page,setPage,onClose}) {
+  if (!open) return null;
+  const selectPage = (nextPage) => {
+    setPage(nextPage);
+    onClose();
+  };
+  const primaryPages = new Set(MOBILE_PRIMARY_TABS.flatMap(t => t.pages));
+  return <div className="mobileMoreBackdrop" onMouseDown={onClose}>
+    <section className="mobileMoreSheet" onMouseDown={e=>e.stopPropagation()} aria-label="More navigation">
+      <header><b>More</b><button aria-label="Close menu" onClick={onClose}><X size={18}/></button></header>
+      <div className="mobileMoreGroups">
+        {NAV_GROUPS.map(group => <div className="mobileMoreGroup" key={group.label}>
+          <strong>{group.label}</strong>
+          <div>
+            {group.pages.filter(n => !primaryPages.has(n) || n === page).map(n => {
+              const Icon = (nav.find(([name]) => name === n) || [n, Home])[1];
+              return <button key={n} className={page===n?'active':''} onClick={()=>selectPage(n)}><Icon size={17}/><span>{n}</span></button>;
+            })}
+          </div>
+        </div>)}
+      </div>
+    </section>
+  </div>;
+}
+
+function MobileContextActionBar({state,page,setPage}) {
+  const action = quickActionForPage(page,setPage);
+  const travel = state.travel_state || {};
+  const ship = state.active_ship || {};
+  const cargoUsed = state.cargo_usage?.total ?? state.player?.cargo ?? 0;
+  const cargoMax = state.cargo_usage?.max ?? state.player?.max_cargo ?? 1;
+  return <div className="mobileContextActionBar">
+    <div>
+      <b>{travel.active ? `${label(travel.mode || 'travel')} ${clockTimeLeft(travel.arrival_at)}` : (ship.name || state.location?.name || 'Ready')}</b>
+      <span>Fuel {fmt(state.player?.fuel)} · Energy {fmt(state.player?.energy)} · Cargo {fmt(cargoUsed)}/{fmt(cargoMax)}</span>
+    </div>
+    <button className="primary" onClick={action.onClick}>{action.label}</button>
+  </div>;
 }
 
 function battleIsComplete(battle) {
@@ -1005,7 +2109,7 @@ function secondsUntilIso(isoValue) {
 }
 
 function nextLiveBattleTargetRef(combatants, viewerSide, currentRef, defaultRef='', previousOrder=[]) {
-  const opposing = (combatants || []).filter(c => c?.ref && c.side !== viewerSide);
+  const opposing = (combatants || []).filter(c => c?.ref && (c.viewSide ? c.viewSide === 'enemy' : c.side !== viewerSide));
   const isLive = c => !c?.defeated && !c?.escaped;
   const liveTargets = opposing.filter(isLive);
   if (!liveTargets.length) return '';
@@ -1022,6 +2126,18 @@ function nextLiveBattleTargetRef(combatants, viewerSide, currentRef, defaultRef=
     if (nextFromPreviousOrder?.ref) return nextFromPreviousOrder.ref;
   }
   return liveTargets.find(c => c.ref === defaultRef)?.ref || liveTargets[0]?.ref || '';
+}
+
+function combatantViewSide(combatant, viewerSide='player') {
+  if (combatant?.viewSide === 'friendly' || combatant?.viewSide === 'enemy') return combatant.viewSide;
+  return combatant?.side === viewerSide ? 'friendly' : 'enemy';
+}
+
+function compareCombatantsForBattle(a, b) {
+  const faction = String(a?.factionName || '').localeCompare(String(b?.factionName || ''));
+  if (faction) return faction;
+  if (!!a?.primary !== !!b?.primary) return a?.primary ? -1 : 1;
+  return String(a?.name || a?.shipName || '').localeCompare(String(b?.name || b?.shipName || ''));
 }
 
 function RealtimeBattleModal({battle, act, onClose}) {
@@ -1056,7 +2172,8 @@ function RealtimeBattleModal({battle, act, onClose}) {
   const combatants = localBattle?.combatants || [];
   const viewerRef = localBattle?.viewerRef || '';
   const viewerSide = localBattle?.viewerSide || 'player';
-  const targetSignature = combatants.map(c => `${c.ref}:${c.side}:${c.defeated ? 1 : 0}:${c.escaped ? 1 : 0}`).join('|');
+  const targetSignature = localBattle?.combatantsSignature || combatants.map(c => `${c.ref}:${c.viewSide || c.side}:${c.factionKey || ''}:${c.defeated ? 1 : 0}:${c.escaped ? 1 : 0}`).join('|');
+  const advancePollMs = combatants.length > 24 ? 3000 : combatants.length > 12 ? 2200 : combatants.length > 6 ? 1500 : 1000;
 
   useEffect(() => {
     setLocalBattle(battle);
@@ -1088,15 +2205,15 @@ function RealtimeBattleModal({battle, act, onClose}) {
         if (!cancelled && res?.result?.battle) setLocalBattle(res.result.battle);
       } finally {
         advanceInFlightRef.current = false;
-        if (!cancelled) timer = setTimeout(tick, 1000);
+        if (!cancelled) timer = setTimeout(tick, advancePollMs);
       }
     };
-    timer = setTimeout(tick, 350);
+    timer = setTimeout(tick, Math.min(500, advancePollMs));
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [battleId, complete]);
+  }, [battleId, complete, advancePollMs]);
 
   async function performCombatAction(action, extra={}, options={}) {
     if (!localBattle || complete) return;
@@ -1280,11 +2397,23 @@ function BattleStageView({battle, current, complete, your, enemy, playerHull, pl
   const laneMode = complete ? 'complete' : actor;
   const playerSupport = battle?.playerSupport || [];
   const enemySupport = battle?.enemySupport || [];
-  const combatants = (battle?.combatants || []).filter(c => !c?.escaped);
-  const multiBattle = combatants.length > 2 || playerSupport.length > 0 || enemySupport.length > 0;
+  const rawCombatants = battle?.combatants || [];
   const viewerSide = battle?.viewerSide === 'enemy' ? 'enemy' : 'player';
-  const leftSide = multiBattle ? viewerSide : 'player';
-  const rightSide = leftSide === 'player' ? 'enemy' : 'player';
+  const {combatants, friendlyCombatants, enemyCombatants} = useMemo(() => {
+    const visible = [];
+    const friendly = [];
+    const enemies = [];
+    for (const combatant of rawCombatants) {
+      if (combatant?.escaped) continue;
+      visible.push(combatant);
+      if (combatantViewSide(combatant, viewerSide) === 'friendly') friendly.push(combatant);
+      else enemies.push(combatant);
+    }
+    friendly.sort(compareCombatantsForBattle);
+    enemies.sort(compareCombatantsForBattle);
+    return {combatants: visible, friendlyCombatants: friendly, enemyCombatants: enemies};
+  }, [rawCombatants, viewerSide]);
+  const multiBattle = combatants.length > 2 || playerSupport.length > 0 || enemySupport.length > 0;
   const selectedTarget = combatants.find(c => c.ref === selectedTargetRef);
   const enemyRecover = secondsUntilIso(selectedTarget?.actionUntil || battle?.enemyActionUntil);
   return <div className={`battleStage realtimeStage interactiveStage stableBattleStage ${complete ? 'complete' : 'active'}`}>
@@ -1292,11 +2421,11 @@ function BattleStageView({battle, current, complete, your, enemy, playerHull, pl
       <div className="playerBattleColumn battleShipOnly">
         <div className="battleShipAnchor playerAnchor">
           {multiBattle ? <CombatantRosterColumn
-            side={leftSide}
-            combatants={combatants.filter(c => c.side === leftSide)}
+            side="friendly"
+            combatants={friendlyCombatants}
             selectedTargetRef={selectedTargetRef}
             viewerRef={battle?.viewerRef}
-            viewerSide={viewerSide}
+            viewerSide="friendly"
             onSelectTarget={onSelectTarget}
           /> : <CombatShipSide title="Your Ship" ship={your} hull={playerHull} shield={playerShield} defeated={playerLost} side="player" effects={battle?.activeEffects || []} />}
         </div>
@@ -1316,11 +2445,11 @@ function BattleStageView({battle, current, complete, your, enemy, playerHull, pl
       <div className="enemyBattleColumn battleShipOnly">
         <div className="battleShipAnchor enemyAnchor">
           {multiBattle ? <CombatantRosterColumn
-            side={rightSide}
-            combatants={combatants.filter(c => c.side === rightSide)}
+            side="enemy"
+            combatants={enemyCombatants}
             selectedTargetRef={selectedTargetRef}
             viewerRef={battle?.viewerRef}
-            viewerSide={viewerSide}
+            viewerSide="friendly"
             onSelectTarget={onSelectTarget}
           /> : <CombatShipSide title={battle?.target?.name || 'Enemy'} ship={enemy} hull={enemyHull} shield={enemyShield} defeated={enemyLost} side="enemy" effects={battle?.activeEffects || []} />}
         </div>
@@ -1358,14 +2487,14 @@ function BattleStageView({battle, current, complete, your, enemy, playerHull, pl
 
 function CombatantRosterColumn({side, combatants=[], selectedTargetRef='', viewerRef='', viewerSide='player', onSelectTarget=()=>{}}) {
   return <div className={`combatantRosterColumn ${side}`}>
-    <div className="combatantRosterHeader"><b>{side === viewerSide ? 'Your Side' : 'Opposing Side'}</b><span>{fmt(combatants.length)}</span></div>
+    <div className="combatantRosterHeader"><b>{side === 'friendly' || side === viewerSide ? 'Your Faction' : 'Opposing Factions'}</b><span>{fmt(combatants.length)}</span></div>
     <div className="combatantRosterScroll">
       {combatants.map(c => <CombatantBattleCard
         key={c.ref}
         combatant={c}
         selected={c.ref === selectedTargetRef}
         isViewer={c.ref === viewerRef || c.isYou}
-        selectable={c.side !== viewerSide && !c.defeated}
+        selectable={combatantViewSide(c, viewerSide) !== 'friendly' && !c.defeated}
         onSelect={()=>onSelectTarget(c.ref)}
       />)}
     </div>
@@ -1379,11 +2508,13 @@ function CombatantBattleCard({combatant, selected=false, isViewer=false, selecta
   const liveShield = Math.max(0, Math.min(sMax, Number(combatant?.shield || 0)));
   return <button
     type="button"
-    className={`combatantBattleCard ${combatant?.side || 'neutral'} ${selected ? 'selectedTarget' : ''} ${isViewer ? 'you' : ''} ${combatant?.defeated ? 'defeated' : ''}`}
+    className={`combatantBattleCard ${combatant?.viewSide || combatant?.side || 'neutral'} ${selected ? 'selectedTarget' : ''} ${isViewer ? 'you' : ''} ${combatant?.defeated ? 'defeated' : ''}`}
+    style={{'--combatant-faction-color': combatant?.factionColor || undefined}}
     disabled={!selectable}
     onClick={selectable ? onSelect : undefined}
   >
     <div className="combatantCardName"><b>{combatant?.name || combatant?.shipName || 'Combatant'}</b>{isViewer && <span>You</span>}</div>
+    <div className="combatantCardFaction">{combatant?.factionName || 'Unaligned'}</div>
     <div className="combatantCardVitals">
       <MiniMeter label="Shield" value={liveShield} max={sMax} />
       <MiniMeter label="Hull HP" value={liveHull} max={hMax} danger={liveHull < hMax * 0.35} />
@@ -1521,7 +2652,6 @@ function Topbar({state,onLogout}) {
     window.dispatchEvent(new CustomEvent('nova:tutorial-open'));
   };
   return <header className="topbar">
-    <img className="topbarBrandEmblem" src={brandAssets.emblem} alt="Nova Frontiers" />
     <div className="identityStat"><ProfileAvatar profile={state.profile} size="sm" /><span>{state.profile?.displayName || state.player.callsign}<small>@{state.profile?.username || state.user.username}</small></span></div>
     <div className="stat"><Coins/> Credits <b>{fmt(p.credits)}</b></div>
     <div className={`stat ${state.phase_expansion?.fuelStatus?.empty ? 'dangerStat' : state.phase_expansion?.fuelStatus?.low ? 'warningStat' : ''}`}><Fuel/> Fuel <b>{fmt(p.fuel)} / {fmt(p.max_fuel)}</b>{state.phase_expansion?.fuelStatus?.message && <small>{state.phase_expansion.fuelStatus.message}</small>}</div>
@@ -1712,12 +2842,16 @@ function Dashboard({state,act,setPage,clock,token}) {
 
 
 
-function Profile({state,act}) {
+function Profile({state,act,onDeleteProfile}) {
   const profile = state.profile || {};
   const avatars = state.avatar_options || [];
   const achievements = state.achievements || profile.achievements || {loops:[], unlockedBadges:[], passiveBuffs:{}};
   const [tab,setTab] = useState('overview');
   const [form,setForm] = useState({username:profile.username || '', displayName:profile.displayName || '', bio:profile.bio || '', avatarId:profile.avatarId || 'default', selectedBadgeCode:profile.selectedBadgeCode || ''});
+  const [deleteOpen,setDeleteOpen] = useState(false);
+  const [deleteText,setDeleteText] = useState('');
+  const [deleteBusy,setDeleteBusy] = useState(false);
+  const [deleteError,setDeleteError] = useState('');
   useEffect(()=>{ setForm({username:profile.username || '', displayName:profile.displayName || '', bio:profile.bio || '', avatarId:profile.avatarId || 'default', selectedBadgeCode:profile.selectedBadgeCode || ''}); }, [profile.username, profile.displayName, profile.bio, profile.avatarId, profile.selectedBadgeCode]);
   const selected = avatars.find(a=>a.id===form.avatarId) || avatars[0] || {url:'/assets/avatars/default.svg', label:'Default Pilot'};
   const save = () => act('update_profile', form);
@@ -1744,6 +2878,12 @@ function Profile({state,act}) {
           <label>Display Name<input value={form.displayName} maxLength={32} onChange={e=>setForm(f=>({...f, displayName:e.target.value}))} /></label>
           <label>Status / Bio<textarea value={form.bio} maxLength={180} onChange={e=>setForm(f=>({...f, bio:e.target.value}))} placeholder="Short pilot status" /></label>
           <button className="primary" onClick={save}><Save size={16}/> Save Profile</button>
+        </div>
+      </Panel>
+      <Panel title="Danger Zone">
+        <div className="profileDangerZone">
+          <div><b>Delete This Profile</b><span>Permanent account, progress, inventory, ships, and login deletion.</span></div>
+          <button type="button" className="dangerBtn deleteProfileButton" onClick={()=>{ setDeleteOpen(true); setDeleteText(''); setDeleteError(''); }}><AlertTriangle size={16}/> Delete This Profile</button>
         </div>
       </Panel>
     </div>
@@ -1782,7 +2922,7 @@ function Profile({state,act}) {
       <button className="primary" onClick={save}>Save Badge</button>
     </Panel>}
 
-    {tab === 'avatars' && <Panel title="Avatar Selection" help="Your faction controls this roster. Each faction has 6 female and 6 male portraits, and the backend rejects cross-faction avatar ids.">
+    {tab === 'avatars' && <Panel title="Avatar Selection" help="Your faction controls this roster. Each faction has 12 sheet-sourced portraits, and the backend rejects cross-faction avatar ids.">
       <div className="avatarGrid">
         {avatars.map(a=><button key={a.id} className={form.avatarId===a.id?'selectedAvatar':''} onClick={()=>setForm(f=>({...f, avatarId:a.id}))}>
           <GameImage src={a.url} assetType="avatar" category={a.id} hint={a.id} alt={a.label} />
@@ -1790,6 +2930,24 @@ function Profile({state,act}) {
         </button>)}
       </div>
     </Panel>}
+    {deleteOpen && <div className="modalBackdrop profileDeleteBackdrop" onMouseDown={()=>!deleteBusy && setDeleteOpen(false)}>
+      <div className="publicProfileModal deleteProfileModal" onMouseDown={e=>e.stopPropagation()}>
+        <button type="button" className="modalX" disabled={deleteBusy} onClick={()=>setDeleteOpen(false)}>x</button>
+        <div className="deleteProfileHeader"><AlertTriangle size={28}/><div><h2>Delete This Profile</h2><span>This cannot be undone.</span></div></div>
+        <p>This permanently deletes your Nova Frontiers profile, progress, inventory, ships, faction history, and login access. This cannot be undone.</p>
+        <label className="deleteConfirmField">Type DELETE<input value={deleteText} onChange={e=>setDeleteText(e.target.value)} autoComplete="off" /></label>
+        {deleteError && <div className="error">{deleteError}</div>}
+        <div className="buttonRow">
+          <button type="button" disabled={deleteBusy} onClick={()=>setDeleteOpen(false)}>Cancel</button>
+          <button type="button" className="dangerBtn" disabled={deleteBusy || deleteText !== 'DELETE'} onClick={async()=>{
+            setDeleteBusy(true);
+            setDeleteError('');
+            try { await onDeleteProfile?.(deleteText); }
+            catch(ex) { setDeleteError(String(ex.message || ex)); setDeleteBusy(false); }
+          }}>{deleteBusy ? 'Deleting...' : 'Permanently Delete'}</button>
+        </div>
+      </div>
+    </div>}
   </Page>;
 }
 
@@ -1997,7 +3155,7 @@ function TradeModal({trade,state,act,onClose}) {
   </div>;
 }
 
-function StarMap({state,act,clock,mapFocus}) {
+function StarMap({state,act,clock,mapFocus,autoExploreMode='',autoExploreLastMode='pirate',autoExploreStatus='',onToggleAutoExploreMode=null,dialogs}) {
   const travel = state.travel_state || {};
   const preferredMode = travel.active && ['galaxy', 'galaxy_route'].includes(String(travel.mode || '')) ? 'galaxy' : travel.open_space && travel.open_space_map_type === 'galaxy' ? 'galaxy' : 'system';
   const [mode,setMode] = useState(preferredMode);
@@ -2020,7 +3178,7 @@ function StarMap({state,act,clock,mapFocus}) {
   const mapModeProps = {mapMode:mode, onMapModeChange:setMode, onViewGalaxy:viewGalaxy, mapFocus};
   const currentGalaxyId = Number(state.location?.galaxy_id || state.system_map?.current_galaxy_id || 0);
   return <div>
-    {mode === 'galaxy' ? <Galaxies state={state} act={act} clock={clock} {...mapModeProps} /> : (viewGalaxyId && viewGalaxyId !== currentGalaxyId ? <RemoteSystemMap state={state} act={act} clock={clock} galaxyId={viewGalaxyId} onBack={()=>setViewGalaxyId(null)} {...mapModeProps} /> : <SystemMap state={state} act={act} clock={clock} {...mapModeProps} />)}
+    {mode === 'galaxy' ? <Galaxies state={state} act={act} clock={clock} {...mapModeProps} /> : (viewGalaxyId && viewGalaxyId !== currentGalaxyId ? <RemoteSystemMap state={state} act={act} clock={clock} galaxyId={viewGalaxyId} onBack={()=>setViewGalaxyId(null)} {...mapModeProps} /> : <SystemMap state={state} act={act} clock={clock} dialogs={dialogs} autoExploreMode={autoExploreMode} autoExploreLastMode={autoExploreLastMode} autoExploreStatus={autoExploreStatus} onToggleAutoExploreMode={onToggleAutoExploreMode} {...mapModeProps} />)}
   </div>
 }
 
@@ -2044,7 +3202,7 @@ function Galaxies({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocus
         onCancelTravel={()=>act('cancel_travel',{})}
         onScanArea={(pos)=>act('scan_area',{...pos,map_type:'galaxy'})}
         onScanObject={(target)=>act('scan_object',{...target,map_type:'galaxy'})}
-        onIntercept={(ship)=>act('intercept_traveler',{target_ref:ship.combatTargetRef || ship.id})}
+        onIntercept={(ship)=>act('intercept_traveler',{target_ref:ship.combatTargetRef || ship.id,x_pct:ship.x_pct,y_pct:ship.y_pct,label:ship.name || ship.label || ship.ship_name,map_type:'galaxy'})}
         onResolveIntercept={()=>act('resolve_intercept_now',{})}
         onScanSite={(site)=>act('scan_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onInvestigate={(site)=>act('investigate_exploration_site',{site_id:site.explorationSiteId || site.id})}
@@ -2063,13 +3221,13 @@ currentId={map.current_galaxy_id} clock={clock} mapMode={mapMode} onMapModeChang
   </Page>
 }
 
-function SystemMap({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocus}) {
+function SystemMap({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocus,autoExploreMode='',autoExploreLastMode='pirate',autoExploreStatus='',onToggleAutoExploreMode=null,dialogs}) {
   const map = state.system_map || {nodes:[], lanes:[]};
   const travel = state.travel_state || {};
   const activeMission = state.planet_missions?.active;
   if (activeMission) {
     return <Page title="Map — Mission View" sub="You are away from the ship on a planet mission. The local map returns after completion or cancellation.">
-      <MissionScreen state={state} act={act} clock={clock} />
+      <MissionScreen state={state} act={act} clock={clock} dialogs={dialogs} />
     </Page>;
   }
   return <Page title="Map — System View" sub="Planet view shows local planets, stations, pirate stations, resources, and galaxy gates leading to adjacent galaxies.">
@@ -2083,21 +3241,24 @@ function SystemMap({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocu
         onCancelTravel={()=>act('cancel_travel',{})}
         onScanArea={(pos)=>act('scan_area',{...pos,map_type:'system'})}
         onScanObject={(target)=>act('scan_object',{...target,map_type:'system'})}
-        onIntercept={(ship)=>act('intercept_traveler',{target_ref:ship.combatTargetRef || ship.id})}
+        onIntercept={(ship)=>act('intercept_traveler',{target_ref:ship.combatTargetRef || ship.id,x_pct:ship.x_pct,y_pct:ship.y_pct,label:ship.name || ship.label || ship.ship_name,map_type:'system'})}
         onResolveIntercept={()=>act('resolve_intercept_now',{})}
         onMine={(site)=>act('mine_ore_site',{site_id:site.siteId || site.id})}
         onSalvage={(site)=>act('salvage_site',{site_id:site.salvageSiteId || site.id})}
         onScanSite={(site)=>act('scan_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onInvestigate={(site)=>act('investigate_exploration_site',{site_id:site.explorationSiteId || site.id})}
         onEnterPirateStation={(station)=>act('enter_pirate_station',{station_id:station.stationId || station.id})}
-        onPlaceBase={(pos)=>act('place_player_base',{...pos,map_type:'system',name:prompt('Base name','Private Base') || 'Private Base'})}
+        onPlaceBase={async (pos)=>{
+          const name = await dialogs.textInput('Name this private base.', 'Private Base', {title:'Build Private Base', inputLabel:'Base name'});
+          act('place_player_base',{...pos,map_type:'system',name:name || 'Private Base'});
+        }}
         onAdminSpawn={(payload)=>act('admin_spawn_map_objects', payload)}
         onDockBase={(base)=>act('dock_player_base',{base_id:base.baseId || base.id})}
         onMissionTravel={(node,mission)=>act('start_planet_mission_travel',{planet_id:node.id,mission_key:mission.key})}
         onPilotTrade={(p)=>act('trade_invite',{playerId:p.playerId})}
         onPilotParty={(p)=>act('party_invite',{playerId:p.playerId})}
         onPilotBlock={(p)=>act('social_block_player',{playerId:p.playerId})}
-currentId={map.current_planet_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} onViewGalaxy={onViewGalaxy} focusTarget={mapFocus} party={state.party} publicProfiles={state.public_profiles || []} missionCooldown={state.planet_missions?.cooldown || null} />
+currentId={map.current_planet_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} onViewGalaxy={onViewGalaxy} focusTarget={mapFocus} party={state.party} publicProfiles={state.public_profiles || []} missionCooldown={state.planet_missions?.cooldown || null} autoExploreMode={autoExploreMode} autoExploreLastMode={autoExploreLastMode} autoExploreStatus={autoExploreStatus} onToggleAutoExploreMode={onToggleAutoExploreMode} />
       <div className="routeLegend"><span className="solid">Visited local route</span><span className="dash">Available local route</span><span className="activeLine">Active local travel</span></div>
     </Panel>
   </Page>
@@ -2152,7 +3313,7 @@ function RemoteSystemMap({state,act,clock,galaxyId,onBack,mapMode,onMapModeChang
 }
 
 
-function ServerCalendar({state,act,clock,setPage,openServerEventOnMap}) {
+function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs}) {
   const phase = state.phase_expansion || {};
   const [tab,setTab] = useState('events');
   const events = useMemo(
@@ -2178,25 +3339,25 @@ function ServerCalendar({state,act,clock,setPage,openServerEventOnMap}) {
   const bonuses = phase.artifactBonuses || {};
   const eventTypes = ['alien_raid','wormhole_control','convoy_breakthrough','mining_surge','derelict_armada','warfront_surge'];
 
-  const scan = () => {
-    const x = Number(prompt('Scan X percent', '50')) || 50;
-    const y = Number(prompt('Scan Y percent', '50')) || 50;
+  const scan = async () => {
+    const x = Number(await dialogs.textInput('Scan X percent', '50', {title:'Scan Area', inputLabel:'X percent'})) || 50;
+    const y = Number(await dialogs.textInput('Scan Y percent', '50', {title:'Scan Area', inputLabel:'Y percent'})) || 50;
     act('scan_area', {map_type:'system', x_pct:x, y_pct:y});
   };
-  const contribute = () => {
-    const item_code = prompt('Material/item code to contribute', 'scrap') || 'scrap';
-    const qty = Number(prompt('Quantity', '10')) || 10;
-    act('contribute_war_supply', {item_code, qty});
+  const contribute = async () => {
+    const item_code = await dialogs.textInput('Material/item code to contribute', 'scrap', {title:'War Supply Contribution', inputLabel:'Item code'});
+    const qty = Number(await dialogs.textInput('Quantity', '10', {title:'War Supply Contribution', inputLabel:'Quantity'})) || 10;
+    act('contribute_war_supply', {item_code:item_code || 'scrap', qty});
   };
-  const createBounty = () => {
-    const target_player_id = Number(prompt('Target player ID', '2')) || 0;
-    const reward = Number(prompt('Reward credits', '10000')) || 10000;
+  const createBounty = async () => {
+    const target_player_id = Number(await dialogs.textInput('Target player ID', '2', {title:'Create Player Bounty', inputLabel:'Target player ID'})) || 0;
+    const reward = Number(await dialogs.textInput('Reward credits', '10000', {title:'Create Player Bounty', inputLabel:'Reward credits'})) || 10000;
     if (target_player_id) act('create_player_bounty', {target_player_id, reward});
   };
-  const refine = () => {
-    const input_code = prompt('Raw ore/material code', 'ore') || 'ore';
-    const qty = Number(prompt('Quantity', '10')) || 10;
-    act('start_refinery_job', {input_code, qty});
+  const refine = async () => {
+    const input_code = await dialogs.textInput('Raw ore/material code', 'ore', {title:'Start Refinery Job', inputLabel:'Input code'});
+    const qty = Number(await dialogs.textInput('Quantity', '10', {title:'Start Refinery Job', inputLabel:'Quantity'})) || 10;
+    act('start_refinery_job', {input_code:input_code || 'ore', qty});
   };
 
   return <Page title="Server Calendar" sub="Server events, bounties, wormholes, derelicts, artifacts, refining, contracts, fuel, and weekly event ladder.">
@@ -2339,7 +3500,7 @@ function ServerEventCard({event}) {
   return <div className={`serverEventCard ${event.event_type}`}><b>{event.name}</b><span>{new Date(event.starts_at).toLocaleString()}</span><small>{label(event.schedule_type)} • {label(event.status)}</small><p>{event.rewards?.rareEquipment ? 'Rare equipment chance. ' : ''}{event.rewards?.artifactChance ? 'Artifact chance. ' : ''}{event.rewards?.fuelVouchers ? 'Fuel vouchers. ' : ''}</p></div>
 }
 
-function Market({state,act}) {
+function Market({state,act,dialogs}) {
   const [tab,setTab] = useState('legal');
   const [category,setCategory] = useState('all');
   const [query,setQuery] = useState('');
@@ -2361,18 +3522,18 @@ function Market({state,act}) {
     if (item.source === 'cargo_hold' && item.commodity_id) act('sell_commodity',{commodity_id:item.commodity_id,qty:safeQty});
     else act('sell_inventory_item',{item_code:item.item_code,qty:safeQty});
   };
-  const listItem = (item, defaultQty=1) => {
+  const listItem = async (item, defaultQty=1) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(await dialogs.textInput(`Quantity to list for ${item.name}`, String(Math.min(defaultQty, maxQty)), {title:'Create Market Listing', inputLabel:'Quantity'})) || 1));
     const base = Number(item.base_value || item.avg_cost || 100);
-    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const unitPrice = Math.max(1, Number(await dialogs.textInput('Unit price', String(base), {title:'Create Market Listing', inputLabel:'Unit price'})) || base);
     const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice };
     act('create_player_listing', payload);
   };
-  const storeItem = (item, defaultQty=1) => {
+  const storeItem = async (item, defaultQty=1) => {
     if (storageInOpenSpace) return;
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to store at current planet for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(await dialogs.textInput(`Quantity to store at current planet for ${item.name}`, String(Math.min(defaultQty, maxQty)), {title:'Store Item', inputLabel:'Quantity'})) || 1));
     const payload = { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty };
     act('store_item', payload);
   };
@@ -2381,9 +3542,9 @@ function Market({state,act}) {
     const safeQty = Math.max(1, Math.min(qty, listing.remaining_qty || 1));
     act('buy_player_listing', {listing_id:listing.id, qty:safeQty});
   };
-  const withdrawStorage = (item, defaultQty=1) => {
+  const withdrawStorage = async (item, defaultQty=1) => {
     if (storageInOpenSpace || !item.can_modify) return;
-    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(prompt(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)))) || 1));
+    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(await dialogs.textInput(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)), {title:'Withdraw Storage', inputLabel:'Quantity'})) || 1));
     act('withdraw_storage_item', {storage_id:item.id, qty});
   };
 
@@ -2602,7 +3763,7 @@ function PressureBadge({item}) {
   return <span className={`pressureBadge ${item.legal ? 'legal' : 'illegal'}`}>{fmt(item.pressureScore)} • {label(item.scarcityLevel || 'balanced')}</span>
 }
 
-function Inventory({state,act}) {
+function Inventory({state,act,dialogs}) {
   const [category,setCategory] = useState('all');
   const [query,setQuery] = useState('');
   const [sort,setSort] = useState('value');
@@ -2672,22 +3833,22 @@ function Inventory({state,act}) {
     if (item.source === 'cargo_hold' && item.commodity_id) act('sell_commodity',{commodity_id:item.commodity_id,qty:safeQty});
     else act('sell_inventory_item',{item_code:item.item_code,qty:safeQty});
   };
-  const listItem = (item) => {
+  const listItem = async (item) => {
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to list for ${item.name}`, '1')) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(await dialogs.textInput(`Quantity to list for ${item.name}`, '1', {title:'Create Market Listing', inputLabel:'Quantity'})) || 1));
     const base = Number(item.market_sell_estimate?.unit || item.base_value || item.avg_cost || 100);
-    const unitPrice = Math.max(1, Number(prompt('Unit price', String(base))) || base);
+    const unitPrice = Math.max(1, Number(await dialogs.textInput('Unit price', String(base), {title:'Create Market Listing', inputLabel:'Unit price'})) || base);
     act('create_player_listing', { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty, unit_price:unitPrice });
   };
-  const storeItem = (item, defaultQty=1) => {
+  const storeItem = async (item, defaultQty=1) => {
     if (inOpenSpace) return;
     const maxQty = Math.max(1, item.available_qty || item.qty || 1);
-    const qty = Math.max(1, Math.min(maxQty, Number(prompt(`Quantity to store at ${currentCargoPlanetName} for ${item.name}`, String(Math.min(defaultQty, maxQty)))) || 1));
+    const qty = Math.max(1, Math.min(maxQty, Number(await dialogs.textInput(`Quantity to store at ${currentCargoPlanetName} for ${item.name}`, String(Math.min(defaultQty, maxQty)), {title:'Store Item', inputLabel:'Quantity'})) || 1));
     act('store_item', { source:item.source || 'inventory', item_code:item.item_code, commodity_id:item.commodity_id, module_id:item.id, id:item.id, qty });
   };
-  const withdrawCargo = (item, defaultQty=1) => {
+  const withdrawCargo = async (item, defaultQty=1) => {
     if (inOpenSpace || !item.can_modify) return;
-    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(prompt(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)))) || 1));
+    const qty = Math.max(1, Math.min(Number(item.qty || 1), Number(await dialogs.textInput(`Quantity to withdraw from ${item.planet_name}`, String(Math.min(defaultQty, item.qty || 1)), {title:'Withdraw Storage', inputLabel:'Quantity'})) || 1));
     act('withdraw_storage_item', {storage_id:item.id, qty});
   };
   const canUse = (i) => i.usable && (i.available_qty || 0) > 0 && i.source !== 'cargo_hold';
@@ -2781,16 +3942,25 @@ function Inventory({state,act}) {
           {canUse(i) && <button onClick={()=>act('use_inventory_item',{item_code:i.item_code,qty:1})}>Use</button>}
           {canEquip(i) && <button onClick={()=>act('equip_inventory_item',{item_code:i.item_code})}>Equip</button>}
           {i.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:i.item_code})}>Upgrade</button>}
-          {i.salvage_preview && <button onClick={()=>confirm(`Salvage ${i.name}?`) && act('salvage_inventory_item',{item_code:i.item_code,qty:1})}>Salvage</button>}
+          {i.salvage_preview && <button onClick={async ()=>{
+            const confirmed = await dialogs.critical(`Salvage ${i.name}? This permanently converts the item into materials.`, {
+              title:'Salvage Item',
+              eyebrow:'Permanent inventory action',
+              confirmLabel:'Salvage',
+              confirmationPhrase:'SALVAGE',
+              inputLabel:'Type SALVAGE to confirm'
+            });
+            if (confirmed) act('salvage_inventory_item',{item_code:i.item_code,qty:1});
+          }}>Salvage</button>}
         </div>
       </div>)}</div>
-      <InventoryDetails item={selected || filteredItems[0]} act={act} sellItem={sellItem} listItem={listItem} />
+      <InventoryDetails item={selected || filteredItems[0]} act={act} sellItem={sellItem} listItem={listItem} dialogs={dialogs} />
     </div>
     {!filteredItems.length && <Panel title="Empty Inventory"><p className="muted">No items match the current filters.</p></Panel>}
   </Page>;
 }
 
-function InventoryDetails({item, act, sellItem, listItem}) {
+function InventoryDetails({item, act, sellItem, listItem, dialogs}) {
   if (!item) return <Panel title="Item Details"><p className="muted">Select an item to inspect cargo, market, crafting, legality, and action status.</p></Panel>;
   const risk = item.illegal_risk || {};
   return <Panel title="Item Details" help="Inspection uses backend-resolved item data, not frontend-only guesses.">
@@ -2815,7 +3985,16 @@ function InventoryDetails({item, act, sellItem, listItem}) {
         {item.usable && <button disabled={(item.available_qty||0)<=0 || item.source==='cargo_hold'} onClick={()=>act('use_inventory_item',{item_code:item.item_code,qty:1})}>Use</button>}
         {item.equippable && <button disabled={(item.available_qty||0)<=0 || item.source!=='inventory'} onClick={()=>act('equip_inventory_item',{item_code:item.item_code})}>Equip</button>}
         {item.tier_upgrade?.can_upgrade && <button onClick={()=>act('upgrade_inventory_item',{item_code:item.item_code})}>Upgrade Tier</button>}
-        {item.salvage_preview && <button onClick={()=>confirm(`Salvage ${item.name}?`) && act('salvage_inventory_item',{item_code:item.item_code,qty:1})}>Salvage</button>}
+        {item.salvage_preview && <button onClick={async ()=>{
+          const confirmed = await dialogs.critical(`Salvage ${item.name}? This permanently converts the item into materials.`, {
+            title:'Salvage Item',
+            eyebrow:'Permanent inventory action',
+            confirmLabel:'Salvage',
+            confirmationPhrase:'SALVAGE',
+            inputLabel:'Type SALVAGE to confirm'
+          });
+          if (confirmed) act('salvage_inventory_item',{item_code:item.item_code,qty:1});
+        }}>Salvage</button>}
       </div>
     </div>
   </Panel>
@@ -2831,7 +4010,7 @@ function Guild({state,act}) {
 }
 
 
-function FactionWar({state,act,clock}) {
+function WarfrontPanels({state,act,clock}) {
   const wars = state.planet_wars || state.galaxy_wars || [];
   const resolved = state.resolved_planet_wars || state.resolved_galaxy_wars || [];
   const factions = state.factions || [];
@@ -2839,7 +4018,7 @@ function FactionWar({state,act,clock}) {
   const planets = state.system_map?.nodes?.filter(n => n.kind === 'planet') || state.planets || [];
   const currentFaction = state.player_faction || {};
   const guild = state.guild || {};
-  return <Page title="Faction War" sub="Guild wars start on planets; galaxy control is earned planet by planet.">
+  return <>
     <div className="cards3">
       <Panel title="Your Side" help="This is the flag you fight under. Guild declarations pull the whole attacker and defender factions into the planet war.">
         <div className="nodeHeader"><ItemVisual item={{name:currentFaction.name || 'Faction', category:currentFaction.color || 'faction'}} /><div><b>{currentFaction.name || 'Unassigned'}</b><span>{guild.name ? `${guild.name} guild` : 'No guild'} • planet wars use whole-faction attacker/defender sides.</span></div></div>
@@ -2892,17 +4071,39 @@ function FactionWar({state,act,clock}) {
     <Panel title="Resolved Planet Wars">
       <div className="feedList compactFeed">{resolved.map(w=><div key={w.id}><b>{w.planet_name}</b><span>Winner: {w.winner_faction_name || 'Unknown'} • {w.galaxy_name}</span><small>{w.resolved_at ? new Date(w.resolved_at).toLocaleString() : ''}</small></div>)}</div>
     </Panel>
-  </Page>
+  </>
+}
+
+
+function FactionWar({state,act,clock}) {
+  return <Page title="Faction War" sub="Guild wars start on planets; galaxy control is earned planet by planet.">
+    <WarfrontPanels state={state} act={act} clock={clock} />
+  </Page>;
 }
 
 
 function Warfare({state,act,clock}) {
-  return <FactionWar state={state} act={act} clock={clock} />;
+  return <Page title="Warfare" sub="Read the war map before you commit ships, treasury, and travel time. Warfare is about preparation, staging, and holding objectives long enough for your faction to matter.">
+    <DescriptionBlock
+      eyebrow="Strategy Layer"
+      title="How Warfare Fits Together"
+      lead="Warfare is the command view for long fights. A normal combat target is one battle; a war is a campaign where guild resources, faction ownership, travel timing, ship readiness, and capture windows all stack together."
+      points={[
+        ['Pick the Front', 'Wars are declared on planets. The planet decides where pilots travel, who can score, and what the local defender is protecting.'],
+        ['Stage Before the Ring Opens', 'Repair, refuel, load supplies, and bring the ship that matches the job. Arriving early and ready is usually stronger than arriving fast and empty.'],
+        ['Hold the Objective', 'Active wars are won by presence and control, not by a single damage roll. If the other side contests the ring, the capture clock becomes the whole fight.'],
+        ['Think in Campaigns', 'A planet win is progress. A galaxy win takes every planet in that galaxy, so the best target is often the one that opens the next clean path.'],
+      ]}
+    />
+    <WarfrontPanels state={state} act={act} clock={clock} />
+  </Page>;
 }
 
 
 function PlanetControl({state,act}) {
   const pc = state.planet_control || {effects:{}, actions:[], events:[]};
+  const tc = state.territory_control || {};
+  const supply = tc.supply || {};
   const planet = pc.planet || state.location || {};
   const effects = pc.effects || {};
   return <Page title="Planet Control" sub="Local influence, faction control, security, stability, taxes, conflict, and economy modifiers for the current planet or station.">
@@ -2937,6 +4138,7 @@ function PlanetControl({state,act}) {
       <Panel title="Faction Position">
         <div className="influenceStack">
           <InfluenceBar label="Player Influence" value={planet.player_influence || 0} />
+          <InfluenceBar label="Territory Pressure" value={(tc.influence || [])[0]?.amount || 0} danger={tc.status === 'war'} />
           <InfluenceBar label="Security" value={planet.security_level || 0} />
           <InfluenceBar label="Stability" value={planet.stability_level || 0} />
           <InfluenceBar label="Conflict" value={planet.conflict_level || 0} danger />
@@ -2944,6 +4146,25 @@ function PlanetControl({state,act}) {
         </div>
       </Panel>
     </div>
+
+    <Panel title="War Supply">
+      <div className="warSupplyHead">
+        <Stats pairs={{
+          Territory:label(tc.status || 'secure'),
+          SupplyTier:supply.label || 'Unstocked',
+          SupplyPoints:supply.points || 0,
+          ZoneBuff:Object.entries(supply.buff || {}).map(([k,v])=>`${label(k)} ${v}`).join(', ') || 'None'
+        }} />
+      </div>
+      <div className="warSupplyGrid">{(supply.items || []).length ? (supply.items || []).map(item => {
+        const qty = Math.max(1, Math.min(5, Number(item.available_qty || 0)));
+        return <button key={item.item_code} className="warSupplyCard" disabled={!supply.eligible || qty <= 0} onClick={()=>act('territory_supply_delivery',{item_code:item.item_code, qty})}>
+          <b>{item.name}</b>
+          <span>{fmt(item.available_qty)} ready • {fmt(item.points_each)} pts each</span>
+          <small>Deliver {fmt(qty)}</small>
+        </button>
+      }) : <div className="mutedBlock">{supply.eligible ? 'No eligible raw, refined, or salvage materials are available.' : 'Supply delivery opens on faction-owned planets inside contested or war territory.'}</div>}</div>
+    </Panel>
 
     <Panel title="Control Actions" help="Actions are small nudges. Job-matched actions gain extra influence but still consume energy/fuel/credits.">
       <div className="controlActionGrid">{(pc.actions || []).map(a=><div className={`controlActionCard ${a.job_bonus?'matchedControl':''}`} key={a.key}>
@@ -3314,7 +4535,7 @@ function Skills({state,act}) {
   </Page>
 }
 
-function Properties({state,act}) {
+function Properties({state,act,dialogs}) {
   const [tab,setTab] = useState('base');
   const [researchQ,setResearchQ] = useState('');
   const [buildingQ,setBuildingQ] = useState('');
@@ -3332,7 +4553,10 @@ function Properties({state,act}) {
     {tab === 'base' && <>
       <div className="cards3">
         <Panel title="Private Base Status" help="Build from a blank point on the System Map. Clearance requires two icon-spaces from planets, stations, nodes, pirate bases, and other bases.">
-          {base ? <div className="baseStatusCard"><b>{base.name}</b><span>{base.galaxy_name} • anchored near {base.anchor_planet_name || 'open space'} • {Number(base.x_pct).toFixed(1)} / {Number(base.y_pct).toFixed(1)}</span><button onClick={()=>act('collect_base_output')}>Collect Passive Output</button></div> : <div className="baseStatusCard"><b>No Base Built</b><span>Open the System Map, click an empty area, then use Build Base Here. Placement cost: {fmt(baseState.placement?.cost || 2500000)} credits.</span><button onClick={()=>act('place_player_base',{x_pct:50,y_pct:50,map_type:'system',name:prompt('Base name','Private Base') || 'Private Base'})}>Emergency Place Near Center</button></div>}
+          {base ? <div className="baseStatusCard"><b>{base.name}</b><span>{base.galaxy_name} • anchored near {base.anchor_planet_name || 'open space'} • {Number(base.x_pct).toFixed(1)} / {Number(base.y_pct).toFixed(1)}</span><button onClick={()=>act('collect_base_output')}>Collect Passive Output</button></div> : <div className="baseStatusCard"><b>No Base Built</b><span>Open the System Map, click an empty area, then use Build Base Here. Placement cost: {fmt(baseState.placement?.cost || 2500000)} credits.</span><button onClick={async ()=>{
+            const name = await dialogs.textInput('Name this emergency private base.', 'Private Base', {title:'Emergency Base Placement', inputLabel:'Base name'});
+            act('place_player_base',{x_pct:50,y_pct:50,map_type:'system',name:name || 'Private Base'});
+          }}>Emergency Place Near Center</button></div>}
         </Panel>
         <Panel title="Long-Term Completion"><Stats pairs={{Research:`${fmt(baseState.summary?.research_complete || 0)} / ${fmt(baseState.summary?.research_total || 0)}`, Buildings:`${fmt(baseState.summary?.complete_buildings || 0)} / ${fmt(baseState.summary?.total_buildings || 0)}`, Clearance:`${baseState.placement?.clearance_spaces || 2} spaces`, Rule:'One base only'}} /></Panel>
         <Panel title="Active Work">{activeResearch ? <div className="itemLine"><b>{activeResearch.name}</b><span>Researching • {clockTimeLeft(activeResearch.complete_at)}</span></div> : <p className="muted">No active research.</p>}{activeBuilding ? <div className="itemLine"><b>{activeBuilding.name}</b><span>Building • {clockTimeLeft(activeBuilding.complete_at)}</span></div> : <p className="muted">No active construction.</p>}</Panel>
@@ -4735,7 +5959,7 @@ function PlanetMissionContracts({state,act,compact=false}) {
   </div>;
 }
 
-function MissionScreen({state,act,clock}) {
+function MissionScreen({state,act,clock,dialogs}) {
   const mission = state.planet_missions?.active;
   if (!mission) return null;
   const progress = Math.max(0, Math.min(1, Number(mission.progress || 0)));
@@ -4746,12 +5970,18 @@ function MissionScreen({state,act,clock}) {
   const movingObjects = missionMovingObjects(mission, theme);
   const eventFlybys = missionEventFlybys(visibleLogs, mission);
   const done = mission.returnReady || mission.status === 'return_ready';
-  const cancel = () => {
+  const cancel = async () => {
     if (done) {
       act('return_to_map_after_mission', {mission_id:mission.id});
       return;
     }
-    if (window.confirm('You will expedite returning to your ship and leaving your rewards behind, continue?')) {
+    if (await dialogs.critical('You will expedite returning to your ship and leave mission rewards behind.', {
+      title:'Abort Planet Mission',
+      eyebrow:'Rewards will be forfeited',
+      confirmLabel:'Return to Ship',
+      confirmationPhrase:'ABORT',
+      inputLabel:'Type ABORT to confirm'
+    })) {
       act('cancel_planet_mission', {});
     }
   };
@@ -5467,9 +6697,9 @@ function AdminSpawnModal({context, onSpawn, onClose}) {
   </div>;
 }
 
-function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanObject, onScanSite, onInvestigate, onEnterPirateStation, onPlaceBase, onAdminSpawn, onDockBase, onMissionTravel, currentId, clock, mapMode, onMapModeChange, onViewGalaxy, focusTarget=null, onPilotTrade=null, onPilotParty=null, onPilotBlock=null, party=null, publicProfiles=[], missionCooldown=null}) {
-  const MAP_W = 12000;
-  const MAP_H = 7800;
+function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanObject, onScanSite, onInvestigate, onEnterPirateStation, onPlaceBase, onAdminSpawn, onDockBase, onMissionTravel, currentId, clock, mapMode, onMapModeChange, onViewGalaxy, focusTarget=null, onPilotTrade=null, onPilotParty=null, onPilotBlock=null, party=null, publicProfiles=[], missionCooldown=null, autoExploreMode='', autoExploreLastMode='pirate', autoExploreStatus='', onToggleAutoExploreMode=null}) {
+  const MAP_W = 24000;
+  const MAP_H = 15600;
   const MAP_MIN_ZOOM = 0.18;
   const MAP_MAX_ZOOM = 1.75;
   const nodes = map.nodes || [];
@@ -5488,10 +6718,12 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const [zoom,setZoom] = useState(0.32);
   const [pan,setPan] = useState({x:20,y:18});
   const [selectedObject,setSelectedObject] = useState(null);
+  const [mobileSheetObject,setMobileSheetObject] = useState(null);
+  const [mobileFilter,setMobileFilter] = useState('all');
   const [profileModal,setProfileModal] = useState(null);
   const [context,setContext] = useState(null);
   const [spawnContext,setSpawnContext] = useState(null);
-  const [layers,setLayers] = useState({ships:true, hostiles:true, patrols:true, ore:true, wrecks:true, exploration:true, pirates:true, bases:true, events:true, routes:true, danger:true, market:true});
+  const [layers,setLayers] = useState({ships:true, hostiles:true, patrols:true, ore:true, wrecks:true, exploration:true, pirates:true, bases:true, events:true, routes:true, danger:true, market:true, territory:true});
   const mapShellRef = useRef(null);
   const viewportRef = useRef(null);
   const mapWorldRef = useRef(null);
@@ -5562,9 +6794,25 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
 
   const objectKey = (obj) => obj?.objectKey || obj?.id || obj?.siteId || obj?.salvageSiteId || obj?.explorationSiteId || `${obj?.kind || 'object'}:${obj?.name || obj?.label || 'unknown'}`;
 
+  useEffect(() => {
+    window.__novaActiveMapType = type || 'all';
+  }, [type]);
+
   const objectDisplayName = (obj) => obj?.realName || obj?.name || obj?.label || obj?.ship_name || 'Map target';
   const isUninhabitableNode = (obj) => type === 'system' && !!obj && (obj.isUninhabitable || obj.is_uninhabitable || /uninhab|barren|toxic|frozen|volcanic|irradiated|gas giant|desert tomb/i.test(String(obj.type || '')));
-  const needsApproach = (obj) => !!obj && obj.inActionRange === false;
+  const clientActionRangeAllows = (obj) => {
+    if (!obj || !shipPoint) return false;
+    const tx = Number(obj.x_pct ?? obj.x);
+    const ty = Number(obj.y_pct ?? obj.y);
+    const sx = Number(shipPoint.x ?? shipPoint.x_pct);
+    const sy = Number(shipPoint.y ?? shipPoint.y_pct);
+    if (![tx, ty, sx, sy].every(Number.isFinite)) return false;
+    const kind = String(obj.kind || '').toLowerCase();
+    const defaultRange = kind === 'npc' || kind === 'player' || obj.attackable ? 2.05 : 2.4;
+    const actionRange = Math.max(1.65, Math.min(4.75, Number(obj.actionRangePct || obj.action_range_pct || defaultRange)));
+    return Math.hypot(sx - tx, sy - ty) <= actionRange;
+  };
+  const needsApproach = (obj) => !!obj && obj.inActionRange === false && !clientActionRangeAllows(obj);
   const approachPointFor = (obj) => {
     if (!obj || !shipPoint || !needsApproach(obj)) return {x_pct:Number(obj?.x_pct ?? 50), y_pct:Number(obj?.y_pct ?? 50)};
     const tx = Number(obj.x_pct ?? 50);
@@ -5589,10 +6837,12 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const trafficForView = useMemo(() => {
     const clockMs = Number(clock || Date.now());
     return baseTrafficForView.map(t => {
-      const moving = t.npcActionStateRaw === 'moving' && t.npcStartedAt && t.npcArrivalAt;
+      const startedAt = t.npcStartedAt || t.routeStartedAt;
+      const arrivalAt = t.npcArrivalAt || t.routeArrivalAt;
+      const moving = ((t.npcActionStateRaw === 'moving') || t.routeStartedAt) && startedAt && arrivalAt;
       if (!moving) return t;
-      const start = new Date(t.npcStartedAt).getTime();
-      const end = new Date(t.npcArrivalAt).getTime();
+      const start = new Date(startedAt).getTime();
+      const end = new Date(arrivalAt).getTime();
       if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return t;
       const pct = Math.max(0, Math.min(1, (clockMs - start) / (end - start)));
       const origin = {x_pct:Number(t.routeOriginX ?? t.x_pct ?? 50), y_pct:Number(t.routeOriginY ?? t.y_pct ?? 50)};
@@ -5695,6 +6945,68 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const scanInspectButton = (obj, scanLabel='Scan Details', inspectLabel='Inspect') => canShowInspect(obj)
     ? <button onClick={()=>{setSelectedObject(obj); closeContext();}}>{inspectLabel}</button>
     : <button disabled={!onScanObject} onClick={()=>scanAndOpen(obj)}>{scanLabel}</button>;
+  const mobileOriginPoint = shipPoint || nodes.find(n => n.current || String(n.id) === String(currentId)) || {x_pct:50, y_pct:50};
+  const mobileObjectType = (obj) => {
+    const kind = String(obj?.kind || obj?.type || '').toLowerCase();
+    const role = String(obj?.role || '').toLowerCase();
+    if (type === 'galaxy' && (kind === 'node' || kind === 'galaxy')) return 'galaxy';
+    if (kind === 'node') return type === 'galaxy' ? 'galaxy' : (String(obj?.type || '').toLowerCase().includes('station') ? 'station' : 'planet');
+    if (kind === 'npc' || role.includes('npc')) return 'npc';
+    if (kind === 'player') return 'ship';
+    if (kind === 'ore') return 'ore';
+    if (kind === 'salvage') return 'salvage';
+    if (kind === 'pirate_station') return 'station';
+    if (kind === 'exploration') return 'signal';
+    if (kind === 'war_zone') return 'war';
+    return kind || 'object';
+  };
+  const mobileIsHostile = (obj) => !!(obj?.hostile || obj?.attackable || ['pirate','raider','alien','bounty'].includes(String(obj?.role || '').toLowerCase()));
+  const mobileDistanceFor = (obj) => {
+    const ox = Number(mobileOriginPoint?.x_pct ?? mobileOriginPoint?.x ?? 50);
+    const oy = Number(mobileOriginPoint?.y_pct ?? mobileOriginPoint?.y ?? 50);
+    const tx = Number(obj?.x_pct ?? obj?.x ?? ox);
+    const ty = Number(obj?.y_pct ?? obj?.y ?? oy);
+    if (![ox, oy, tx, ty].every(Number.isFinite)) return 0;
+    return Math.max(0, Math.round(Math.hypot(ox - tx, oy - ty) * 10) / 10);
+  };
+  const mobileMapObjects = useMemo(() => {
+    const accepted = allObjects
+      .filter(obj => obj && obj.kind !== 'blank')
+      .filter(obj => type === 'galaxy' || mobileObjectType(obj) !== 'galaxy')
+      .map(obj => ({...obj, mobileType:mobileObjectType(obj), mobileDistance:mobileDistanceFor(obj), objectKey:objectKey(obj)}))
+      .filter(obj => {
+        if (mobileFilter === 'all') return true;
+        if (mobileFilter === 'hostile') return mobileIsHostile(obj);
+        if (mobileFilter === 'ships') return ['ship','npc'].includes(obj.mobileType);
+        if (mobileFilter === 'planets') return ['planet','station','gate','galaxy'].includes(obj.mobileType);
+        if (mobileFilter === 'npcs') return obj.mobileType === 'npc';
+        if (mobileFilter === 'salvage') return obj.mobileType === 'salvage';
+        return obj.mobileType === mobileFilter;
+      })
+      .sort((a,b) => a.mobileDistance - b.mobileDistance || String(objectDisplayName(a)).localeCompare(String(objectDisplayName(b))));
+    return accepted.slice(0, 96);
+  }, [allObjects, mobileFilter, type, mobileOriginPoint?.x_pct, mobileOriginPoint?.x, mobileOriginPoint?.y_pct, mobileOriginPoint?.y]);
+  const mobileFilters = type === 'galaxy'
+    ? [['all','All'], ['planets','Systems'], ['ships','Ships'], ['hostile','Hostile']]
+    : [['all','All'], ['ships','Ships'], ['planets','Planets'], ['npcs','NPCs'], ['salvage','Salvage'], ['hostile','Hostile']];
+  const openMobileSheet = (obj) => {
+    setMobileSheetObject(obj);
+    setSelectedObject(obj);
+  };
+  const closeMobileSheet = () => setMobileSheetObject(null);
+  const inspectMobileObject = (obj) => {
+    if (canShowInspect(obj)) {
+      setSelectedObject({...obj, scanUnlocked:true});
+      closeMobileSheet();
+    } else {
+      scanAndOpen(obj);
+      closeMobileSheet();
+    }
+  };
+  const runMobileAction = (fn, arg) => {
+    closeMobileSheet();
+    if (fn) fn(arg);
+  };
   const stopMapBubble = (e) => { e.stopPropagation(); };
   const clampPanForZoom = (candidate, nextZoom) => ({
     x: clampNum(candidate.x, -(MAP_W * nextZoom) + 340, 260),
@@ -5942,7 +7254,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const visiblePlayerBases = useMemo(() => layers.bases ? playerBases.filter(b => radarAllowsObject(b) && inRenderBounds(b)) : [], [layers.bases, playerBases, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visiblePirateStations = useMemo(() => layers.pirates ? pirateStations.filter(st => radarAllowsObject(st) && inRenderBounds(st)) : [], [layers.pirates, pirateStations, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visibleEventSites = useMemo(() => layers.events ? eventSites.filter(ev => radarAllowsObject(ev) && inRenderBounds(ev)) : [], [layers.events, eventSites, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
-  const visibleWarZones = useMemo(() => warZones.filter(w => pointInRadar(w) && inRenderBounds(w)), [warZones, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
+  const visibleWarZones = useMemo(() => layers.territory ? warZones.filter(w => pointInRadar(w) && inRenderBounds(w)) : [], [layers.territory, warZones, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visibleScanBlips = useMemo(() => scanBlips.filter(b => {
     const expires = b.expiresAt || b.expires_at;
     if (expires && new Date(expires).getTime() <= Number(clock || Date.now())) return false;
@@ -5972,8 +7284,79 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     centerOnPct(partyPointFor(m), 1.1);
   };
   const pctOf = (value,max) => Math.max(0, Math.min(100, Number(value || 0) / Math.max(1, Number(max || 1)) * 100));
+  const showAutoExploreControls = type === 'system' && !!onToggleAutoExploreMode;
+  const activeAutoExploreConfig = AUTO_EXPLORE_MODE_BY_KEY[autoExploreMode || autoExploreLastMode] || AUTO_EXPLORE_MODE_BY_KEY.pirate;
+  const showAutoExploreStatus = showAutoExploreControls && (autoExploreMode || !!autoExploreStatus);
+  const reserveFuel = Math.ceil(Number(state?.player?.max_fuel || 0) * 0.2);
+  const mobileSheetType = mobileSheetObject ? mobileObjectType(mobileSheetObject) : '';
+  const mobileSheetHostile = mobileSheetObject ? mobileIsHostile(mobileSheetObject) : false;
 
   return <div className="mapShell phase23bMapShell" ref={mapShellRef}>
+    <div className="mobileProximityMap">
+      <div className="mobileMapModeRow">
+        <div className="mapModeSwitch" role="group" aria-label="Map view">
+          <button type="button" className={type==='system' ? 'active' : ''} aria-pressed={type==='system'} onClick={()=>onMapModeChange && onMapModeChange('system')}>Local</button>
+          <button type="button" className={type==='galaxy' ? 'active' : ''} aria-pressed={type==='galaxy'} onClick={()=>onMapModeChange && onMapModeChange('galaxy')}>Galaxy</button>
+        </div>
+        <button type="button" className="mobileMapLocate" onClick={findMyShip}><LocateFixed size={16}/> Me</button>
+      </div>
+      <div className="mobileMapStats">
+        <span><b>{fmt(mobileMapObjects.length)}</b> contacts</span>
+        <span><b>{fmt(radarHostiles.length)}</b> hostile</span>
+        <span><b>{travel?.active ? clockTimeLeft(travel.arrival_at) : 'Idle'}</b> status</span>
+      </div>
+      <div className="mobileMapFilterChips">
+        {mobileFilters.map(([key,name])=><button key={key} className={mobileFilter===key?'active':''} onClick={()=>setMobileFilter(key)}>{name}</button>)}
+      </div>
+      <div className="mobileObjectList" role="list">
+        {mobileMapObjects.map(obj => {
+          const objType = obj.mobileType || mobileObjectType(obj);
+          const hostile = mobileIsHostile(obj);
+          const factionColor = mapNodeFactionColor(obj);
+          return <button key={obj.objectKey || objectKey(obj)} className={`mobileObjectCard ${hostile ? 'hostile' : ''} type-${objType}`} onClick={()=>openMobileSheet(obj)} style={{'--faction-accent':factionColor}} role="listitem">
+            <span className="mobileObjectIcon">{objType.slice(0,2).toUpperCase()}</span>
+            <span className="mobileObjectMain">
+              <b>{objectDisplayName(obj)}</b>
+              <small>{label(objType)} · {obj.faction_name || obj.factionName || obj.statusText || obj.label || (hostile ? 'Hostile contact' : 'Known contact')}</small>
+            </span>
+            <span className="mobileObjectMeta">
+              <b>{fmt(obj.mobileDistance)}u</b>
+              <small>{hostile ? 'Threat' : obj.current ? 'Here' : (obj.dockable || isSystemDockTarget(obj)) ? 'Dockable' : label(obj.role || obj.kind || 'tracked')}</small>
+            </span>
+          </button>;
+        })}
+        {!mobileMapObjects.length && <div className="mobileMapEmpty">No contacts match this filter.</div>}
+      </div>
+    </div>
+    {mobileSheetObject && <div className="mobileObjectSheetBackdrop" onMouseDown={closeMobileSheet}>
+      <section className={`mobileObjectSheet ${mobileSheetHostile ? 'hostile' : ''}`} onMouseDown={e=>e.stopPropagation()}>
+        <header>
+          <div><b>{objectDisplayName(mobileSheetObject)}</b><span>{label(mobileSheetType)} · {fmt(mobileDistanceFor(mobileSheetObject))}u away</span></div>
+          <button aria-label="Close actions" onClick={closeMobileSheet}><X size={18}/></button>
+        </header>
+        <div className="mobileObjectSheetBadges">
+          <span>{mobileSheetHostile ? 'Hostile' : mobileSheetObject.current ? 'Current location' : 'Tracked'}</span>
+          <span>{mobileSheetObject.faction_name || mobileSheetObject.factionName || label(mobileSheetObject.role || mobileSheetObject.kind || 'neutral')}</span>
+          {(mobileSheetObject.inActionRange === false || needsApproach(mobileSheetObject)) && <span>Approach needed</span>}
+        </div>
+        <div className="mobileObjectSheetActions">
+          {mobileSheetType === 'galaxy' && <button disabled={travelBlocked || mobileSheetObject.current} onClick={()=>runMobileAction(onTravel,mobileSheetObject)}>Travel</button>}
+          {mobileSheetType === 'galaxy' && <button onClick={()=>runMobileAction(onViewGalaxy,mobileSheetObject)}>View Local</button>}
+          {['planet','station','gate'].includes(mobileSheetType) && isSystemDockTarget(mobileSheetObject) && <button disabled={travelBlocked || (mobileSheetObject.current && !travel?.open_space)} onClick={()=>runMobileAction(onTravel,{...mobileSheetObject, kind:mobileSheetObject.kind || 'planet'})}>{mobileSheetObject.current && !travel?.open_space ? 'Docked Here' : 'Travel / Dock'}</button>}
+          {mobileSheetObject.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>runMobileAction(onTravel,mobileSheetObject)}>Jump Gate</button>}
+          {isUninhabitableNode(mobileSheetObject) && (mobileSheetObject.mission_contracts || []).slice(0,3).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>runMobileAction(()=>onMissionTravel && onMissionTravel(mobileSheetObject,m))}>{m.name}</button>)}
+          {(mobileSheetType === 'ship' || mobileSheetType === 'npc' || mobileSheetObject.attackable) && <button onClick={()=>inspectMobileObject(mobileSheetObject)}>{canShowInspect(mobileSheetObject) ? 'Inspect' : 'Scan / Inspect'}</button>}
+          {(mobileSheetType === 'ship' || mobileSheetType === 'npc' || mobileSheetObject.attackable) && <button className="dangerBtn" disabled={!mobileSheetObject.attackable || mobileSheetObject.canAttack === false || mobileSheetObject.inActionRange === false} onClick={()=>runMobileAction(onIntercept,mobileSheetObject)}>Attack</button>}
+          {(mobileSheetType === 'ship' || mobileSheetType === 'npc' || mobileSheetObject.attackable) && <button disabled={!onGoHere} onClick={()=>runMobileAction(onGoHere,targetPayload(mobileSheetObject))}>Track</button>}
+          {mobileSheetObject.kind === 'ore' && <button disabled={travelBlocked} onClick={()=>runMobileAction(mobileSheetObject.inActionRange === false ? onGoHere : onMine, mobileSheetObject.inActionRange === false ? targetPayload(mobileSheetObject) : mobileSheetObject)}>{mobileSheetObject.inActionRange === false ? 'Approach' : 'Mine'}</button>}
+          {mobileSheetObject.kind === 'salvage' && <button disabled={travelBlocked} onClick={()=>runMobileAction(mobileSheetObject.inActionRange === false ? onGoHere : onSalvage, mobileSheetObject.inActionRange === false ? targetPayload(mobileSheetObject) : mobileSheetObject)}>{mobileSheetObject.inActionRange === false ? 'Approach' : 'Collect'}</button>}
+          {mobileSheetObject.kind === 'exploration' && <button disabled={travelBlocked} onClick={()=>runMobileAction(mobileSheetObject.inActionRange === false ? onGoHere : onScanSite, mobileSheetObject.inActionRange === false ? targetPayload(mobileSheetObject) : mobileSheetObject)}>{mobileSheetObject.inActionRange === false ? 'Approach' : 'Scan Signal'}</button>}
+          {mobileSheetObject.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || mobileSheetObject.locked || !onEnterPirateStation} onClick={()=>runMobileAction(onEnterPirateStation,mobileSheetObject)}>{mobileSheetObject.locked ? 'Unavailable' : 'Enter Station'}</button>}
+          {mobileSheetObject.kind === 'server_event' && <button disabled={travelBlocked || !onGoHere} onClick={()=>runMobileAction(onGoHere,{x_pct:mobileSheetObject.x_pct,y_pct:mobileSheetObject.y_pct,label:mobileSheetObject.name || 'Server event',map_type:type})}>Enter Event</button>}
+          {!['ship','npc'].includes(mobileSheetType) && <button onClick={()=>inspectMobileObject(mobileSheetObject)}>{canShowInspect(mobileSheetObject) ? 'Inspect' : 'Scan Details'}</button>}
+        </div>
+      </section>
+    </div>}
     <div className="mapToolbar enhancedMapToolbar singleRowMapToolbar mapCommandBar" onMouseDown={stopMapBubble} onMouseUp={stopMapBubble} onClick={stopMapBubble}>
       <div className="mapToolbarLeft mapCommandPrimary">
         <div className="mapModeSwitch" role="group" aria-label="Map view">
@@ -5992,7 +7375,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
       <div className="mapToolbarRight">
         <div className="mapLayerPanel">
           <span className="mapLayerLabel"><Layers size={14}/> Layers</span>
-          <div className="mapLayerToggles phase23bLayers inlineMapLayerToggles">{layerButton('ships','Ships')}{layerButton('hostiles','Hostiles')}{layerButton('patrols','Patrols')}{layerButton('ore','Ore')}{layerButton('wrecks','Wrecks')}{layerButton('exploration','Ancient Sites')}{layerButton('pirates','Pirate Stations')}{layerButton('bases','Bases')}{layerButton('events','Events')}{layerButton('routes','Routes')}</div>
+          <div className="mapLayerToggles phase23bLayers inlineMapLayerToggles">{layerButton('ships','Ships')}{layerButton('hostiles','Hostiles')}{layerButton('patrols','Patrols')}{layerButton('ore','Ore')}{layerButton('wrecks','Wrecks')}{layerButton('exploration','Ancient Sites')}{layerButton('pirates','Pirate Stations')}{layerButton('bases','Bases')}{layerButton('events','Events')}{layerButton('routes','Routes')}{layerButton('territory','Territory')}</div>
         </div>
         <span className={`mapToolbarMissionCooldown hasHoverTooltip ${missionCooldownActive ? 'active' : 'ready'}`} tabIndex={0} data-tooltip={missionCooldownActive ? missionCooldownDetail : 'You can start a planet mission right now.'}>
           <b>{missionCooldownLabel}</b>
@@ -6001,11 +7384,24 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
       </div>
     </div>
     <div className={`mapViewport ${zoomClass}`} ref={viewportRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={()=>{dragRef.current=null}} onWheel={onWheel} onWheelCapture={onWheel} onClick={()=>{}}>
+      {showAutoExploreControls && <div className={`mapAutoExploreOverlay ${autoExploreMode ? 'active' : 'paused'}`} onMouseDown={stopMapBubble} onMouseUp={stopMapBubble} onClick={stopMapBubble}>
+        <div className="mapAutoExploreCluster" role="group" aria-label="AFK automation controls">
+          {AUTO_EXPLORE_MODE_OPTIONS.map(mode => {
+            const active = autoExploreMode === mode.key;
+            const Icon = mode.key === 'pirate' ? Crosshair : mode.key === 'salvage' ? Hammer : mode.key === 'anomaly' ? Radar : Factory;
+            return <button key={mode.key} type="button" className={`mapAutoExploreButton hasHoverTooltip ${active ? 'active' : ''}`} aria-pressed={active} data-tooltip={mode.tooltip} onClick={()=>onToggleAutoExploreMode(mode.key)}><Icon size={15}/><span>{active ? mode.activeLabel : mode.label}</span></button>;
+          })}
+        </div>
+        {showAutoExploreStatus && <div className={`autoExploreStrip ${autoExploreMode ? 'active' : 'paused'}`}>
+          <b>{autoExploreMode ? activeAutoExploreConfig.statusActive : activeAutoExploreConfig.statusPaused}</b>
+          <span>{autoExploreStatus || activeAutoExploreConfig.idle}</span>
+          <small>Targets {activeAutoExploreConfig.target}. Fuel reserve {fmt(reserveFuel)}.</small>
+        </div>}
+      </div>}
       {!!partyMembersForHud.length && <div className="partyMapHud" onMouseDown={stopMapBubble} onMouseUp={stopMapBubble} onClick={stopMapBubble}>{partyMembersForHud.map(m=><button key={m.playerId} type="button" className={`partyHudCard ${m.isLeader ? 'leader' : ''}`} onClick={()=>focusPartyMember(m)}><ProfileAvatar profile={{avatarUrl:m.avatarUrl, displayName:m.displayName}} size="tiny"/><span><b>{m.displayName || m.username}</b><i><em style={{width:`${pctOf(m.ship?.shield,m.ship?.maxShield)}%`}} /></i><i><em style={{width:`${pctOf(m.ship?.hull,m.ship?.maxHull)}%`}} /></i></span></button>)}</div>}
       <div ref={mapWorldRef} className={`infoMap ${type}Map openWorldMap mapWorld`} style={{width:MAP_W, height:MAP_H, minWidth:MAP_W, minHeight:MAP_H, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin:'0 0'}}>
         {type === 'system' && layers.danger && nodes.map(n => pointInRadar(n) && Number(n.risk_level || 0) >= 45 ? <span key={`danger-${n.id}`} className={`dangerZone ${Number(n.risk_level || 0) >= 70 ? 'extreme' : 'high'}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} /> : null)}
         {type === 'system' && layers.market && nodes.map(n => pointInRadar(n) ? <span key={`market-${n.id}`} className="marketPulse hasHoverTooltip" style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} data-tooltip={`Market pressure here: legal ${n.legal_market_strength || 0}, illicit ${n.illicit_market_strength || 0}.`} /> : null)}
-        {radarRange > 0 && <span className="playerRadarRing" aria-hidden="true" style={{left:`${radarCenter.x}%`, top:`${radarCenter.y}%`, width:`${radarDiameterPx}px`, height:`${radarDiameterPx}px`}} />}
         {visibleScanPings.map(p => {
           const diameter = scanPingDiameterPx(p);
           return <span key={p.id} className="scanAreaPing" style={{left:`${p.x_pct}%`, top:`${p.y_pct}%`, width:`${diameter}px`, height:`${diameter}px`, '--scan-ping-duration':`${Number(p.animation_seconds || 2)}s`}} />;
@@ -6015,15 +7411,19 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
           const blipClass = b.blipClass || b.category || 'contact';
           return <button key={b.id || b.objectKey} type="button" className={`scanBlipMarker hasHoverTooltip ${blipClass}`} style={{left:`${b.x_pct}%`, top:`${b.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,b)} data-tooltip={`${label(blipClass)} blip. Scan it to resolve details.`}><ScanBlipIcon type={blipClass} /></button>;
         })}
-        {visibleWarZones.map(w => <span key={w.id} className="galaxyWarRing planetWarRing hasHoverTooltip" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, width:`${w.radius_pct*2}%`, height:`${w.radius_pct*2}%`}} data-tooltip={`${w.name}: capture ring. Hold this area to push the war.`} />)}
+        {layers.territory && type === 'system' && nodes.filter(n => n.kind !== 'gate' && pointInRadar(n)).map(n => <span key={`territory-${n.id}`} className={`territoryOverlay ${n.territory_status || 'secure'} ${n.is_border_system ? 'border' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, '--territory-color': mapNodeFactionColor(n)}} />)}
+        {visibleWarZones.map(w => <span key={w.id} className={`galaxyWarRing planetWarRing hasHoverTooltip ${w.territory_status || ''}`} style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, width:`${w.radius_pct*2}%`, height:`${w.radius_pct*2}%`}} data-tooltip={`${w.name}: ${w.status === 'contested' ? 'contested territory' : 'capture ring'}. Hold this area to push the war.`} />)}
         {visibleWarZones.map(w => <button key={`${w.id}:station`} className="captureStationMarker hasHoverTooltip" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} data-tooltip={`${w.name}: war objective. Scan it before opening full details.`}>⚔</button>)}
         {layers.routes && <svg className="mapLines" viewBox="0 0 100 100" preserveAspectRatio="none">{visibleRouteLanes.map(l => { const a = byId[l.from], b = byId[l.to]; if (!a || !b) return null; return <line key={l.key} x1={a.x_pct} y1={a.y_pct} x2={b.x_pct} y2={b.y_pct} className={l.active && !hasCoordinateTravelLine ? 'lane active' : l.visited ? 'lane visited' : 'lane planned'} />; })}{showActiveCoordinateLine && <line x1={activeCoordinateOrigin.x_pct} y1={activeCoordinateOrigin.y_pct} x2={activeCoordinateDest.x_pct} y2={activeCoordinateDest.y_pct} className="lane active mapCoordinateTravelLine" />}</svg>}
         {nodes.filter(n => isAlwaysVisibleNavNode(n) || pointInRadar(n)).map(n => {
           const isCurrentNode = !!(n.current || n.id===currentId);
           const isDockedNode = isCurrentNode && !travel?.active && !travel?.open_space;
-          return <button key={n.id} className={`mapNode hasHoverTooltip ${n.kind === 'gate' ? 'gateNode' : ''} ${isUninhabitableNode(n) ? 'uninhabitableNode' : ''} ${isCurrentNode ? 'current' : ''} ${isDockedNode ? 'dockedCurrent' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform, '--faction-color': mapNodeFactionColor(n)}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} data-tooltip={type === 'galaxy' ? `${n.name}: ${n.faction_name || 'Neutral'} influence here. Open it when you want the safety, trade, and conflict readout.` : n.kind === 'gate' ? `${n.name}: this is your route to a neighboring galaxy. Dock here before jumping.` : `${n.name}: risk ${n.risk_level ?? '—'}, security ${n.security_level ?? '—'}, stability ${n.stability_level ?? '—'}. Good quick check before docking or taking jobs.`}><GameImage src={n.image_url} assetType={n.kind === 'gate' ? 'item' : type === 'galaxy' ? 'galaxy' : (String(n.type || '').toLowerCase().includes('station') || String(n.type || '').toLowerCase().includes('freeport') ? 'station' : 'planet')} category={n.economy_type || n.type || n.kind} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : n.kind === 'gate' ? <span>Jump lane • adjacent galaxy</span> : isUninhabitableNode(n) ? <span>Uninhabitable planet • Missions only • RISK {n.risk_level}</span> : <span>SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>
+          const territoryLabel = n.territory_status === 'war' ? 'WAR' : n.territory_status === 'contested' ? 'CONTESTED' : n.is_border_system ? 'BORDER' : '';
+          return <button key={n.id} className={`mapNode hasHoverTooltip ${n.kind === 'gate' ? 'gateNode' : ''} ${isUninhabitableNode(n) ? 'uninhabitableNode' : ''} ${isCurrentNode ? 'current' : ''} ${isDockedNode ? 'dockedCurrent' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''} ${n.territory_status === 'war' ? 'territoryWarNode' : ''} ${n.territory_status === 'contested' || n.is_border_system ? 'contestedNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform, '--faction-color': mapNodeFactionColor(n)}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} data-tooltip={type === 'galaxy' ? `${n.name}: ${n.faction_name || 'Neutral'} influence here. ${n.territory_status === 'war' ? 'Active territory war in this galaxy. ' : n.territory_status === 'contested' ? 'Contested territory pressure in this galaxy. ' : ''}Open it when you want the safety, trade, and conflict readout.` : n.kind === 'gate' ? `${n.name}: this is your route to a neighboring galaxy. Dock here before jumping.` : `${n.name}: ${territoryLabel ? `${territoryLabel}. ` : ''}risk ${n.risk_level ?? '—'}, security ${n.security_level ?? '—'}, stability ${n.stability_level ?? '—'}. Good quick check before docking or taking jobs.`}><GameImage src={n.image_url} assetType={n.kind === 'gate' ? 'item' : type === 'galaxy' ? 'galaxy' : (String(n.type || '').toLowerCase().includes('station') || String(n.type || '').toLowerCase().includes('freeport') ? 'station' : 'planet')} category={n.economy_type || n.type || n.kind} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • {n.territory_status === 'war' ? `${n.territory_war_count || 0} WAR • ` : n.territory_status === 'contested' ? `${n.contested_zone_count || 0} CONTESTED • ` : ''}Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : n.kind === 'gate' ? <span>Jump lane • adjacent galaxy</span> : isUninhabitableNode(n) ? <span>{territoryLabel ? `${territoryLabel} • ` : ''}Uninhabitable planet • Missions only • RISK {n.risk_level}</span> : <span>{territoryLabel ? `${territoryLabel} • ` : ''}SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>
         })}
-        {shipPoint && <button className={`shipMarker selfShip ${travel?.mode === 'intercept' ? 'intercepting' : ''} ${!travel?.active && travel?.open_space ? 'parkedOpenSpace' : ''}`} style={{left:`${shipPoint.x}%`, top:`${shipPoint.y}%`, transform:iconTransform, '--ship-faction-color': playerFactionColor}} onMouseUp={(e)=>openContext(e,{kind:'self', name:travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label:travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : (travel?.open_space ? 'Holding position in open space.' : 'You are traveling in open space.'), progress:Math.round(progress*100)})}><GameImage className="selfShipImg" src={state?.active_ship?.image_url} assetType="ship" category={`${summary?.player_faction?.name || ''} ${state?.active_ship?.role || state?.active_ship?.class_name || state?.active_ship?.template_name || state?.active_ship?.name || (travel?.mode === 'intercept' ? 'interceptor combat' : 'player explorer')}`} alt="Your ship" /><span>{travel?.active ? `${Math.round(progress*100)}%` : 'YOU'}</span><small className="mapShipLevel">Lv {fmt(state?.player?.level || 1)}</small></button>}
+        {shipPoint && <button className={`shipMarker selfShip ${travel?.mode === 'intercept' ? 'intercepting' : ''} ${!travel?.active && travel?.open_space ? 'parkedOpenSpace' : ''}`} style={{left:`${shipPoint.x}%`, top:`${shipPoint.y}%`, transform:iconTransform, '--ship-faction-color': playerFactionColor}} onMouseUp={(e)=>openContext(e,{kind:'self', name:travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label:travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : (travel?.open_space ? 'Holding position in open space.' : 'You are traveling in open space.'), progress:Math.round(progress*100)})}>
+          {radarRange > 0 && <span className="playerRadarRing shipAttachedRadarRing" aria-hidden="true" style={{width:`${radarDiameterPx / Math.max(markerScale, 0.001)}px`, height:`${radarDiameterPx / Math.max(markerScale, 0.001)}px`}} />}
+          <GameImage className="selfShipImg" src={state?.active_ship?.image_url} assetType="ship" category={`${summary?.player_faction?.name || ''} ${state?.active_ship?.role || state?.active_ship?.class_name || state?.active_ship?.template_name || state?.active_ship?.name || (travel?.mode === 'intercept' ? 'interceptor combat' : 'player explorer')}`} alt="Your ship" /><span>{travel?.active ? `${Math.round(progress*100)}%` : 'YOU'}</span><small className="mapShipLevel">Lv {fmt(state?.player?.level || 1)}</small></button>}
         {visibleTraffic.map(t => {
           const trafficLevel = t.npcLevel || t.npc_level || t.level || t.playerLevel || t.player_level || t.ship_level || 1;
           const atWar = !!(t.atWar || t.at_war || t.guildWar || t.guild_war || t.warTarget || t.war_target || String(t.hostileReason || t.statusText || t.label || '').toLowerCase().includes('war'));
@@ -6175,8 +7575,24 @@ function Progress({value, danger}) {
 
 function ItemVisual({item, size='md'}) {
   const src = item?.image_url || item?.visual?.image_url;
-  const hint = [item?.item_code, item?.module_code, item?.ship_code, item?.code, item?.name, item?.item_name, item?.slot_type, item?.subcategory].filter(Boolean).join(' ');
-  return <div className={`itemVisual ${size}`}><GameImage src={src} assetType={assetTypeForItem(item)} category={item?.category || item?.inventory_category || item?.item_type || item?.type || item?.economy_type} hint={hint} alt={item?.name || item?.item_name || 'Item'} /></div>;
+  const hint = [
+    item?.item_code,
+    item?.commodity_code,
+    item?.commodity_id,
+    item?.material_code,
+    item?.module_code,
+    item?.ship_code,
+    item?.code,
+    item?.name,
+    item?.item_name,
+    item?.commodity_name,
+    item?.category_label,
+    item?.slot_type,
+    item?.subcategory,
+    item?.description,
+  ].filter(Boolean).join(' ');
+  const category = [item?.category, item?.inventory_category, item?.item_type, item?.type, item?.economy_type].filter(Boolean).join(' ');
+  return <div className={`itemVisual ${size}`}><GameImage src={src} assetType={assetTypeForItem(item)} category={category} hint={hint} alt={item?.name || item?.item_name || item?.commodity_name || 'Item'} /></div>;
 }
 
 
@@ -6311,6 +7727,60 @@ const HUMAN_TOOLTIP_COPY = {
   'Selling legal items restocks the local market with no risk. Listing on the player market creates a current-galaxy listing.': 'Selling is the simple exit. Listing is slower but can pay better, and it belongs to the galaxy you are standing in.',
   'Player buying depletes supply and raises demand. Player selling restocks local markets and reduces demand. System restock slowly replenishes depleted stock.': 'Markets remember player pressure. Buying dries stock up, selling cools demand down, and restock takes time.',
   'Success chance is calculated from real ship, job, skill, and location state.': 'The fit score is grounded in your actual situation: ship, skills, career, energy, and the planet around you.',
+  'Your selected achievement badge appears on the lower-right of your profile image in chat, sidebar, and public profile views.': 'Your showcase badge follows your pilot around the UI, so pick the one you want other players to notice.',
+  'Each loop has 8 tiers. Tier 7 is tuned as a long active-play goal; Tier 8 is a deeper 8-month-style chase and unlocks a small relevant passive.': 'Achievements are long arcs. Tier 7 is a serious active goal, and Tier 8 is the slow prestige tier with a small passive reward.',
+  'Pick one unlocked achievement badge. It overlays the lower-right of your profile image.': 'Choose the badge you want displayed on your portrait in social spaces.',
+  'Your faction controls this roster. Each faction has 12 sheet-sourced portraits, and the backend rejects cross-faction avatar ids.': 'Your portrait choices come from your faction. The server will block avatars that belong to another faction.',
+  'Click a pilot image/name to view their public profile. Wealth and private strength stats stay hidden.': 'Open another pilot to see public identity and badges. Private money and strength details stay private.',
+  'You are not physically here. Party members act as radar relays.': 'This is remote intel. You can see it because a party member is effectively sharing their radar.',
+  'Enemy-territory cargo and escort contracts complete only when docked at the destination. Escort NPCs detach on completion, abandon, failure, destruction, or timer expiry.': 'For enemy routes, getting there is not enough. Dock at the target to finish, and escorts leave when the job ends or fails.',
+  'NPC bounties are server controlled and limited to one per galaxy. Player bounties cost reward plus a 10% fee. Last-seen data updates every 30 minutes.': 'Bounties are meant to feel scarce and traceable. NPC bounties are galaxy-limited, and player targets only update their last-seen trail every 30 minutes.',
+  'Weekly event. Join the control ring, build capture time, and unlock a 48-hour reward wormhole when your faction wins.': 'This is a weekly faction race. Hold the ring long enough and your faction opens a reward wormhole for two days.',
+  'Scan outside radar to create 30-second category blips. Scanner/counter-scanner math is clamped between 20% and 80% certainty.': 'Probe scans give temporary hints, not perfect truth. Counter-scanners keep results uncertain even when your gear is strong.',
+  'Derelicts are scan/discovery objects. Exploration is shorter than planet exploration and pays about 85% of comparable rewards.': 'Derelicts are quick exploration finds. They resolve faster than planet runs and pay slightly less.',
+  'Artifacts are planet-stored unless carried/equipped. Unidentified carried artifacts are lost if the ship is destroyed. Identified artifacts can be mounted to active ships.': 'Artifacts are safest in planet storage. Carry unidentified ones only when you accept the risk of losing them with the ship.',
+  'Mining produces raw ore. Refining converts raw ore/materials into crafting materials at stations/inhabitable planets.': 'Mine first, refine second. Raw ore becomes useful crafting material only at places with refinery access.',
+  'Supply contributions are per border/frontline galaxy. Higher contribution levels unlock small frontline bonuses.': 'Frontline supply is local to the war zone. Keep feeding a border galaxy to unlock small bonuses there.',
+  'Regenerates positions only. Preserves planet/galaxy names, ownership, stations, and content.': 'This only rearranges the map layout. Names, ownership, stations, and content stay intact.',
+  'Station trade goods are legal cargo. Same-galaxy arbitrage is intentionally low; cross-galaxy routes are the profit layer.': 'Legal station trade is steady inside one galaxy. The bigger margins are meant to come from cross-galaxy routes.',
+  'Planet cargo is visible everywhere for planning. Deposits and withdrawals only work while docked at the cargo\'s planet or station.': 'You can plan from anywhere, but you still have to dock at the right place to move stored cargo.',
+  'Inspection uses backend-resolved item data, not frontend-only guesses.': 'These details come from the server, so action locks and item rules should match what will actually happen.',
+  'Actions are small nudges. Job-matched actions gain extra influence but still consume energy/fuel/credits.': 'Control actions push a planet gradually. Matching your career helps, but every push still costs resources.',
+  'High fit does not mean no risk. It means your current build is better suited for the action.': 'A high fit score means your current setup matches the job. It does not make the job risk-free.',
+  'Available to all players. Lower reward, higher success rate, low energy cost.': 'Basic work is the reliable lane: cheaper, safer, and lower paying.',
+  'Better rewards. Lower success rate unless your ship, skills, and current job fit the operation.': 'Advanced work pays better when your build fits it. If your ship or skills are off, expect more failures.',
+  'These are defeated ships in the current area. Player battles, PvE combat, PvP, and occasional NPC-vs-NPC fights can populate this list. Zero available wrecks is valid if the area has been cleaned out.': 'Fresh wrecks come from real combat in this area. If the list is empty, pilots may have already picked it clean.',
+  'Timed crafting jobs persist through refresh. Completed jobs auto-resolve on state refresh or when you press Claim Completed. Ore refining recipes require refinery access at the current planet or station.': 'Crafting keeps running after refresh. Finished jobs claim on refresh or by button, and ore recipes need local refinery access.',
+  'Market cargo and loose inventory both count toward recipe requirements. Raw ore appears here so it can be routed into refinery recipes.': 'Recipes can use carried cargo and loose inventory. Raw ore is shown so you can feed it into refining first.',
+  'Active jobs finish on backend timestamps. Long projects keep running while you are away.': 'The server owns crafting time. Long builds keep ticking while you are offline or on another page.',
+  'Build from a blank point on the System Map. Clearance requires two icon-spaces from planets, stations, nodes, pirate bases, and other bases.': 'Private bases need breathing room. Place one from empty system-map space, away from major icons and other bases.',
+  'One research project at a time. Research only costs credits and time; it unlocks matching base construction.': 'Research is the gate before construction. Start one project, wait it out, then build what it unlocks.',
+  'One construction project at a time. Buildings are private and provide slow passive outputs or small quality-of-life bonuses.': 'Base construction is slow and private. Buildings add passive trickles or small convenience bonuses over time.',
+  'Activating a lower-cargo ship is blocked if your cargo will not fit. Active ship controls travel, cargo, PvE, mining, combat, exploration, and smuggling modifiers.': 'Your active ship is your real toolkit. You cannot swap into a smaller hold while carrying more cargo than it can fit.',
+  'Changed groups have a LIVE OVERRIDE badge. Defaults stay in code; overrides live in DB.': 'A live override means the database is beating the code default right now.',
+  'Controls galaxy count, planets per galaxy, faction balance, resource tier distribution, and NPC level bands from each faction home toward center space.': 'These settings shape the world layout: galaxy size, planet count, faction spread, resources, and NPC level bands.',
+  'Admin shortcut for the two knobs that matter most: gameplay-loop spawn mix and optional per-galaxy NPC level overrides.': 'This is the quick spawn-tuning panel: what gameplay loops appear, and how hard NPCs can be by galaxy.',
+  'Controls station conversion, uninhabitable planets, landed contracts, mission timers, per-planet mission XP, event logs, and rewards.': 'These knobs tune planet-side play, from station conversion and mission timing to rewards and local XP.',
+  'Server-owned population/resource controller. Checks are throttled; each due pass spawns or trims one item per category per galaxy until configured ranges are met.': 'The server slowly keeps the world stocked. Each pass adjusts a little so spawns do not lurch all at once.',
+  'The target is easy start, painful completion. These controls apply instantly through runtime config; use Recalculate Markets after price changes.': 'This tuning aims for a friendly start and a demanding endgame. Market price edits need a recalculation afterward.',
+  'Edit one group, save it, then recalc markets if pricing changed.': 'Save one balance group at a time. Recalculate markets after changing prices so the economy catches up.',
+  'All players and NPCs. Page size is fixed at 50. Filters are client-side against the admin snapshot.': 'This is a snapshot browser for actors. Filters narrow the current admin data instead of fetching a new page.',
+  'Merged admin feed. Displays the newest 500 events from player events, NPC actions, combat, and market transactions.': 'This feed stitches together the latest player, NPC, combat, and market activity for admin review.',
+  'Market cargo loading/offloading is not instant. You cannot travel, change ships, fight, or start another cargo operation until it completes. During loading/offloading you are protected from attacks.': 'Cargo handling takes time. While the crew is loading or unloading, you are locked in place but protected.',
+  'The station resource is the shared defender pool. Defeated enemies stay defeated. Damaged enemies keep their damage for everyone in the station.': 'Pirate stations are shared assaults. Damage and defeated defenders persist for everyone working the station.',
+  'This is a separate combat map. Pirates spawn spaced out and slowly converge on the closest pilot. Reach the outer 10% border to retreat.': 'Station assaults use their own map. Pirates move toward nearby pilots, and the outer edge is your retreat lane.',
+  'Real ship, module, cargo, fuel, energy, hull, shield, and role-derived status.': 'This is your actual ship state: gear, cargo, fuel, energy, defenses, and role effects.',
+  'Demand, scarcity, trend, pressure, and illicit risk calculated from local market and planet conditions.': 'These market signals come from the local planet: demand, scarcity, price motion, pressure, and smuggling risk.',
+  'Planet control effects are live modifiers, not flavor text.': 'Control numbers actively change the planet. They are real bonuses and penalties, not just lore.',
+  'Local Chat|Chat identity uses your selected profile image, badge, and display name.': 'Your chat presence uses your chosen portrait, badge, and pilot name.',
+  'Social|Manage friends and blocked pilots. Friend online notifications are toasts only; invites and requests also appear in Messages.': 'Use this for people management. Friend pings are temporary, while invites and requests also land in Messages.',
+  'Map — Mission View|You are away from the ship on a planet mission. The local map returns after completion or cancellation.': 'Your ship is parked while the mission runs. Finish or cancel the mission to return to the local map.',
+  'Planet Control|Local influence, faction control, security, stability, taxes, conflict, and economy modifiers for the current planet or station.': 'This is the planet\'s political and economic dashboard: who controls it, how safe it is, and what that changes.',
+  'Industry|Mining, battlefield salvage, refining, NPC contracts, and materials for crafting modules and ship parts.': 'Industry is the material pipeline: mine, salvage, refine, and feed crafting or ship work.',
+  'Properties, Research & Bases|Mid-game private bases. Research costs credits/time; construction costs more credits/time. One private base per player. Other players cannot dock or attack it.': 'Private bases are mid-game projects. Research unlocks buildings, construction takes time, and the base is yours alone.',
+  'Messages|Actionable invites and requests persist here even after toast notifications disappear.': 'Messages keeps the important social actions after the quick toast is gone.',
+  'Pirate Station|No active station assault. Enter one from the System Map.': 'No pirate assault is running. Find and enter a pirate station from the System Map.',
+  'Warfare|Read the war map before you commit ships, treasury, and travel time. Warfare is about preparation, staging, and holding objectives long enough for your faction to matter.': 'Use this as the war-room brief: choose the right front, arrive prepared, and hold the objective long enough to matter.',
   'Godmode/dev admin only. Values persist in SQLite game_settings and apply immediately without rebuilding. Edit JSON carefully.': 'Admin-only tuning. Saved values go straight into the DB and take effect without a rebuild, so bad JSON can break things fast.'
 };
 
@@ -6343,10 +7813,25 @@ function Panel({title, help, children}) {
   const copy = humanHelpText(help);
   return <section className="panel"><h2><span>{title}</span>{copy && <InfoTip text={copy} label={`${title} help`} />}</h2>{children}</section>
 }
+function DescriptionBlock({eyebrow, title, lead, points=[]}) {
+  return <section className="descriptionBlock">
+    <div className="descriptionBlockIntro">
+      {eyebrow && <span>{eyebrow}</span>}
+      <h2>{title}</h2>
+      <p>{lead}</p>
+    </div>
+    <div className="descriptionBlockGrid">
+      {points.map(([pointTitle, pointCopy]) => <div key={pointTitle}>
+        <b>{pointTitle}</b>
+        <p>{pointCopy}</p>
+      </div>)}
+    </div>
+  </section>
+}
 function Page({title,sub,children}) {
   const copy = humanHelpText(sub, title);
   const compact = copy && copy.length > 92;
-  return <><div className={`pageHead ${compact ? 'hasCompactGuide' : ''}`}><div className="pageTitleRow"><h1>{title}</h1>{compact && <InfoTip text={copy} label={`${title} summary`} side="left" />}</div>{copy && !compact && <p>{copy}</p>}</div>{children}</>
+  return <div className={`pageFrame pageFrame-${pageSlug(title)}`}><div className={`pageHead ${compact ? 'hasCompactGuide' : ''}`} style={{'--page-accent':pageIntel(title).accent}}><div className="pageTitleRow"><h1>{title}</h1>{compact && <InfoTip text={copy} label={`${title} summary`} side="left" />}</div>{copy && !compact && <p>{copy}</p>}</div>{children}</div>
 }
 function Grid({children}) { return <div className="dashboardGrid">{children}</div> }
 function Bar({label,value,max,danger}) { const pct = Math.max(0,Math.min(100,(value/(max||1))*100)); return <div className="bar"><span>{label}</span><i><b style={{width:`${pct}%`}} className={danger?'danger':''}/></i><small>{fmt(value)} / {fmt(max)}</small></div> }
@@ -6424,6 +7909,8 @@ createRoot(document.getElementById('root')).render(<App/>);
   let lastId = 0;
   let localSendTimes = [];
   let localCooldownUntil = 0;
+  let bootWired = false;
+  let chatObserver = null;
 
   function normalizeState(data){ return data?.state || data || {}; }
   async function getState(force = false){
@@ -6452,6 +7939,12 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
   function qs(sel){ return document.querySelector(sel); }
   function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
+  function hasAuthToken(){ return !!sessionStorage.getItem('nova_token'); }
+  function removeFloatingChat(){
+    setOpen(false);
+    qs('[data-nova-floating-chat]')?.remove();
+    qs('[data-nova-messages-page]')?.remove();
+  }
 
   function hideChatNav(){
     qsa('nav a, nav button, aside a, aside button, header a, header button, [role="navigation"] a, [role="navigation"] button').forEach(el => {
@@ -6467,6 +7960,7 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function ensureRoot(){
+    if (!hasAuthToken()) return null;
     let root = qs('[data-nova-floating-chat]');
     if (root) return root;
     root = document.createElement('div');
@@ -6510,8 +8004,16 @@ createRoot(document.getElementById('root')).render(<App/>);
     el.classList.toggle('error', !!isError);
   }
   function setOpen(next){
+    if (!hasAuthToken()) {
+      open = false;
+      qs('[data-nova-floating-chat]')?.remove();
+      clearInterval(pollTimer);
+      pollTimer = null;
+      return;
+    }
     open = !!next;
     const root = ensureRoot();
+    if (!root) return;
     root.classList.toggle('open', open);
     root.querySelector('.nova-chat-panel').hidden = !open;
     root.querySelector('.nova-chat-fab').hidden = open;
@@ -6606,6 +8108,7 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function ensureMessagesPage(){
+    if (!hasAuthToken()) return null;
     let page = qs('[data-nova-messages-page]');
     if (page) return page;
     page = document.createElement('section');
@@ -6636,7 +8139,9 @@ createRoot(document.getElementById('root')).render(<App/>);
     return page;
   }
   async function openMessages(target){
+    if (!hasAuthToken()) return;
     const page = ensureMessagesPage();
+    if (!page) return;
     page.hidden = false;
     if (target?.username) page.querySelector('.nova-message-recipient').value = target.username;
     await loadThreads();
@@ -6738,15 +8243,31 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function boot(){
+    if (!hasAuthToken()) {
+      removeFloatingChat();
+      return;
+    }
     if (!cssReady()) return setTimeout(boot, 50);
     hideChatNav();
     ensureRoot();
     routeWatcher();
     installProfileMessageButtons();
-    window.addEventListener('hashchange', routeWatcher);
-    const mo = new MutationObserver(() => { hideChatNav(); installProfileMessageButtons(); });
-    mo.observe(document.body, {childList:true, subtree:true});
+    if (!bootWired) {
+      window.addEventListener('hashchange', routeWatcher);
+      bootWired = true;
+    }
+    if (chatObserver) return;
+    chatObserver = new MutationObserver(() => {
+      if (!hasAuthToken()) {
+        removeFloatingChat();
+        return;
+      }
+      hideChatNav();
+      installProfileMessageButtons();
+    });
+    chatObserver.observe(document.body, {childList:true, subtree:true});
   }
+  window.addEventListener('nova:auth-changed', boot);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 })();
@@ -6983,6 +8504,12 @@ createRoot(document.getElementById('root')).render(<App/>);
     return !!document.querySelector('.appShell');
   }
 
+  function removeTutorialUi() {
+    if (root) root.remove();
+    root = null;
+    document.querySelector('.novaTutorialLauncher')?.remove();
+  }
+
   function goRoute(route) {
     if (!route) return;
     const pageMap = {
@@ -7105,7 +8632,10 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function start() {
-    if (!isGameShellReady()) return;
+    if (!isGameShellReady()) {
+      removeTutorialUi();
+      return;
+    }
     try { sessionStorage.removeItem(minimizedKey()); } catch (err) {}
     const launcher = document.querySelector('.novaTutorialLauncher');
     if (launcher) launcher.remove();
@@ -7115,19 +8645,14 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function ensureLauncher() {
-    if (!isGameShellReady()) return;
-    if (document.querySelector('.novaTutorialLauncher')) return;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'novaTutorialLauncher hasHoverTooltip';
-    btn.textContent = 'Starter Guide';
-    btn.setAttribute('data-tooltip', 'Open the screen-by-screen starter guide again. It explains what each early screen is for and which loops to try first.');
-    btn.addEventListener('click', function(){ start(); });
-    document.body.appendChild(btn);
+    document.querySelector('.novaTutorialLauncher')?.remove();
   }
 
   function maybeAutoStart() {
-    if (!activeUserKey || !isGameShellReady()) return;
+    if (!activeUserKey || !isGameShellReady()) {
+      if (!isGameShellReady()) removeTutorialUi();
+      return;
+    }
     ensureLauncher();
     if (autoCheckedForUser === activeUserKey) return;
     autoCheckedForUser = activeUserKey;
@@ -7152,8 +8677,14 @@ createRoot(document.getElementById('root')).render(<App/>);
     booted = true;
     window.addEventListener('nova:tutorial-user-ready', function(evt){ setTutorialUser(evt.detail || {}); });
     window.addEventListener('nova:tutorial-open', function(){ start(); });
+    window.addEventListener('nova:auth-changed', function(evt){
+      if (!evt.detail?.authenticated) removeTutorialUi();
+    });
     window.novaOpenTutorial = function(){ start(); };
-    new MutationObserver(function(){ maybeAutoStart(); }).observe(document.documentElement, { childList: true, subtree: true });
+    new MutationObserver(function(){
+      if (!isGameShellReady()) removeTutorialUi();
+      else maybeAutoStart();
+    }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once: true });

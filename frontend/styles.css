@@ -454,3 +454,24 @@ button:disabled { opacity:.45; cursor:not-allowed; filter:none; box-shadow:none;
   .mapHud { left:12px; right:12px; align-items:stretch; }
   .mapCooldown, .mapNotice { min-width:0; }
 }
+
+.novaModalOverlay{position:fixed;inset:0;z-index:1200;display:grid;place-items:center;padding:18px;background:rgba(0,6,14,.72);backdrop-filter:blur(10px)}
+.novaModalShell{width:min(520px,100%);max-height:min(82dvh,680px);overflow:auto;border:1px solid rgba(95,232,255,.34);border-radius:8px;background:linear-gradient(180deg,rgba(8,27,42,.98),rgba(3,11,20,.98));box-shadow:0 28px 90px rgba(0,0,0,.58),0 0 42px rgba(53,242,255,.09);color:var(--text);padding:18px}
+.novaModalShell:focus{outline:2px solid rgba(99,241,255,.38);outline-offset:3px}
+.novaModalShell.danger{border-color:rgba(255,95,105,.55);background:linear-gradient(180deg,rgba(44,14,23,.98),rgba(5,11,20,.98));box-shadow:0 28px 90px rgba(0,0,0,.62),0 0 44px rgba(255,77,87,.12)}
+.novaModalHeader{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start}
+.novaModalHeader h2{margin:0;font-size:18px;line-height:1.2;letter-spacing:0}
+.novaModalHeader small{display:block;margin-top:4px;color:#8fd9e8}
+.novaModalIcon{width:42px;height:42px;display:grid;place-items:center;border:1px solid rgba(95,232,255,.32);border-radius:8px;color:var(--cyan);background:rgba(2,9,16,.74);font-weight:900}
+.novaModalShell.danger .novaModalIcon{color:#ff9aa5;border-color:rgba(255,95,105,.48)}
+.novaModalClose{width:40px;height:40px;display:grid;place-items:center;padding:0;border-radius:8px}
+.novaModalMessage{margin:16px 0 0;color:#cfe8f1;line-height:1.45}
+.novaModalField{display:grid;gap:7px;margin-top:16px;color:#9dfcff;font-weight:800;font-size:12px;text-transform:uppercase}
+.novaModalField input{width:100%;border-radius:8px}
+.novaModalHint{margin-top:8px;color:#ffb9bf;font-size:12px}
+.novaModalActions{display:flex;justify-content:flex-end;gap:10px;margin-top:18px;flex-wrap:wrap}
+.novaModalActions button{border-radius:8px;min-width:128px}
+.novaModalSecondary{background:#06131c;color:#aac8d4}
+.novaModalPrimary{background:linear-gradient(180deg,#28d9df,#0d788b);color:#001014}
+.novaModalShell.danger .novaModalPrimary{background:linear-gradient(180deg,#ff6d77,#a9172a);color:white;border-color:#ff9aa5}
+@media(max-width:640px){.novaModalOverlay{place-items:end center;padding:10px}.novaModalShell{width:100%;max-height:86dvh;padding:15px}.novaModalActions{display:grid;grid-template-columns:1fr;gap:8px}.novaModalActions button{width:100%}}

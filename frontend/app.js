@@ -44,6 +44,96 @@ function wy(y) { return Number(y || 0) - oy(); }
 function esc(str) { return String(str ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[c])); }
 function uid() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`; }
 
+const NOVA_MODAL_FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])";
+
+function novaModal(config = {}) {
+  return new Promise(resolve => {
+    const previousFocus = document.activeElement;
+    const kind = config.kind || "info";
+    const dangerous = kind === "danger";
+    const overlay = document.createElement("div");
+    overlay.className = `novaModalOverlay ${dangerous ? "danger" : kind}`;
+    overlay.innerHTML = `
+      <section class="novaModalShell ${dangerous ? "danger" : kind}" role="dialog" aria-modal="true" aria-labelledby="nova-modal-title" aria-describedby="nova-modal-message" tabindex="-1">
+        <div class="novaModalHeader">
+          <span class="novaModalIcon" aria-hidden="true">${dangerous ? "!" : "i"}</span>
+          <div>
+            <h2 id="nova-modal-title">${esc(config.title || (dangerous ? "Confirm Critical Action" : "Transmission"))}</h2>
+            ${config.eyebrow ? `<small>${esc(config.eyebrow)}</small>` : ""}
+          </div>
+          ${config.allowClose === false ? "" : `<button type="button" class="novaModalClose" data-cancel aria-label="Close">×</button>`}
+        </div>
+        <p id="nova-modal-message" class="novaModalMessage">${esc(config.message || "")}</p>
+        ${config.confirmationPhrase ? `<label class="novaModalField"><span>${esc(config.inputLabel || `Type ${config.confirmationPhrase} to confirm`)}</span><input data-modal-input placeholder="${esc(config.confirmationPhrase)}" autocomplete="off"></label><div class="novaModalHint" data-modal-hint>Confirmation phrase must match exactly.</div>` : ""}
+        <div class="novaModalActions">
+          ${kind === "info" ? "" : `<button type="button" class="novaModalSecondary" data-cancel>${esc(config.cancelLabel || "Cancel")}</button>`}
+          <button type="button" class="novaModalPrimary" data-accept>${esc(config.confirmLabel || (kind === "info" ? "Acknowledge" : "Confirm"))}</button>
+        </div>
+      </section>`;
+    const shell = overlay.querySelector(".novaModalShell");
+    const input = overlay.querySelector("[data-modal-input]");
+    const accept = overlay.querySelector("[data-accept]");
+    const hint = overlay.querySelector("[data-modal-hint]");
+    const expected = String(config.confirmationPhrase || "");
+    const canAccept = () => !expected || String(input?.value || "").trim() === expected;
+    const syncAccept = () => {
+      accept.disabled = !canAccept();
+      if (hint) hint.style.display = canAccept() ? "none" : "block";
+    };
+    const finish = (value) => {
+      document.removeEventListener("keydown", onKeyDown);
+      overlay.remove();
+      previousFocus?.focus?.();
+      resolve(value);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape" && config.allowEscape !== false) {
+        event.preventDefault();
+        finish(kind === "info" ? undefined : false);
+        return;
+      }
+      if (event.key === "Enter" && canAccept()) {
+        event.preventDefault();
+        finish(kind === "info" ? undefined : true);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(shell.querySelectorAll(NOVA_MODAL_FOCUSABLE)).filter(el => el.offsetParent !== null);
+      if (!focusable.length) {
+        event.preventDefault();
+        shell.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    overlay.querySelectorAll("[data-cancel]").forEach(btn => btn.addEventListener("click", () => finish(false)));
+    accept.addEventListener("click", () => {
+      if (canAccept()) finish(kind === "info" ? undefined : true);
+    });
+    input?.addEventListener("input", syncAccept);
+    syncAccept();
+    document.body.appendChild(overlay);
+    document.addEventListener("keydown", onKeyDown);
+    setTimeout(() => (input || accept || shell).focus(), 0);
+  });
+}
+
+function showInfoDialog(message, options = {}) {
+  return novaModal({kind:"info", message, ...options});
+}
+
+function askCriticalDialog(message, options = {}) {
+  return novaModal({kind:"danger", message, confirmationPhrase:"DELETE", ...options});
+}
+
 async function apiAction(type, payload = {}) {
   const res = await fetch("/api/action", {
     method: "POST",
@@ -53,7 +143,7 @@ async function apiAction(type, payload = {}) {
   let data = {};
   try { data = await res.json(); } catch { data = {}; }
   if (!res.ok) {
-    alert(data.detail || data.result?.error || "Action failed");
+    await showInfoDialog(data.detail || data.result?.error || "Action failed", {title:"Action Failed"});
     return data;
   }
   if (data.state) {
@@ -118,7 +208,7 @@ function loginScreen() {
       body: JSON.stringify({ username, password })
     });
     const data = await res.json();
-    if (!res.ok) { alert(data.detail || "Login failed"); return; }
+    if (!res.ok) { await showInfoDialog(data.detail || "Login failed", {title:"Login Failed"}); return; }
     token = data.token;
     sessionStorage.setItem("nova_token", token);
     localStorage.removeItem("nova_token");
@@ -152,7 +242,7 @@ function shell() {
           ${navButton("fuel", "Fuel Shop")}
           ${navButton("calendar", "Calendar")}
           ${p.god_mode ? navButton("admin", "Admin") : ""}
-          <button class="danger" onclick="apiAction('reset')">Reset Universe</button>
+          <button class="danger" onclick="askCriticalDialog('Reset Universe? This permanently clears the current universe state.', {title:'Reset Universe', eyebrow:'Permanent action', confirmLabel:'Reset', confirmationPhrase:'RESET', inputLabel:'Type RESET to confirm'}).then(ok => ok && apiAction('reset'))">Reset Universe</button>
         </div>
         <div class="panel panelBody pilotCard">
           <h3>${esc(p.callsign)}</h3>
