@@ -1435,16 +1435,25 @@ function FactionIdentityStrip() {
 const factionOnboardingCopy = {
   solar_accord: {
     about: 'Safe lanes. Clean markets. Fleet backing.',
+    lore: 'A disciplined coalition of convoy marshals, station courts, and signal beacons that turns dangerous space into mapped, taxed, protected routes.',
+    identity: 'Convoy guardians and lawful frontier builders',
+    playstyle: 'Defensive logistics, escort contracts, patrol income, and clean-market leverage.',
     bonuses: ['+8% patrol and escort payouts', '+5% lawful market prices', 'Starter systems begin with higher security'],
     debuffs: ['-6% illicit market margins', 'Hostile pirate space escalates faster'],
   },
   iron_meridian: {
     about: 'Heavy hulls. Hard industry. Patient power.',
+    lore: 'A foundry-bonded machine polity that measures territory in refinery output, armored tonnage, and the stations it can keep running under fire.',
+    identity: 'Industrial siege engineers and armored haulers',
+    playstyle: 'Mining, manufacturing, durable ships, repair efficiency, and long-form territory pressure.',
     bonuses: ['+8% mining and refinery yield', '+6% hull repair efficiency', 'Guild industry projects complete faster'],
     debuffs: ['-5% evasion in light ships', 'Diplomacy checks start colder in free ports'],
   },
   umbral_veil: {
     about: 'Risky routes. Sharp scans. Quiet exits.',
+    lore: 'A loose intelligence network of salvagers, smugglers, and void-touched scouts that survives by seeing first and leaving clean.',
+    identity: 'Recon operators, salvagers, and black-route specialists',
+    playstyle: 'Scanning, stealthy routes, salvage, smuggling, and high-risk timing windows.',
     bonuses: ['+9% smuggling and salvage payouts', '+6% scan range in unstable space', 'Lower black-market heat from first offenses'],
     debuffs: ['-7% lawful faction standing gains', 'Security patrols inspect them more often'],
   },
@@ -1479,6 +1488,21 @@ function factionDecisionLine(faction) {
 
 function factionDescriptor(faction) {
   return factionShortLine(faction);
+}
+
+function factionPresentationFor(faction) {
+  const key = String(faction?.code || faction?.key || '').toLowerCase();
+  const copy = factionOnboardingCopy[key] || {};
+  const asset = factionAssets[key] || {};
+  return {
+    lore: copy.lore || faction?.guidance?.youAreChoosing || faction?.description || factionCopyFor(faction).about,
+    identity: copy.identity || `${faction?.species || 'Frontier'} doctrine`,
+    playstyle: copy.playstyle || factionDecisionLine(faction),
+    strengths: faction?.bonuses?.length ? faction.bonuses : (copy.bonuses || ['Balanced starter position']),
+    tradeoffs: faction?.debuffs?.length ? faction.debuffs : (copy.debuffs || ['No special drawbacks reported']),
+    ship: asset?.ships?.battleship || asset?.ships?.cruiser || asset?.ships?.fighter || '',
+    avatar: asset?.avatarOptions?.[0]?.url || '',
+  };
 }
 
 const REGISTRATION_FALLBACK_FACTIONS = ['solar_accord', 'iron_meridian', 'umbral_veil'].map((code, index) => {
@@ -1716,7 +1740,7 @@ function renderLandingVisual(section) {
 }
 
 function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onClearGoogle}) {
-  const [mode,setMode] = useState('login');
+  const [registerOpen,setRegisterOpen] = useState(false);
   const [u,setU] = useState('');
   const [p,setP] = useState('');
   const [callsign,setCallsign] = useState('');
@@ -1731,6 +1755,7 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
   const [pendingGoogle,setPendingGoogle] = useState(null);
   const [googleReady,setGoogleReady] = useState(false);
   const googleButtonRef = useRef(null);
+  const registerGoogleButtonRef = useRef(null);
 
   const factions = factionBalance?.factions?.length ? factionBalance.factions : REGISTRATION_FALLBACK_FACTIONS;
   useEffect(() => {
@@ -1743,7 +1768,8 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
   }, []);
 
   useEffect(() => {
-    if (!GOOGLE_CLIENT_ID || !googleReady || !googleButtonRef.current || !window.google?.accounts?.id) return;
+    const googleTarget = registerOpen ? registerGoogleButtonRef.current : googleButtonRef.current;
+    if (!GOOGLE_CLIENT_ID || !googleReady || !googleTarget || !window.google?.accounts?.id) return;
     window.google.accounts.id.initialize({
       client_id: GOOGLE_CLIENT_ID,
       callback: async (response) => {
@@ -1752,9 +1778,9 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
       },
       auto_select: false
     });
-    googleButtonRef.current.innerHTML = '';
-    window.google.accounts.id.renderButton(googleButtonRef.current, { theme:'filled_black', size:'large', text:mode === 'register' ? 'signup_with' : 'signin_with', shape:'pill', width: 320 });
-  }, [googleReady, mode, selectedFaction, callsign, pendingGoogle?.token]);
+    googleTarget.innerHTML = '';
+    window.google.accounts.id.renderButton(googleTarget, { theme:'filled_black', size:'large', text:registerOpen ? 'signup_with' : 'signin_with', shape:'pill', width: registerOpen ? 360 : 320 });
+  }, [googleReady, registerOpen, selectedFaction, callsign, pendingGoogle?.token]);
 
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID) return;
@@ -1785,26 +1811,44 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
     if (token || showMessage) await onClearGoogle?.(token);
   }
 
-  const switchMode = async (nextMode) => {
-    if (nextMode !== mode) await clearPendingGoogle(false);
+  const openRegisterModal = async () => {
     setErr('');
     setStatus('');
-    setMode(nextMode);
+    setRegisterOpen(true);
+  };
+
+  const closeRegisterModal = async () => {
+    const token = pendingGoogle?.token || '';
+    setPendingGoogle(null);
+    setRegisterOpen(false);
+    setErr('');
+    setStatus('');
+    if (token) await onClearGoogle?.(token);
   };
 
   const submit = async (e) => {
     e.preventDefault();
     await runAuth(async () => {
-      if (mode === 'login') {
-        await onLogin(u,p);
-      } else {
-        if (!selectedFaction) throw new Error('Choose a faction to continue.');
-        try {
-          await onRegister({ username:u, password:p, callsign:callsign || u, email, faction_id:Number(selectedFaction), avatar_id:selectedAvatar, google_registration_token:pendingGoogle?.token || '' });
-        } catch(ex) {
-          if (pendingGoogle?.token) await clearPendingGoogle(false);
-          throw ex;
-        }
+      if (!u.trim()) throw new Error('Enter your username.');
+      if (!p) throw new Error('Enter your password.');
+      await onLogin(u.trim(),p);
+    });
+  };
+
+  const submitRegistration = async (e) => {
+    e.preventDefault();
+    await runAuth(async () => {
+      if (!u.trim()) throw new Error('Choose a username.');
+      if (!email.trim()) throw new Error('Enter an email address.');
+      if (!pendingGoogle?.token && !p) throw new Error('Enter a password.');
+      if (!pendingGoogle?.token && p.length < 6) throw new Error('Password must be at least 6 characters.');
+      if (!selectedFaction) throw new Error('Choose a faction to continue.');
+      try {
+        await onRegister({ username:u.trim(), password:p, callsign:callsign.trim() || u.trim(), email:email.trim(), faction_id:Number(selectedFaction), avatar_id:selectedAvatar, google_registration_token:pendingGoogle?.token || '' });
+        setRegisterOpen(false);
+      } catch(ex) {
+        if (pendingGoogle?.token) await clearPendingGoogle(false);
+        throw ex;
       }
     });
   };
@@ -1814,7 +1858,7 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
     setStatus('');
     setGoogleBusy(true);
     try {
-      if (mode === 'login') {
+      if (!registerOpen) {
         await onGoogleLogin(credential);
         return;
       }
@@ -1822,6 +1866,7 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
       setPendingGoogle({ token:data.google_registration_token, email:data.email || '', displayName:data.display_name || '' });
       if (data.email) setEmail(data.email);
       if (!callsign && data.display_name) setCallsign(data.display_name.slice(0, 32));
+      if (!u && data.display_name) setU(data.display_name.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 24));
       setStatus(data.message || 'Google account linked. Finish creating your profile.');
     } catch(ex) {
       setErr(String(ex.message || ex).replace(/^\{"detail":"?|"?\}$/g, ''));
@@ -1834,11 +1879,24 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
   const selectedFactionData = factions.find(f => String(f.id) === String(selectedFaction)) || null;
   const selectedFactionAvatars = selectedFactionData?.avatar_options || selectedFactionData?.avatarOptions || [];
   useEffect(() => {
-    if (mode !== 'register' || !selectedFactionAvatars.length) return;
+    if (!registerOpen || !selectedFactionAvatars.length) return;
     if (!selectedFactionAvatars.some(a => a.id === selectedAvatar)) setSelectedAvatar(selectedFactionAvatars[0].id);
-  }, [mode, selectedFactionData?.id, selectedFactionAvatars.length, selectedAvatar]);
+  }, [registerOpen, selectedFactionData?.id, selectedFactionAvatars.length, selectedAvatar]);
+  useEffect(() => {
+    if (!registerOpen || typeof document === 'undefined') return undefined;
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') closeRegisterModal();
+    };
+    document.body.classList.add('authModalOpen');
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.body.classList.remove('authModalOpen');
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [registerOpen, pendingGoogle?.token]);
   const selectedFactionColor = selectedFactionData?.color || '#35f2ff';
-  return <div className={`loginScreen novaLandingScreen ${mode === 'register' ? 'authRegisterMode' : 'authLoginMode'}`}>
+  const selectedFactionPresentation = selectedFactionData ? factionPresentationFor(selectedFactionData) : null;
+  return <div className="loginScreen novaLandingScreen authLoginMode">
     <div className="landingStars" aria-hidden="true"><i /><i /><i /></div>
 
     <main className="landingExperience">
@@ -1848,7 +1906,7 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
           <div className="registrationHeroCopy">
             <span>Persistent browser MMO</span>
             <h1 id="nova-login-title">Nova Frontiers</h1>
-            <p>{mode === 'register' ? 'Create a pilot. Choose a faction. The frontier keeps moving.' : 'Your routes, cargo, claims, and enemies are still out there.'}</p>
+            <p>Your routes, cargo, claims, and enemies are still out there.</p>
             <div className="landingRoleCards registrationRoleCards" aria-label="Starter career paths">
               <span><b>Haul</b><small>Move cargo. Read the lane.</small></span>
               <span><b>Salvage</b><small>Find wrecks. Keep what lasts.</small></span>
@@ -1868,8 +1926,8 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
           <div className="registrationSignalDeck" style={{'--faction-accent': selectedFactionColor}}>
             <div>
               <span>Command briefing</span>
-              <b>{selectedFactionData?.name || 'VX-9 / Echo Frontier'}</b>
-              <small>{mode === 'register' ? (selectedFactionData ? factionDecisionLine(selectedFactionData) : 'Choose who gets your first signal.') : 'Your ship is quiet. The world is not.'}</small>
+              <b>VX-9 / Echo Frontier</b>
+              <small>Your ship is quiet. The world is not.</small>
             </div>
             <ol className="registrationBriefList">
               <li><strong>Border unstable</strong><small>Convoys are getting scanned.</small></li>
@@ -1886,94 +1944,161 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
 
         <div className="registrationConsole" aria-label="Account access">
           <div className="registrationConsoleHeader">
-            <span>{mode === 'register' ? 'Pilot dossier' : 'Command access'}</span>
-            <b>{mode === 'register' ? 'Register' : 'Login'}</b>
-          </div>
-          <div className="authModeTabs registrationModeTabs">
-            <button type="button" className={mode==='login'?'active':''} onClick={()=>switchMode('login')}>Login</button>
-            <button type="button" className={mode==='register'?'active':''} onClick={()=>switchMode('register')}>Register</button>
+            <span>Command access</span>
+            <b>Login</b>
           </div>
 
           <form onSubmit={submit} className="loginForm registrationAuthForm">
-            <section className="registrationFormSection registrationAccountSection" aria-labelledby="registration-account-title">
-              {mode === 'register' && <div className="registrationSectionHeader">
-                <b id="registration-account-title">Account Info</b>
-              </div>}
+            <section className="registrationFormSection registrationAccountSection">
               <div className="registrationFieldGrid">
                 <label>
                   <span>Username</span>
                   <input value={u} onChange={e=>setU(e.target.value)} placeholder="username" autoComplete="username" />
                 </label>
-                {mode === 'register' && <label>
-                  <span>Callsign</span>
-                  <input value={callsign} onChange={e=>setCallsign(e.target.value)} placeholder="callsign" autoComplete="nickname" />
-                </label>}
-                {mode === 'register' && <label>
-                  <span>Email</span>
-                  <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="email" type="email" autoComplete="email" />
-                </label>}
                 <label>
                   <span>Password</span>
-                  <input value={p} onChange={e=>setP(e.target.value)} placeholder={mode === 'register' && pendingGoogle ? 'optional with Google' : 'password'} type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} />
+                  <input value={p} onChange={e=>setP(e.target.value)} placeholder="password" type="password" autoComplete="current-password" />
                 </label>
               </div>
             </section>
 
-            {mode === 'register' && <div className="registrationOnboarding">
-              <section className="registrationFormSection registrationFactionSection" aria-labelledby="registration-faction-title">
-                <div className="registrationSectionHeader">
-                  <b id="registration-faction-title">Faction Selection</b>
-                </div>
-                <div className="factionBalanceGrid registrationFactionGrid">
-                  {factions.map(f => <button key={f.id} type="button" aria-expanded={String(selectedFaction)===String(f.id)} className={`factionChoice ${String(selectedFaction)===String(f.id)?'selected':''}`} onClick={()=>setSelectedFaction(String(f.id))} style={{'--faction-accent':f.color || '#35f2ff'}}>
-                    <span className="factionChoiceEmblem"><img src={factionAssets[f.code]?.emblem || f.emblem || factionAssets.solar_accord.emblem} alt="" /></span>
-                    <span className="factionChoiceTop"><b>{f.name}</b><em>{f.balance_label || 'Open'}</em></span>
-                    <strong>{f.species || 'Pilot'}</strong>
-                    <span>{factionDescriptor(f)}</span>
-                    <i>{Number(f.player_percent || 0).toFixed(1)}% balance</i>
-                    <div className="factionBalanceBar"><span style={{width:`${Math.max(4, Math.min(100, Number(f.player_percent || 0)))}%`}} /></div>
-                  </button>)}
-                </div>
-              </section>
-              {selectedFactionData && <section className="registrationFormSection registrationDetailsSection" aria-labelledby="registration-details-title">
-                <div className="registrationSectionHeader">
-                  <b id="registration-details-title">Faction Details</b>
-                </div>
-                <div className="factionDecisionPanel registrationDecisionPanel" style={{'--faction-accent':selectedFactionColor}}>
-                  <div className="factionDecisionHero">
-                    <img src={factionAssets[selectedFactionData.code]?.emblem || selectedFactionData.emblem || factionAssets.solar_accord.emblem} alt="" />
-                    <div>
-                      <b>{selectedFactionData.name}</b>
-                      <span>{factionDecisionLine(selectedFactionData)}</span>
-                    </div>
-                  </div>
-                  <div className="factionBalanceStats">
-                    <span><small>Players</small><b>{fmt(selectedFactionData.players || 0)}</b></span>
-                    <span><small>Online</small><b>{fmt(selectedFactionData.online_players || 0)}</b></span>
-                    <span><small>Control</small><b>{Number(selectedFactionData.galaxy_control_percent ?? selectedFactionData.control_percent ?? 0).toFixed(1)}%</b></span>
-                    <span><small>Balance</small><b>{selectedFactionData.balance_label || 'Open'}</b></span>
-                  </div>
-                </div>
-              </section>}
-            </div>}
-
-            <button className="primary registrationSubmit" disabled={busy || googleBusy}>{busy ? 'Working...' : mode === 'login' ? 'Launch' : 'Create Account'}</button>
+            <button className="primary registrationSubmit" disabled={busy || googleBusy}>{busy ? 'Working...' : 'Launch'}</button>
           </form>
 
           <div className="googleAuthBlock registrationGoogleBlock">
             {GOOGLE_CLIENT_ID ? <div ref={googleButtonRef} className={`googleButtonSlot ${googleBusy ? 'loading' : ''}`} /> : <button type="button" disabled className="googleDisabled">Google unavailable</button>}
-            <span>{GOOGLE_CLIENT_ID ? (mode === 'register' ? 'Register with Google links the account after Create Account succeeds.' : 'Google login only works for already linked pilots.') : 'Google sign-in is not configured.'}</span>
+            <span>{GOOGLE_CLIENT_ID ? 'Google login only works for already linked pilots.' : 'Google sign-in is not configured.'}</span>
             {googleBusy && <span className="authStatus">Verifying Google...</span>}
             {pendingGoogle && <button type="button" className="linkButton authClearGoogle" onClick={()=>clearPendingGoogle(true)}>Clear Google login</button>}
           </div>
           {status && <div className="authStatus">{status}</div>}
           {err && <div className="error">{err}</div>}
+          <p className="authSwitchText">Don't have an account? <a href="#register" onClick={(e)=>{ e.preventDefault(); openRegisterModal(); }}>Register</a></p>
         </div>
       </section>
 
       <div className="landingScrollCue" aria-hidden="true"><span />Survey the frontier</div>
       {LANDING_SECTIONS.map((section, index) => <LandingScrollSection key={section.key} section={section} index={index} />)}
     </main>
+    {registerOpen && <div className="authRegisterModalOverlay" onMouseDown={()=>closeRegisterModal()}>
+      <section className="authRegisterModal" role="dialog" aria-modal="true" aria-labelledby="registration-modal-title" onMouseDown={e=>e.stopPropagation()}>
+        <header className="authRegisterModalHeader">
+          <div>
+            <span>Pilot dossier</span>
+            <h2 id="registration-modal-title">Register</h2>
+            <p>Choose the identity your first signal belongs to.</p>
+          </div>
+          <button type="button" className="authModalClose" aria-label="Close registration" onClick={()=>closeRegisterModal()}><X size={18}/></button>
+        </header>
+
+        <form onSubmit={submitRegistration} className="loginForm registrationAuthForm authModalForm">
+          <section className="registrationFormSection registrationAccountSection" aria-labelledby="registration-modal-account-title">
+            <div className="registrationSectionHeader">
+              <b id="registration-modal-account-title">Account</b>
+            </div>
+            <div className="registrationFieldGrid">
+              <label>
+                <span>Username</span>
+                <input value={u} onChange={e=>setU(e.target.value)} placeholder="username" autoComplete="username" required />
+              </label>
+              <label>
+                <span>Email</span>
+                <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="email" type="email" autoComplete="email" required />
+              </label>
+              <label>
+                <span>Password</span>
+                <input value={p} onChange={e=>setP(e.target.value)} placeholder={pendingGoogle ? 'optional with Google' : 'password'} type="password" autoComplete="new-password" required={!pendingGoogle} minLength={pendingGoogle ? undefined : 6} />
+              </label>
+              <label>
+                <span>Callsign</span>
+                <input value={callsign} onChange={e=>setCallsign(e.target.value)} placeholder="callsign" autoComplete="nickname" />
+              </label>
+            </div>
+            <div className="googleAuthBlock registrationGoogleBlock authModalGoogle">
+              {GOOGLE_CLIENT_ID ? <div ref={registerGoogleButtonRef} className={`googleButtonSlot ${googleBusy ? 'loading' : ''}`} /> : <button type="button" disabled className="googleDisabled">Google unavailable</button>}
+              <span>{GOOGLE_CLIENT_ID ? 'Register with Google, then finish the faction dossier below.' : 'Google sign-in is not configured.'}</span>
+              {googleBusy && <span className="authStatus">Verifying Google...</span>}
+              {pendingGoogle && <button type="button" className="linkButton authClearGoogle" onClick={()=>clearPendingGoogle(true)}>Clear Google login</button>}
+            </div>
+          </section>
+
+          <section className="registrationFormSection registrationFactionSection" aria-labelledby="registration-modal-faction-title">
+            <div className="registrationSectionHeader factionModalIntro">
+              <div>
+                <b id="registration-modal-faction-title">Choose Your Identity</b>
+                <span>Faction choice sets your starting alignment, bonuses, and war context.</span>
+              </div>
+            </div>
+            <div className="factionBalanceGrid registrationFactionGrid cinematicFactionGrid">
+              {factions.map(f => {
+                const isSelected = String(selectedFaction) === String(f.id);
+                const presentation = factionPresentationFor(f);
+                const asset = factionAssets[f.code] || factionAssets.solar_accord;
+                const balance = Number(f.player_percent || 0);
+                return <button key={f.id} type="button" aria-pressed={isSelected} className={`factionChoice cinematicFactionCard ${isSelected ? 'selected locked' : ''}`} onClick={()=>setSelectedFaction(String(f.id))} style={{'--faction-accent':f.color || asset?.color || '#35f2ff'}}>
+                  <span className="cinematicFactionMedia">
+                    {presentation.ship && <img className="cinematicFactionShip" src={presentation.ship} alt="" loading="lazy" />}
+                    <span className="factionChoiceEmblem"><img src={asset?.emblem || f.emblem || factionAssets.solar_accord.emblem} alt="" /></span>
+                    <em>{isSelected ? 'Selected' : 'Available'}</em>
+                  </span>
+                  <span className="factionChoiceTop"><b>{f.name}</b><em>{f.balance_label || 'Open'}</em></span>
+                  <strong>{presentation.identity}</strong>
+                  <span>{presentation.lore}</span>
+                  <small className="factionPlaystyle">{presentation.playstyle}</small>
+                  <ul>
+                    {presentation.strengths.slice(0,3).map(item => <li key={item}>{item}</li>)}
+                  </ul>
+                  <i>{balance.toFixed(1)}% population balance</i>
+                  <div className="factionBalanceBar"><span style={{width:`${Math.max(4, Math.min(100, balance))}%`}} /></div>
+                  <span className="factionChoiceLock">{isSelected ? 'Identity locked' : 'Choose identity'}</span>
+                </button>;
+              })}
+            </div>
+          </section>
+
+          {selectedFactionData && selectedFactionPresentation && <section className="registrationFormSection registrationDetailsSection" aria-labelledby="registration-modal-details-title">
+            <div className="registrationSectionHeader">
+              <b id="registration-modal-details-title">{selectedFactionData.name} Briefing</b>
+            </div>
+            <div className="factionDecisionPanel registrationDecisionPanel authModalDecision" style={{'--faction-accent':selectedFactionColor}}>
+              <div className="factionDecisionHero">
+                <img src={factionAssets[selectedFactionData.code]?.emblem || selectedFactionData.emblem || factionAssets.solar_accord.emblem} alt="" />
+                <div>
+                  <b>{selectedFactionData.name}</b>
+                  <span>{selectedFactionPresentation.playstyle}</span>
+                </div>
+              </div>
+              <div className="factionBalanceStats">
+                <span><small>Players</small><b>{fmt(selectedFactionData.players || 0)}</b></span>
+                <span><small>Online</small><b>{fmt(selectedFactionData.online_players || 0)}</b></span>
+                <span><small>Control</small><b>{Number(selectedFactionData.galaxy_control_percent ?? selectedFactionData.control_percent ?? 0).toFixed(1)}%</b></span>
+                <span><small>Balance</small><b>{selectedFactionData.balance_label || 'Open'}</b></span>
+              </div>
+              <div className="factionModalWarning"><AlertTriangle size={16}/><span>Faction choice matters. It affects your allies, hostile borders, starter advantages, and the wars you inherit.</span></div>
+            </div>
+          </section>}
+
+          {selectedFactionAvatars.length > 0 && <section className="registrationFormSection registrationAvatarPicker" aria-labelledby="registration-modal-avatar-title">
+            <div className="registrationSectionHeader">
+              <b id="registration-modal-avatar-title">Pilot Portrait</b>
+            </div>
+            <div className="registrationAvatarGrid">
+              {selectedFactionAvatars.slice(0,6).map(avatar => <button key={avatar.id} type="button" className={selectedAvatar === avatar.id ? 'selectedAvatar' : ''} onClick={()=>setSelectedAvatar(avatar.id)}>
+                <img src={avatar.url} alt="" loading="lazy" />
+                <span>{avatar.label || 'Pilot'}</span>
+              </button>)}
+            </div>
+          </section>}
+
+          {status && <div className="authStatus">{status}</div>}
+          {err && <div className="error">{err}</div>}
+          <div className="authModalActions">
+            <button type="button" className="novaModalSecondary" onClick={()=>closeRegisterModal()}>Cancel</button>
+            <button className="primary registrationSubmit" disabled={busy || googleBusy}>{busy ? 'Working...' : 'Create Account'}</button>
+          </div>
+        </form>
+      </section>
+    </div>}
   </div>;
 }
 

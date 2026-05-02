@@ -21,6 +21,7 @@ let mapFilters = JSON.parse(localStorage.getItem("nova_map_filters") || "null") 
   events: true,
   blips: true,
   lanes: true,
+  territory: true,
   radar: true
 };
 let dragging = false;
@@ -43,6 +44,86 @@ function wx(x) { return Number(x || 0) - ox(); }
 function wy(y) { return Number(y || 0) - oy(); }
 function esc(str) { return String(str ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[c])); }
 function uid() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`; }
+const FACTION_COLOR_FALLBACKS = {
+  orange: "#ffcf70",
+  gold: "#ffd84d",
+  yellow: "#ffe45e",
+  red: "#ff3f55",
+  crimson: "#ff3f55",
+  purple: "#b071ff",
+  violet: "#b071ff",
+  grey: "#a7b0ba",
+  gray: "#a7b0ba",
+  blue: "#67e8f9",
+  cyan: "#67e8f9",
+  green: "#8cffb1",
+  neutral: "#9fb7c7"
+};
+
+function cssColor(raw, fallback = "#9fb7c7") {
+  const value = String(raw || "").trim().toLowerCase();
+  if (!value) return fallback;
+  if (value.startsWith("#")) return value;
+  return FACTION_COLOR_FALLBACKS[value] || raw || fallback;
+}
+
+function hexToRgb(hex) {
+  const clean = String(hex || "").replace("#", "");
+  const full = clean.length === 3 ? clean.split("").map(c => c + c).join("") : clean;
+  const n = parseInt(full, 16);
+  if (!Number.isFinite(n)) return { r: 159, g: 183, b: 199 };
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+function rgbaColor(raw, alpha = 1) {
+  const rgb = hexToRgb(cssColor(raw));
+  return `rgba(${rgb.r},${rgb.g},${rgb.b},${alpha})`;
+}
+
+function factionById(id) {
+  return (state?.factions || []).find(f => String(f.id) === String(id));
+}
+
+function factionName(id, fallback = "Neutral") {
+  return factionById(id)?.name || fallback;
+}
+
+function factionColor(id, fallback = "#9fb7c7") {
+  const faction = factionById(id);
+  return cssColor(faction?.color, fallback);
+}
+
+function mapNodeX(obj) {
+  if (mapMode === "galaxy") return Number(obj?.x_pct ?? 50) / 100 * worldW();
+  return wx(obj?.x);
+}
+
+function mapNodeY(obj) {
+  if (mapMode === "galaxy") return Number(obj?.y_pct ?? 50) / 100 * worldH();
+  return wy(obj?.y);
+}
+
+function systemMapX(obj) {
+  if (obj?.x !== undefined && obj?.x !== null) return wx(obj.x);
+  return wx(((Number(obj?.x_pct ?? 50) - 50) / 1.45) * 2.3);
+}
+
+function systemMapY(obj) {
+  if (obj?.y !== undefined && obj?.y !== null) return wy(obj.y);
+  return wy(((Number(obj?.y_pct ?? 50) - 50) / 1.45) * 2.3);
+}
+
+function galaxyNodeById(id) {
+  return (state?.galaxy_map?.nodes || state?.galaxies || []).find(g => String(g.id) === String(id));
+}
+
+function systemNodeById(id) {
+  return (state?.system_map?.nodes || state?.planets || []).find(p => String(p.id) === String(id));
+}
+
+function galaxyIntel(id) {
+  return state?.galaxy_war_intel?.by_galaxy?.[String(id)] || null;
+}
 
 const NOVA_MODAL_FOCUSABLE = "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex='-1'])";
 
@@ -327,7 +408,7 @@ function currentGalaxyId() {
 
 function currentGalaxy() {
   const gid = currentGalaxyId();
-  return state?.galaxies?.find(g => g.id === gid) || state?.galaxies?.[0] || {};
+  return galaxyNodeById(gid) || state?.galaxies?.find(g => g.id === gid) || state?.galaxies?.[0] || {};
 }
 
 function setMapMode(next) {
@@ -416,12 +497,14 @@ function mapPanel() {
         ${mapFilterButton("artifacts", "Artifacts")}
         ${mapFilterButton("events", "Events")}
         ${mapFilterButton("blips", "Scan Blips")}
+        ${mapFilterButton("territory", "Territory")}
         ${mapFilterButton("lanes", "Lanes")}
         ${mapFilterButton("radar", "Radar")}
       </div>
       <div id="viewport" class="viewport ${mapMode === "galaxy" ? "galaxyView" : "systemView"}">
         <div id="world" class="world" style="width:${worldW()}px;height:${worldH()}px;--icon-scale:${iconScale()};transform:translate(${view.x}px, ${view.y}px) scale(${view.z})">
           <div class="stars"></div>
+          <div class="territory">${territorySvg()}</div>
           <div class="lanes">${lanesSvg()}</div>
           <div class="entities">${entitiesHtml()}</div>
         </div>
@@ -433,25 +516,101 @@ function mapFilterButton(key, label) {
   return `<button class="mapFilter ${mapFilters[key] ? "on" : "off"}" onclick="toggleMapFilter('${key}')">${label}</button>`;
 }
 
+function convexHull(points) {
+  const uniq = [...new Map(points.map(p => [`${Math.round(p.x)}:${Math.round(p.y)}`, p])).values()]
+    .sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+  if (uniq.length <= 2) return uniq;
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower = [];
+  for (const p of uniq) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+    lower.push(p);
+  }
+  const upper = [];
+  for (let i = uniq.length - 1; i >= 0; i--) {
+    const p = uniq[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+    upper.push(p);
+  }
+  return lower.slice(0, -1).concat(upper.slice(0, -1));
+}
+
+function factionTerritoryGroups() {
+  const groups = {};
+  if (mapMode === "galaxy") {
+    for (const g of (state.galaxy_map?.nodes || state.galaxies || [])) {
+      const intel = galaxyIntel(g.id);
+      const owner = intel?.owner_faction || factionById(g.faction_id) || {};
+      const key = String(owner.id || g.faction_id || "neutral");
+      if (!groups[key]) groups[key] = { key, name: owner.name || g.faction_name || g.faction || "Neutral", color: cssColor(owner.color || g.faction_color || g.color), points: [], hot: false };
+      groups[key].points.push({ x: mapNodeX(g), y: mapNodeY(g), status: intel?.war_state || g.territory_status || "peace" });
+      groups[key].hot ||= ["active_war", "contested", "mobilizing"].includes(intel?.war_state || "");
+    }
+  } else {
+    const nodes = state.system_map?.nodes?.filter(n => n.kind === "planet") || state.planets.filter(p => p.galaxy_id === currentGalaxyId());
+    for (const p of nodes) {
+      const owner = p.owner_faction || factionById(p.controlling_faction_id || p.faction_id) || {};
+      const key = String(owner.id || p.controlling_faction_id || p.faction_id || "neutral");
+      if (!groups[key]) groups[key] = { key, name: owner.name || p.faction_name || "Neutral", color: cssColor(owner.color || p.faction_color || factionColor(key)), points: [], hot: false };
+      groups[key].points.push({ x: systemMapX(p), y: systemMapY(p), status: p.territory_status || "secure" });
+      groups[key].hot ||= ["war", "contested"].includes(p.territory_status || "");
+    }
+  }
+  return Object.values(groups).filter(g => g.points.length);
+}
+
+function territorySvg() {
+  if (!mapFilters.territory) return `<svg style="width:${worldW()}px;height:${worldH()}px"></svg>`;
+  const shapes = [];
+  const pad = mapMode === "galaxy" ? 620 : 58;
+  for (const group of factionTerritoryGroups()) {
+    const samples = [];
+    for (const p of group.points) {
+      const hot = ["war", "contested", "active_war", "mobilizing"].includes(p.status);
+      const r = hot ? pad * 1.12 : pad;
+      for (let i = 0; i < 12; i++) {
+        const a = (Math.PI * 2 * i) / 12;
+        samples.push({ x: p.x + Math.cos(a) * r, y: p.y + Math.sin(a) * r });
+      }
+      shapes.push(`<circle class="territoryCore ${hot ? "hot" : ""}" cx="${p.x}" cy="${p.y}" r="${Math.max(20, pad * .24)}" fill="${rgbaColor(group.color, hot ? .28 : .16)}" stroke="${rgbaColor(group.color, .62)}"/>`);
+    }
+    const hull = convexHull(samples);
+    const points = hull.map(p => `${Math.round(p.x)},${Math.round(p.y)}`).join(" ");
+    if (points) {
+      shapes.unshift(`<polygon class="territoryZone ${group.hot ? "hot" : ""}" points="${points}" fill="${rgbaColor(group.color, group.hot ? .22 : .13)}" stroke="${rgbaColor(group.color, group.hot ? .92 : .72)}"/>`);
+    }
+  }
+  return `<svg class="territorySvg" style="width:${worldW()}px;height:${worldH()}px">${shapes.join("")}</svg>`;
+}
+
 function lanesSvg() {
   if (!mapFilters.lanes) return `<svg style="width:${worldW()}px;height:${worldH()}px"></svg>`;
   const lines = [];
   if (mapMode === "galaxy") {
-    for (let i = 0; i < state.galaxies.length; i++) {
-      for (let j = i + 1; j < state.galaxies.length; j++) {
-        const a = state.galaxies[i], b = state.galaxies[j];
-        const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (d < state.settings.min_galaxy_gap * 2.5) lines.push(`<line class="jumpLane" x1="${wx(a.x)}" y1="${wy(a.y)}" x2="${wx(b.x)}" y2="${wy(b.y)}"/>`);
-      }
+    for (const lane of (state.galaxy_map?.lanes || [])) {
+      const a = galaxyNodeById(lane.from);
+      const b = galaxyNodeById(lane.to);
+      if (!a || !b) continue;
+      lines.push(`<line class="jumpLane ${lane.visited ? "visited" : ""} ${lane.active ? "active" : ""}" x1="${mapNodeX(a)}" y1="${mapNodeY(a)}" x2="${mapNodeX(b)}" y2="${mapNodeY(b)}"/>`);
     }
   } else {
-    const gid = currentGalaxyId();
-    const planets = state.planets.filter(p => p.galaxy_id === gid);
-    for (let i = 0; i < planets.length; i++) {
-      for (let j = i + 1; j < planets.length; j++) {
-        const a = planets[i], b = planets[j];
-        const d = Math.hypot(a.x - b.x, a.y - b.y);
-        if (d < state.settings.min_planet_gap * 3.0) lines.push(`<line class="lane" x1="${wx(a.x)}" y1="${wy(a.y)}" x2="${wx(b.x)}" y2="${wy(b.y)}"/>`);
+    const lanes = state.system_map?.lanes || [];
+    if (lanes.length) {
+      for (const lane of lanes) {
+        const a = systemNodeById(lane.from);
+        const b = systemNodeById(lane.to);
+        if (!a || !b) continue;
+        lines.push(`<line class="lane ${lane.gate ? "gateLane" : ""} ${lane.visited ? "visited" : ""} ${lane.active ? "active" : ""}" x1="${systemMapX(a)}" y1="${systemMapY(a)}" x2="${systemMapX(b)}" y2="${systemMapY(b)}"/>`);
+      }
+    } else {
+      const gid = currentGalaxyId();
+      const planets = state.planets.filter(p => p.galaxy_id === gid);
+      for (let i = 0; i < planets.length; i++) {
+        for (let j = i + 1; j < planets.length; j++) {
+          const a = planets[i], b = planets[j];
+          const d = Math.hypot(a.x - b.x, a.y - b.y);
+          if (d < (state.settings?.min_planet_gap || 80) * 3.0) lines.push(`<line class="lane" x1="${wx(a.x)}" y1="${wy(a.y)}" x2="${wx(b.x)}" y2="${wy(b.y)}"/>`);
+        }
       }
     }
   }
@@ -476,18 +635,30 @@ function entitiesHtml() {
   const showGalaxyNodes = mapMode === "galaxy" && mapFilters.galaxies;
   const showPlanetNodes = mapMode === "system" && mapFilters.planets;
   const currentGid = currentGalaxyId();
-  const galaxies = showGalaxyNodes ? state.galaxies.map(g => `
-    <div class="galaxy ${g.type} ${g.id === currentGid ? "currentGalaxy" : ""}" style="left:${wx(g.x)}px;top:${wy(g.y)}px;border-color:${g.color};--icon-scale:${Math.max(1, scale * .45)};" data-type="galaxy" data-id="${g.id}">
+  const galaxyNodes = state.galaxy_map?.nodes || state.galaxies || [];
+  const galaxies = showGalaxyNodes ? galaxyNodes.map(g => {
+    const intel = galaxyIntel(g.id);
+    const owner = intel?.owner_faction || factionById(g.faction_id) || {};
+    const color = cssColor(owner.color || g.faction_color || g.color);
+    return `
+    <div class="galaxy ${g.type || ""} ${intel?.war_state || ""} ${g.id === currentGid ? "currentGalaxy" : ""}" style="left:${mapNodeX(g)}px;top:${mapNodeY(g)}px;border-color:${color};--faction-color:${color};--icon-scale:${Math.max(1, scale * .45)};" data-type="galaxy" data-id="${g.id}">
       <div class="galaxyRing"></div>
-      <b>${esc(g.name)}</b><small>${esc(g.faction)}</small>${g.id === currentGid && !galaxyWarpActive() ? `<small class="youHere">You are here</small>` : ""}
-    </div>`).join("") : "";
+      <b>${esc(g.name)}</b><small>${esc(owner.name || g.faction_name || g.faction || "Neutral")}</small>${intel ? `<small class="warState">${esc(intel.war_label)}</small>` : ""}${g.id === currentGid && !galaxyWarpActive() ? `<small class="youHere">You are here</small>` : ""}
+    </div>`;
+  }).join("") : "";
+  const systemNodesById = Object.fromEntries((state.system_map?.nodes || []).map(n => [String(n.id), n]));
   const visiblePlanets = state.planets.filter(pl => pl.galaxy_id === currentGid);
-  const nodes = showPlanetNodes ? visiblePlanets.map(pl => `
-    <div class="node ${pl.id === p.location_id ? "current" : ""} ${pl.inhabitable ? "inhabitable" : "wild"}" style="left:${wx(pl.x)}px;top:${wy(pl.y)}px;--icon-scale:${scale};" data-type="planet" data-id="${pl.id}">
+  const nodes = showPlanetNodes ? visiblePlanets.map(pl => {
+    const intel = systemNodesById[String(pl.id)] || pl;
+    const color = cssColor(intel.faction_color || factionColor(intel.faction_id || pl.faction_id));
+    return `
+    <div class="node ${pl.id === p.location_id ? "current" : ""} ${pl.inhabitable ? "inhabitable" : "wild"} ${intel.territory_status || ""}" style="left:${wx(pl.x)}px;top:${wy(pl.y)}px;--faction-color:${color};--icon-scale:${scale};" data-type="planet" data-id="${pl.id}">
       <div class="name">${esc(pl.name)}</div>
+      <small><span class="miniFactionDot" style="background:${color}"></span>${esc(intel.faction_name || factionName(pl.faction_id))}${intel.territory_status && intel.territory_status !== "secure" ? ` / ${esc(intel.territory_status)}` : ""}</small>
       <small>${esc(pl.kind)} ${pl.has_refuel_shop ? "• Fuel" : ""}</small>
       <small>Sec ${pl.security} • Market ${pl.market}</small>
-    </div>`).join("") : "";
+    </div>`;
+  }).join("") : "";
   const px = p.render_x ?? p.x, py = p.render_y ?? p.y;
   const renderPlayer = playerShouldRenderOnCurrentMap();
   const radar = renderPlayer && mapMode === "system" && mapFilters.radar ? `<div class="radarRing" style="left:${wx(px)}px;top:${wy(py)}px;width:${(p.radar_range_effective||640)*2}px;height:${(p.radar_range_effective||640)*2}px"></div>` : "";
@@ -520,8 +691,92 @@ function sigIcon(s) {
   return "◇";
 }
 
+function statBar(label, value, color = "var(--accent)", inverse = false) {
+  const pctValue = Math.max(0, Math.min(100, Number(value || 0)));
+  const fill = inverse ? 100 - pctValue : pctValue;
+  return `<div class="inspectStat"><span>${esc(label)}</span><b>${fmt(pctValue)}</b><div class="miniBar"><i style="width:${fill}%;background:${color}"></i></div></div>`;
+}
+
+function buffText(buff) {
+  const entries = Object.entries(buff || {});
+  if (!entries.length) return "No active supply buff";
+  return entries.map(([k, v]) => `${k.replaceAll("_", " ")} ${Number(v) >= 0 ? "+" : ""}${v}`).join(", ");
+}
+
+function laneRowsForGalaxy(galaxyId) {
+  const lanes = (state.galaxy_map?.lanes || []).filter(l => String(l.from) === String(galaxyId) || String(l.to) === String(galaxyId));
+  return lanes.map(l => {
+    const otherId = String(l.from) === String(galaxyId) ? l.to : l.from;
+    const g = galaxyNodeById(otherId) || {};
+    const intel = galaxyIntel(otherId);
+    const owner = intel?.owner_faction || factionById(g.faction_id) || {};
+    const color = cssColor(owner.color || g.faction_color || g.color);
+    return `<div class="laneIntel"><span class="miniFactionDot" style="background:${color}"></span><b>${esc(g.name || `Galaxy ${otherId}`)}</b><small>${esc(owner.name || "Neutral")} / ${esc(intel?.war_label || "At Peace")}</small><em>${l.active ? "ACTIVE" : l.visited ? "VISITED" : "GATE"}</em></div>`;
+  }).join("") || `<p class="muted">No gate lanes found for this galaxy.</p>`;
+}
+
+function selectedInspectPanel() {
+  if (!selected || selected.type === "none") return "";
+  if (selected.type === "galaxy") return galaxyInspectPanel(selected.id);
+  if (selected.type === "planet") return planetInspectPanel(selected.id);
+  return "";
+}
+
+function galaxyInspectPanel(id) {
+  const g = galaxyNodeById(id) || state.galaxies.find(x => String(x.id) === String(id)) || {};
+  const intel = galaxyIntel(id);
+  const owner = intel?.owner_faction || factionById(g.faction_id) || {};
+  const color = cssColor(owner.color || g.faction_color || g.color);
+  const controlRows = (intel?.control_breakdown || []).map(row => {
+    const c = cssColor(row.faction?.color);
+    return `<div class="controlRow"><span class="miniFactionDot" style="background:${c}"></span><b>${esc(row.faction?.name || "Unknown")}</b><div class="miniBar"><i style="width:${row.percent}%;background:${c}"></i></div><em>${fmt(row.planets)} / ${row.percent}%</em></div>`;
+  }).join("") || `<p class="muted">No planet control data yet.</p>`;
+  const buffs = (intel?.supply?.buffs || []).map(b => `<div class="buffPill"><b>${esc(b.planet_name || "Supply")}</b><span>T${fmt(b.tier)} ${esc(buffText(b.buff))}</span></div>`).join("") || `<p class="muted">No active war supply buffs.</p>`;
+  const planetRows = (intel?.planets || []).map(pl => {
+    const pc = cssColor(pl.owner_faction?.color);
+    return `<div class="planetControlRow ${pl.territory_status}">
+      <div><span class="miniFactionDot" style="background:${pc}"></span><b>${esc(pl.name)}</b><small>${esc(pl.owner_faction?.name || "Neutral")} / ${esc(pl.territory_status || "secure")}${pl.contested_by_faction ? ` vs ${esc(pl.contested_by_faction.name)}` : ""}</small></div>
+      <div class="inspectStats">${statBar("Sec", pl.security, "#8cffb1")}${statBar("Stab", pl.stability, "#67e8f9")}${statBar("Conflict", pl.conflict, "#ff7d7d")}</div>
+      <small>Supply T${fmt(pl.supply?.tier)} / ${fmt(pl.supply?.points)} pts / Tax ${Math.round((pl.tax_rate || 0) * 100)}%</small>
+    </div>`;
+  }).join("") || `<p class="muted">No planets registered in this galaxy.</p>`;
+  return `<section class="panel panelBody inspectPanel" style="--faction-color:${color}">
+    <div class="inspectHeader"><div><h2>${esc(g.name || "Galaxy")}</h2><small><span class="miniFactionDot" style="background:${color}"></span>${esc(owner.name || "Neutral")} / ${esc(intel?.war_label || "At Peace")}</small></div><button onclick="selectObject('none','')">Close</button></div>
+    <div class="grid2">
+      <div class="kv"><label>War State</label><b>${esc(intel?.war_label || "At Peace")}</b></div>
+      <div class="kv"><label>War Supply</label><b>T${fmt(intel?.supply?.max_tier || 0)} / ${fmt(intel?.supply?.points || 0)} pts</b></div>
+      <div class="kv"><label>Planets</label><b>${fmt(intel?.planet_count || 0)}</b></div>
+      <div class="kv"><label>Frontline</label><b>${fmt((intel?.war_planets || 0) + (intel?.contested_planets || 0))}</b></div>
+    </div>
+    <h3>Zones Of Control</h3>${controlRows}
+    <h3>Lanes To Each Galaxy</h3><div class="laneIntelList">${laneRowsForGalaxy(id)}</div>
+    <h3>War Supply Buffs</h3>${buffs}
+    <h3>Planet Control</h3><div class="planetControlList">${planetRows}</div>
+  </section>`;
+}
+
+function planetInspectPanel(id) {
+  const pl = state.planets.find(x => String(x.id) === String(id)) || {};
+  const node = systemNodeById(id) || pl;
+  const ownerId = node.controlling_faction_id || node.faction_id || pl.faction_id;
+  const color = cssColor(node.faction_color || factionColor(ownerId));
+  return `<section class="panel panelBody inspectPanel" style="--faction-color:${color}">
+    <div class="inspectHeader"><div><h2>${esc(pl.name || node.name || "Planet")}</h2><small><span class="miniFactionDot" style="background:${color}"></span>${esc(node.faction_name || factionName(ownerId))} / ${esc(node.territory_status || "secure")}</small></div><button onclick="selectObject('none','')">Close</button></div>
+    <div class="inspectStats">${statBar("Security", pl.security_level ?? node.security_level, "#8cffb1")}${statBar("Stability", pl.stability_level ?? node.stability_level, "#67e8f9")}${statBar("Market", pl.market_activity ?? node.market_activity, "#ffcf70")}${statBar("Pirates", pl.pirate_activity ?? node.pirate_activity, "#ff7d7d")}${statBar("Conflict", pl.conflict_level ?? node.conflict_level, "#ff7d7d")}</div>
+    <div class="grid2">
+      <div class="kv"><label>Controller</label><b>${esc(pl.controller_type || "npc")}</b></div>
+      <div class="kv"><label>Supply</label><b>T${fmt(node.territory_supply_tier || 0)}</b></div>
+      <div class="kv"><label>Border</label><b>${node.is_border_system ? "Yes" : "No"}</b></div>
+      <div class="kv"><label>Tax</label><b>${Math.round((pl.tax_rate || 0) * 100)}%</b></div>
+    </div>
+    <h3>Supply Buff</h3><p class="muted">${esc(buffText(node.territory_supply_buff || {}))}</p>
+  </section>`;
+}
+
 function detailPanel() {
   const p = state.player;
+  const inspect = selectedInspectPanel();
+  if (inspect) return inspect;
   const loc = p.location || {};
   const travel = p.traveling ? `
     <div class="timer">
@@ -920,7 +1175,7 @@ function contextButtons() {
   return `<button onclick="closeContext()">Cancel</button>`;
 }
 
-function selectObject(type, id) { selected = { type, id }; render(); }
+function selectObject(type, id) { selected = type === "none" ? null : { type, id }; render(); }
 function closeContext() { context = null; render(); }
 function timerText(epoch) { return `${Math.max(0, Math.ceil(epoch - nowServer()))}s`; }
 function dateTime(epoch) { return new Date(epoch * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
@@ -940,7 +1195,11 @@ function centerOnPlayer() {
   let target = { x: p.render_x ?? p.x, y: p.render_y ?? p.y };
   if (mapMode === "galaxy" && !galaxyWarpActive()) {
     const g = currentGalaxy();
-    target = { x: g.x ?? target.x, y: g.y ?? target.y };
+    view.x = w / 2 - mapNodeX(g) * view.z;
+    view.y = h / 2 - mapNodeY(g) * view.z;
+    clampView();
+    render();
+    return;
   }
   if (mapMode === "system" && galaxyWarpActive()) {
     const pl = state.planets.find(x => x.id === p.location_id) || {};
@@ -1075,10 +1334,12 @@ setInterval(() => {
   if (!state || page !== "map") return;
   const entities = document.querySelector(".entities");
   const lanes = document.querySelector(".lanes");
+  const territory = document.querySelector(".territory");
   const top = document.querySelector(".topbar");
   const side = document.querySelector(".side");
   if (entities) entities.innerHTML = entitiesHtml();
   if (lanes) lanes.innerHTML = lanesSvg();
+  if (territory) territory.innerHTML = territorySvg();
   if (top) top.outerHTML = topbar();
   if (side) side.innerHTML = detailPanel() + cargoPanel() + eventPanel();
 }, 500);

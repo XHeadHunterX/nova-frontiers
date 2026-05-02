@@ -149,7 +149,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   transform-origin: 0 0;
 }
 
-.stars, .lanes, .entities { position: absolute; inset: 0; }
+.stars, .territory, .lanes, .entities { position: absolute; inset: 0; }
 .stars {
   background-image:
     radial-gradient(#cdefff 1px, transparent 1px),
@@ -159,9 +159,19 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   opacity: .35;
 }
 
-.lanes svg { width: 1400px; height: 940px; overflow: visible; }
+.territory { pointer-events:none; z-index:1; mix-blend-mode:screen; }
+.lanes { z-index:2; pointer-events:none; }
+.entities { z-index:3; }
+.lanes svg, .territory svg { width: 1400px; height: 940px; overflow: visible; }
+.territoryZone { stroke-width:5; filter:drop-shadow(0 0 18px currentColor); }
+.territoryZone.hot { stroke-width:7; }
+.territoryCore { stroke-width:2; }
 .lane { stroke: #395a73; stroke-width: 2; stroke-dasharray: 8 10; opacity: .72; }
 .lane.active { stroke: var(--accent); stroke-width: 3; stroke-dasharray: 10 7; animation: dash 1.2s linear infinite; }
+.jumpLane { stroke:#ffffff; stroke-width:3.5; stroke-dasharray:none; opacity:.36; filter:drop-shadow(0 0 7px rgba(255,255,255,.25)); }
+.jumpLane.visited { opacity:.62; }
+.jumpLane.active { stroke:#ffd84d; opacity:1; stroke-width:5; animation:dash 1.2s linear infinite; }
+.gateLane { stroke:#ffd84d; opacity:.62; }
 @keyframes dash { to { stroke-dashoffset: -34; } }
 
 .node, .ship, .sig, .player {
@@ -179,8 +189,11 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   box-shadow: 0 0 0 3px rgba(128,216,255,.06);
 }
 .node.current { border-color: var(--good); box-shadow: 0 0 18px rgba(140,255,177,.35); }
+.node { border-left:5px solid var(--faction-color, #49718b); }
+.node.war, .node.contested { box-shadow:0 0 22px rgba(255,63,85,.26), 0 0 0 3px rgba(255,63,85,.08); }
 .node .name { font-weight: 800; }
 .node small { color: var(--muted); display: block; margin-top: 2px; }
+.miniFactionDot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; box-shadow:0 0 8px currentColor; vertical-align:middle; }
 
 .ship, .player, .sig {
   width: 34px;
@@ -294,7 +307,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .viewport { height: calc(100vh - 185px); min-height: 650px; }
 .world { transform-origin: 0 0; }
 .lanes svg { overflow: visible; }
-.jumpLane { stroke: #6d5bb8; stroke-width: 2.5; stroke-dasharray: 18 16; opacity: .42; }
+.jumpLane { stroke:#ffffff; stroke-width:3.5; stroke-dasharray:none; opacity:.36; filter:drop-shadow(0 0 7px rgba(255,255,255,.25)); }
 .npcLine { opacity: .22; stroke-width: 2; }
 .galaxy { position:absolute; transform:translate(-50%,-50%); width:260px; height:260px; border:2px solid #7dd3fc; border-radius:50%; display:grid; place-items:center; text-align:center; color:#d9edf7; opacity:.68; pointer-events:none; }
 .galaxy.border { border-style:dashed; }
@@ -365,6 +378,24 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .dangerBox { border-color:#ff7d7d; background:rgba(101,32,42,.45); }
 .artifactBox { margin-top:12px; padding:10px; border:1px solid #5f4313; border-radius:12px; background:rgba(245,158,11,.08); }
 .artifactBox h3 { margin:0 0 8px; color:#ffcf70; }
+.inspectPanel { border-top:4px solid var(--faction-color, var(--accent)); max-height:calc(100vh - 135px); overflow:auto; }
+.inspectHeader { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px; }
+.inspectHeader h2 { margin-bottom:2px; }
+.inspectHeader small { color:var(--muted); }
+.inspectPanel h3 { margin:14px 0 8px; font-size:14px; text-transform:uppercase; letter-spacing:.08em; color:#cfe9f8; }
+.inspectStats { display:grid; gap:6px; }
+.inspectStat { display:grid; grid-template-columns:74px 42px minmax(70px,1fr); gap:8px; align-items:center; color:var(--muted); font-size:12px; }
+.inspectStat b { color:var(--text); text-align:right; }
+.miniBar { height:8px; border-radius:999px; background:rgba(255,255,255,.08); overflow:hidden; border:1px solid rgba(255,255,255,.08); }
+.miniBar i { display:block; height:100%; border-radius:inherit; box-shadow:0 0 12px currentColor; }
+.controlRow, .laneIntel, .planetControlRow, .buffPill { border:1px solid #29475c; background:#0b1a27; border-radius:10px; padding:9px; margin-bottom:7px; }
+.controlRow { display:grid; grid-template-columns:auto minmax(90px,1fr) minmax(70px,1fr) auto; gap:8px; align-items:center; }
+.controlRow em, .laneIntel em { color:var(--warn); font-style:normal; font-size:11px; font-weight:900; letter-spacing:.08em; }
+.laneIntel { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:8px; align-items:center; }
+.laneIntel small, .planetControlRow small, .buffPill span { color:var(--muted); display:block; margin-top:2px; }
+.planetControlRow { display:grid; gap:8px; border-left:4px solid var(--faction-color, #67e8f9); }
+.planetControlRow.war, .planetControlRow.contested { border-color:#ff3f55; background:rgba(101,32,42,.35); }
+.buffPill { display:grid; gap:3px; border-left:4px solid var(--warn); }
 
 /* Restored map modes, filters, and zoom-safe marker sizing */
 .mapSubtitle { color: var(--muted); display:block; margin-top:4px; line-height:1.35; }

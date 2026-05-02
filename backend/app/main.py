@@ -21837,6 +21837,159 @@ def build_map_state_snapshot(conn: sqlite3.Connection, user: Dict[str, Any], pla
     return payload
 
 
+def build_galaxy_war_intel(conn: sqlite3.Connection) -> Dict[str, Any]:
+    has_table = lambda name: bool(scalar(conn, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", (name,)))
+    factions = rows(conn, "SELECT * FROM factions ORDER BY id") if has_table("factions") else []
+    faction_by_id = {int(f["id"]): f for f in factions if f.get("id") is not None}
+    galaxies = rows(conn, "SELECT g.*, f.name AS faction_name, f.color AS faction_color, f.code AS faction_code FROM galaxies g LEFT JOIN factions f ON f.id=g.faction_id ORDER BY g.id") if has_table("galaxies") else []
+    planets = rows(conn, "SELECT * FROM planets ORDER BY galaxy_id, name") if has_table("planets") else []
+    territories = {}
+    if territory_tables_ready(conn):
+        territories = {int(t["planet_id"]): t for t in rows(conn, "SELECT * FROM territory_control_state")}
+    security = {}
+    if has_table("galaxy_security_state"):
+        for rec in rows(conn, "SELECT * FROM galaxy_security_state"):
+            try:
+                security[int(rec.get("galaxy_id"))] = rec
+            except Exception:
+                continue
+    active_wars = active_or_upcoming_planet_wars(conn)
+    wars_by_galaxy: Dict[int, List[Dict[str, Any]]] = {}
+    for war in active_wars:
+        try:
+            wars_by_galaxy.setdefault(int(war.get("galaxy_id") or 0), []).append(war)
+        except Exception:
+            continue
+
+    def faction_payload(fid: Any) -> Optional[Dict[str, Any]]:
+        try:
+            fid_int = int(fid or 0)
+        except Exception:
+            fid_int = 0
+        faction = faction_by_id.get(fid_int)
+        if not faction:
+            return None
+        return {
+            "id": fid_int,
+            "code": faction.get("code"),
+            "name": faction.get("name"),
+            "color": faction.get("color"),
+        }
+
+    by_galaxy: Dict[str, Dict[str, Any]] = {}
+    out_galaxies: List[Dict[str, Any]] = []
+    for galaxy in galaxies:
+        gid = int(galaxy["id"])
+        galaxy_planets = [p for p in planets if int(p.get("galaxy_id") or 0) == gid]
+        control_counts: Dict[int, int] = {}
+        status_counts = {"secure": 0, "contested": 0, "war": 0}
+        total_supply = 0
+        max_supply_tier = 0
+        buffs: List[Dict[str, Any]] = []
+        planet_payloads = []
+        for planet in galaxy_planets:
+            terr = territories.get(int(planet["id"])) or {}
+            status = str(terr.get("status") or "secure")
+            if status not in status_counts:
+                status_counts[status] = 0
+            status_counts[status] += 1
+            owner_id = int(terr.get("controlling_faction_id") or planet.get("faction_id") or galaxy.get("faction_id") or 0)
+            contested_by = int(terr.get("contested_by_faction_id") or 0) or None
+            if owner_id:
+                control_counts[owner_id] = control_counts.get(owner_id, 0) + 1
+            supply_points = int(terr.get("supply_points") or 0)
+            total_supply += supply_points
+            tier = territory_supply_tier(supply_points) if "territory_supply_tier" in globals() else {"tier": int(terr.get("supply_tier") or 0), "label": "", "buff": {}}
+            supply_tier = int(terr.get("supply_tier") or tier.get("tier") or 0)
+            max_supply_tier = max(max_supply_tier, supply_tier)
+            buff = decode_json(terr.get("zone_buff_json"), {}) or tier.get("buff") or {}
+            if buff:
+                buffs.append({"planet_id": int(planet["id"]), "planet_name": planet.get("name"), "tier": supply_tier, "label": tier.get("label"), "buff": buff})
+            influence = territory_influence_map(terr.get("influence_json")) if terr else decode_json(planet.get("faction_influence_json"), {}) or {}
+            planet_payloads.append({
+                "id": int(planet["id"]),
+                "name": planet.get("name"),
+                "type": planet.get("type"),
+                "owner_faction": faction_payload(owner_id),
+                "contested_by_faction": faction_payload(contested_by),
+                "territory_status": status,
+                "controller_type": planet.get("controller_type") or "npc",
+                "controller_id": planet.get("controller_id"),
+                "security": int(planet.get("security_level") or 0),
+                "stability": int(planet.get("stability_level") or 0),
+                "market": int(planet.get("market_activity") or 0),
+                "pirates": int(planet.get("pirate_activity") or 0),
+                "conflict": int(planet.get("conflict_level") or 0),
+                "player_influence": int(planet.get("player_influence") or 0),
+                "tax_rate": float(planet.get("tax_rate") or 0),
+                "supply": {
+                    "points": supply_points,
+                    "tier": supply_tier,
+                    "label": tier.get("label"),
+                    "buff": buff,
+                },
+                "influence": [{"faction_id": int(fid), "amount": int(amount)} for fid, amount in sorted(influence.items(), key=lambda kv: kv[1], reverse=True)[:4] if str(fid).isdigit()],
+            })
+
+        war_rows = wars_by_galaxy.get(gid, [])
+        has_active_war = any(str(w.get("status") or "").lower() == "active" for w in war_rows) or status_counts.get("war", 0) > 0
+        has_upcoming = any(str(w.get("status") or "").lower() in {"declared", "upcoming", "pending"} for w in war_rows)
+        if has_active_war:
+            war_state = "active_war"
+            war_label = "Active War"
+        elif status_counts.get("contested", 0) > 0:
+            war_state = "contested"
+            war_label = "Contested"
+        elif has_upcoming:
+            war_state = "mobilizing"
+            war_label = "Mobilizing"
+        else:
+            war_state = "peace"
+            war_label = "At Peace"
+
+        total_planets = max(1, len(galaxy_planets))
+        control_breakdown = []
+        for fid, count in sorted(control_counts.items(), key=lambda kv: kv[1], reverse=True):
+            faction = faction_payload(fid)
+            control_breakdown.append({
+                "faction": faction or {"id": fid, "name": "Unknown", "color": ""},
+                "planets": count,
+                "percent": round(count * 100 / total_planets, 1),
+            })
+        sec = security.get(gid) or {}
+        payload = {
+            "id": gid,
+            "name": galaxy.get("name"),
+            "sector": galaxy.get("sector"),
+            "owner_faction": faction_payload(galaxy.get("faction_id")),
+            "war_state": war_state,
+            "war_label": war_label,
+            "planet_count": len(galaxy_planets),
+            "secure_planets": int(status_counts.get("secure", 0)),
+            "contested_planets": int(status_counts.get("contested", 0)),
+            "war_planets": int(status_counts.get("war", 0)),
+            "control_breakdown": control_breakdown,
+            "supply": {
+                "points": total_supply,
+                "max_tier": max_supply_tier,
+                "buffs": buffs[:8],
+            },
+            "security_state": {
+                "security_level": float(sec.get("security_level") or 0),
+                "war_active": bool(int(sec.get("war_active") or 0)),
+                "patrol_bonus": int(sec.get("patrol_bonus") or 0),
+                "turret_multiplier": int(sec.get("turret_multiplier") or 1),
+                "active_turrets": int(sec.get("last_turret_active_count") or 0),
+                "active_patrols": int(sec.get("last_patrol_active_count") or 0),
+            },
+            "active_wars": war_rows,
+            "planets": planet_payloads,
+        }
+        by_galaxy[str(gid)] = payload
+        out_galaxies.append(payload)
+    return {"by_galaxy": by_galaxy, "galaxies": out_galaxies, "updated_at": iso()}
+
+
 def parse_map_group_hashes(raw: str = "") -> Dict[str, str]:
     if not raw:
         return {}
@@ -26745,6 +26898,7 @@ def build_state(conn: sqlite3.Connection, user: Dict[str, Any], player: Dict[str
         "player": player,
         "player_faction": player_faction(conn, player),
         "factions": factions,
+        "galaxy_war_intel": build_galaxy_war_intel(conn),
         "next_level_xp": level_xp_required(player["level"]),
         "location": planet,
         "planet_control": build_planet_control_state(conn, player["id"], planet),
