@@ -1,0 +1,5 @@
+bonus-assets.zip
+backend/app/data/*.db
+backend/app/data/*.sqlite
+backend/app/data/*.sqlite3
+backend/app/data/*.migration-failed.*.db

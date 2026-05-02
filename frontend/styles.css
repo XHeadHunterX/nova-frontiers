@@ -403,6 +403,21 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .mapFilter, .activeTool { border:1px solid rgba(103,232,249,.32); background:rgba(103,232,249,.08); color:#d9edf7; border-radius:999px; padding:7px 10px; font-weight:700; }
 .mapFilter.off { opacity:.45; border-color:rgba(255,255,255,.12); background:rgba(255,255,255,.03); }
 .mapFilter.on, .activeTool { border-color:#67e8f9; background:rgba(103,232,249,.14); color:#e7fbff; box-shadow:0 0 14px rgba(103,232,249,.12); }
+.filterBulk { border-style:dashed; color:#aeefff; }
+.planetTabs { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 12px; }
+.planetTab { border-radius:8px; padding:8px 10px; }
+.planetFilterPanel { display:grid; gap:7px; margin:10px 0 12px; }
+.planetScopeRow { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.planetSearch { flex:1 1 180px; min-width:0; border-radius:8px; padding:8px 10px; }
+.planetItemFilters { padding:0; }
+.planetMiniSummary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-bottom:12px; }
+.planetSectionHead { display:flex; justify-content:space-between; align-items:center; gap:10px; margin:12px 0 8px; }
+.planetSectionHead h3 { margin:0; }
+.planetItemCard { border:1px solid #29475c; background:#0b1a27; border-radius:8px; padding:10px; margin-bottom:8px; display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; }
+.planetItemCard small { display:block; color:var(--muted); margin-top:3px; line-height:1.35; }
+.planetItemCard .bar { margin-top:8px; }
+.recipeCard { border-left:4px solid var(--faction-color, #67e8f9); }
+.inventoryLocationGroup { margin-top:8px; }
 .node, .entityShip, .sig, .galaxy { transform: translate(-50%,-50%) scale(var(--icon-scale,1)) !important; transform-origin:center; }
 .galaxy { pointer-events:auto !important; cursor:pointer; }
 .currentGalaxy { box-shadow:0 0 34px rgba(255,211,106,.28), inset 0 0 60px rgba(255,211,106,.05); }
@@ -411,6 +426,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .galaxyView .node { display:none; }
 
 .galaxy .youHere { display:block; margin-top:4px; color:#ffd36a; font-weight:900; text-transform:uppercase; letter-spacing:.08em; }
+.galaxy .gateCountdown { display:block; margin-top:7px; color:#0b1824; background:#ffd84d; border:1px solid rgba(255,255,255,.55); border-radius:8px; padding:3px 7px; font-weight:900; text-transform:uppercase; box-shadow:0 0 16px rgba(255,216,77,.35); }
+.gateNodeCountdown { display:block; margin-top:6px; color:#090f18; background:#ffd84d; border:1px solid rgba(255,255,255,.58); border-radius:8px; padding:3px 7px; font-size:11px; font-style:normal; font-weight:900; text-transform:uppercase; box-shadow:0 0 16px rgba(255,216,77,.35); }
+.playerShip.spawnImmune { opacity:.5; }
 .contextNote { padding:8px 10px; color:#9fb7c7; max-width:220px; line-height:1.35; }
 button:disabled { opacity:.45; cursor:not-allowed; filter:none; box-shadow:none; }
 

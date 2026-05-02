@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Tier 2 pirate ring base">
+  <defs>
+    <radialGradient id="burn" cx="55%" cy="55%" r="55%">
+      <stop offset="0" stop-color="#ffb56a" stop-opacity=".75"/>
+      <stop offset=".36" stop-color="#713036" stop-opacity=".58"/>
+      <stop offset="1" stop-color="#060a11" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="drawn">
+      <feTurbulence type="fractalNoise" baseFrequency="0.7" numOctaves="3" seed="42" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="1.15"/>
+    </filter>
+  </defs>
+  <circle cx="64" cy="64" r="55" fill="url(#burn)"/>
+  <g filter="url(#drawn)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M31 37 C47 17 82 15 101 37 C120 59 112 94 86 106 C59 119 27 105 18 78" stroke="#68757a" stroke-width="12"/>
+    <path d="M28 41 C45 26 79 23 96 41 M23 79 C36 100 63 108 84 100 M104 45 C115 64 109 87 92 100" stroke="#c4cbc3" stroke-width="2" opacity=".75"/>
+    <path d="M45 29 L39 15 M66 22 L67 8 M91 33 L106 19 M20 78 L7 85 M91 101 L102 116" stroke="#253038" stroke-width="6"/>
+    <path d="M45 53 L64 39 L84 53 L84 77 L64 91 L45 77 Z" fill="#37414a" stroke="#101820" stroke-width="5"/>
+    <path d="M56 46 L49 32 M73 46 L83 31 M46 68 L28 65 M83 68 L105 65" stroke="#1d2730" stroke-width="5"/>
+    <path d="M52 63 C58 55 72 55 79 63 C72 70 58 70 52 63 Z" fill="#0f151b" stroke="#ff9655" stroke-width="4"/>
+    <path d="M51 78 L61 76 M68 78 L78 76 M58 51 L70 51" stroke="#ffd073" stroke-width="3"/>
+    <path d="M38 39 L48 35 M81 26 L93 35 M35 93 L48 99 M96 84 L104 73" stroke="#202931" stroke-width="4"/>
+  </g>
+</svg>

@@ -23,6 +23,20 @@ for (const [path, value] of Object.entries(generatedModules)) {
   generatedAssetMap[base] = value;
 }
 
+const generatedAssetsByPrefix = (prefix) => Object.keys(generatedAssetMap)
+  .filter((key) => key.startsWith(prefix))
+  .sort()
+  .map((key) => generatedAssetMap[key])
+  .filter(Boolean);
+
+const generatedPlanetSet = (kind) => generatedAssetsByPrefix(`celestial/planets/${kind}_`);
+const generatedCelestialPlanets = generatedAssetsByPrefix('celestial/planets/');
+const generatedHabitableWaterPlanets = generatedPlanetSet('habitable_water');
+const generatedGalaxyAssets = generatedAssetsByPrefix('celestial/galaxies/');
+const generatedSunAssets = generatedAssetsByPrefix('celestial/suns/');
+const generatedCelestialBodies = [...generatedGalaxyAssets, ...generatedSunAssets];
+export const celestialSunAssets = generatedSunAssets;
+
 const generated = (key, fallback = '') => generatedAssetMap[key] || generatedAssetMap[key.replace(/^ships\//, '')] || fallback;
 const generatedShip = (key, fallback = '') => generated(`ships/${key}`, fallback);
 
@@ -47,6 +61,13 @@ const generatedShipAssets = {
   nyx_blackwake_corvette: generatedShip('nyx_blackwake_corvette'),
   neutral_horizon_skiff: generatedShip('neutral_horizon_skiff'),
   neutral_arcology_cruiser: generatedShip('neutral_arcology_cruiser'),
+  alien_spore_skiff: generatedShip('alien_spore_skiff'),
+  alien_chitin_interceptor: generatedShip('alien_chitin_interceptor'),
+  alien_void_manta: generatedShip('alien_void_manta'),
+  alien_neural_frigate: generatedShip('alien_neural_frigate'),
+  alien_hive_carrier: generatedShip('alien_hive_carrier'),
+  alien_gravemind_dreadnought: generatedShip('alien_gravemind_dreadnought'),
+  alien_singularity_leviathan: generatedShip('alien_singularity_leviathan'),
 };
 
 const generatedShipAliases = {
@@ -86,6 +107,24 @@ const generatedShipAliases = {
   horizon_skiff: 'neutral_horizon_skiff',
   neutral_arcology_cruiser: 'neutral_arcology_cruiser',
   arcology_cruiser: 'neutral_arcology_cruiser',
+  alien: 'alien_void_manta',
+  xeno: 'alien_void_manta',
+  alien_bio_ship: 'alien_void_manta',
+  bio_ship: 'alien_void_manta',
+  xeno_spore_skiff: 'alien_spore_skiff',
+  spore_skiff: 'alien_spore_skiff',
+  xeno_chitin_interceptor: 'alien_chitin_interceptor',
+  chitin_interceptor: 'alien_chitin_interceptor',
+  xeno_void_manta: 'alien_void_manta',
+  void_manta: 'alien_void_manta',
+  xeno_neural_frigate: 'alien_neural_frigate',
+  neural_frigate: 'alien_neural_frigate',
+  xeno_hive_carrier: 'alien_hive_carrier',
+  hive_carrier: 'alien_hive_carrier',
+  xeno_gravemind_dreadnought: 'alien_gravemind_dreadnought',
+  gravemind_dreadnought: 'alien_gravemind_dreadnought',
+  xeno_singularity_leviathan: 'alien_singularity_leviathan',
+  singularity_leviathan: 'alien_singularity_leviathan',
 };
 
 const generatedShipRolePools = {
@@ -127,6 +166,11 @@ const generatedShipRolePools = {
   umbral: ['nyx_razor_kite', 'nyx_blackwake_corvette', 'eclipse_hunter', 'reclaimer'],
   veil: ['nyx_razor_kite', 'nyx_blackwake_corvette', 'eclipse_hunter', 'reclaimer'],
   umbral_veil: ['nyx_razor_kite', 'nyx_blackwake_corvette', 'eclipse_hunter', 'reclaimer'],
+  alien: ['alien_spore_skiff', 'alien_chitin_interceptor', 'alien_void_manta', 'alien_neural_frigate', 'alien_hive_carrier', 'alien_gravemind_dreadnought', 'alien_singularity_leviathan'],
+  xeno: ['alien_chitin_interceptor', 'alien_void_manta', 'alien_neural_frigate', 'alien_hive_carrier', 'alien_gravemind_dreadnought'],
+  bio: ['alien_spore_skiff', 'alien_void_manta', 'alien_hive_carrier'],
+  bio_ship: ['alien_void_manta', 'alien_neural_frigate', 'alien_hive_carrier'],
+  alien_invader: ['alien_chitin_interceptor', 'alien_void_manta', 'alien_neural_frigate'],
 };
 
 const factionAsset = (path) => factionModules[`./factions/${path}`] || u(`./factions/${path}`);
@@ -255,8 +299,22 @@ const shipClassAssets = {
   salvager: generatedShipAssets.reclaimer || u('./ships/neutral/salvage.svg'),
   civilian: generatedShipAssets.neutral_horizon_skiff || u('./ships/neutral/civilian.svg'),
   pirate: generatedShipAssets.nyx_razor_kite || u('./ships/pirate/pirate-ship.svg'),
-  alien: u('./ships/alien/alien-ship.svg'),
+  alien: generatedShipAssets.alien_void_manta || u('./ships/alien/alien-ship.svg'),
 };
+
+const pirateBaseAssets = {
+  t1: u('./stations/pirate_base_t1.svg'),
+  t2: u('./stations/pirate_base_t2.svg'),
+  t3: u('./stations/pirate_base_t3.svg'),
+};
+
+function pirateBaseAssetForHint(hint = '') {
+  const text = String(hint || '').toLowerCase();
+  if (!text.includes('pirate') || !(text.includes('base') || text.includes('station'))) return '';
+  const match = text.match(/(?:tier|t)\s*([1-9])/i);
+  const tier = Math.max(1, Math.min(3, Number(match?.[1] || 2)));
+  return pirateBaseAssets[`t${tier}`] || pirateBaseAssets.t2;
+}
 
 const catalogs = {
   avatar: [
@@ -309,6 +367,10 @@ const catalogs = {
     miner: generatedShipAssets.deepcore_19 || shipClassAssets.mining,
     salvage: generatedShipAssets.reclaimer || shipClassAssets.salvage,
     salvager: generatedShipAssets.reclaimer || shipClassAssets.salvage,
+    alien: generatedShipAssets.alien_void_manta || shipClassAssets.alien,
+    xeno: generatedShipAssets.alien_chitin_interceptor || shipClassAssets.alien,
+    bio_ship: generatedShipAssets.alien_void_manta || shipClassAssets.alien,
+    alien_invader: generatedShipAssets.alien_void_manta || shipClassAssets.alien,
     shuttle: generatedShipAssets.neutral_horizon_skiff || shipClassAssets.civilian,
     default: [
       generatedShipAssets.frontier_endeavor,
@@ -331,6 +393,13 @@ const catalogs = {
       generatedShipAssets.nyx_blackwake_corvette,
       generatedShipAssets.neutral_horizon_skiff,
       generatedShipAssets.neutral_arcology_cruiser,
+      generatedShipAssets.alien_spore_skiff,
+      generatedShipAssets.alien_chitin_interceptor,
+      generatedShipAssets.alien_void_manta,
+      generatedShipAssets.alien_neural_frigate,
+      generatedShipAssets.alien_hive_carrier,
+      generatedShipAssets.alien_gravemind_dreadnought,
+      generatedShipAssets.alien_singularity_leviathan,
       shipClassAssets.fighter,
       shipClassAssets.frigate,
       shipClassAssets.cruiser,
@@ -353,6 +422,13 @@ const catalogs = {
     ],
   },
   station: {
+    pirate_base_t1: pirateBaseAssets.t1,
+    pirate_base_t2: pirateBaseAssets.t2,
+    pirate_base_t3: pirateBaseAssets.t3,
+    pirate_station_t1: pirateBaseAssets.t1,
+    pirate_station_t2: pirateBaseAssets.t2,
+    pirate_station_t3: pirateBaseAssets.t3,
+    pirate: pirateBaseAssets.t2,
     hub: u('./stations/station_hub.png'),
     gate: u('./stations/station_gate.png'),
     relay: u('./stations/station_relay.png'),
@@ -373,28 +449,59 @@ const catalogs = {
     ],
   },
   planet: {
-    terran: u('./planets/planet_terran.png'),
-    agriculture: u('./planets/planet_terran.png'),
-    agri: u('./planets/planet_terran.png'),
-    desert: u('./planets/planet_desert.png'),
-    trade: u('./planets/planet_desert.png'),
-    industrial: u('./planets/planet_lava.png'),
-    forge: u('./planets/planet_lava.png'),
-    mining: u('./planets/planet_moon.png'),
-    frontier: u('./planets/planet_asteroid.png'),
-    pirate: u('./planets/planet_asteroid.png'),
-    research: u('./planets/planet_ice.png'),
-    high_tech: u('./planets/planet_ice.png'),
-    tech: u('./planets/planet_ice.png'),
-    military: u('./planets/planet_lava.png'),
-    balanced: u('./planets/planet_gas.png'),
-    gas: u('./planets/planet_gas.png'),
-    moon: u('./planets/planet_moon.png'),
-    anomaly: u('./planets/planet_nebula.png'),
-    nebula: u('./planets/planet_nebula.png'),
-    blackhole: u('./planets/planet_singularity.png'),
-    singularity: u('./planets/planet_singularity.png'),
-    default: [
+    uninhabitable: [
+      ...generatedPlanetSet('barren'),
+      ...generatedPlanetSet('toxic'),
+      ...generatedPlanetSet('ice'),
+      ...generatedPlanetSet('lava'),
+      ...generatedPlanetSet('gas'),
+      ...generatedPlanetSet('moon'),
+      ...generatedPlanetSet('storm'),
+      ...generatedPlanetSet('crystal'),
+      ...generatedPlanetSet('desert'),
+    ],
+    nonhabitable: [
+      ...generatedPlanetSet('barren'),
+      ...generatedPlanetSet('toxic'),
+      ...generatedPlanetSet('ice'),
+      ...generatedPlanetSet('lava'),
+      ...generatedPlanetSet('gas'),
+      ...generatedPlanetSet('moon'),
+      ...generatedPlanetSet('storm'),
+      ...generatedPlanetSet('crystal'),
+      ...generatedPlanetSet('desert'),
+    ],
+    habitable: generatedHabitableWaterPlanets,
+    water: generatedHabitableWaterPlanets,
+    ocean: generatedHabitableWaterPlanets,
+    terran: generatedHabitableWaterPlanets,
+    agriculture: generatedHabitableWaterPlanets,
+    agri: generatedHabitableWaterPlanets,
+    desert: generatedPlanetSet('desert'),
+    trade: generatedPlanetSet('desert'),
+    industrial: generatedPlanetSet('lava'),
+    forge: generatedPlanetSet('lava'),
+    mining: generatedPlanetSet('moon'),
+    frontier: generatedPlanetSet('barren'),
+    pirate: generatedPlanetSet('barren'),
+    research: generatedPlanetSet('ice'),
+    high_tech: generatedPlanetSet('crystal'),
+    tech: generatedPlanetSet('crystal'),
+    military: generatedPlanetSet('lava'),
+    balanced: generatedPlanetSet('gas'),
+    gas: generatedPlanetSet('gas'),
+    moon: generatedPlanetSet('moon'),
+    toxic: generatedPlanetSet('toxic'),
+    barren: generatedPlanetSet('barren'),
+    storm: generatedPlanetSet('storm'),
+    crystal: generatedPlanetSet('crystal'),
+    anomaly: generatedGalaxyAssets,
+    nebula: generatedGalaxyAssets,
+    star: generatedSunAssets,
+    sun: generatedSunAssets,
+    blackhole: generatedGalaxyAssets,
+    singularity: generatedGalaxyAssets,
+    default: generatedCelestialPlanets.length ? generatedCelestialPlanets : [
       u('./planets/planet_terran.png'),
       u('./planets/planet_desert.png'),
       u('./planets/planet_ice.png'),
@@ -407,13 +514,21 @@ const catalogs = {
       u('./planets/planet_singularity.png'),
     ],
   },
-  galaxy: [
-    u('./planets/planet_nebula.png'),
-    u('./planets/planet_star.png'),
-    u('./planets/planet_singularity.png'),
-    u('./planets/planet_gas.png'),
-    u('./planets/planet_terran.png'),
-  ],
+  galaxy: {
+    sun: generatedSunAssets,
+    star: generatedSunAssets,
+    solar: generatedSunAssets,
+    galaxy: generatedGalaxyAssets,
+    nebula: generatedGalaxyAssets,
+    anomaly: generatedGalaxyAssets,
+    default: generatedCelestialBodies.length ? generatedCelestialBodies : [
+      u('./planets/planet_nebula.png'),
+      u('./planets/planet_star.png'),
+      u('./planets/planet_singularity.png'),
+      u('./planets/planet_gas.png'),
+      u('./planets/planet_terran.png'),
+    ],
+  },
   material: {
     ore: u('./materials/ore_vein.png'),
     crystal: u('./materials/ore_blue_crystal.png'),
@@ -456,7 +571,13 @@ const catalogs = {
     drone: u('./modules/module_drone.png'),
     cockpit: u('./modules/module_cockpit.png'),
     relay: u('./modules/module_dish.png'),
+    alien: generatedAssetMap['modules/alien_utility_brood_relay'] || generatedAssetMap.alien_utility_brood_relay || u('./modules/module_relic_bay.png'),
+    xeno: generatedAssetMap['modules/alien_weapon_spore_lance'] || generatedAssetMap.alien_weapon_spore_lance || u('./modules/module_relic_bay.png'),
+    bio: generatedAssetMap['modules/alien_repair_regrowth_vat'] || generatedAssetMap.alien_repair_regrowth_vat || u('./modules/module_relic_bay.png'),
     default: [
+      generatedAssetMap['modules/alien_weapon_spore_lance'],
+      generatedAssetMap['modules/alien_shield_membrane_veil'],
+      generatedAssetMap['modules/alien_engine_cilia_drive'],
       u('./modules/module_dish.png'),
       u('./modules/module_pad.png'),
       u('./modules/module_relic_bay.png'),
@@ -478,7 +599,9 @@ const catalogs = {
     turret: u('./modules/weapon_turret.png'),
     missile: u('./modules/weapon_turret.png'),
     mining: u('./modules/module_drill.png'),
-    default: [u('./modules/weapon_lance.png'), u('./modules/weapon_turret.png'), u('./modules/module_drill.png')],
+    alien: generatedAssetMap['modules/alien_weapon_spore_lance'] || generatedAssetMap.alien_weapon_spore_lance || u('./modules/weapon_lance.png'),
+    xeno: generatedAssetMap['modules/alien_weapon_void_thorn'] || generatedAssetMap.alien_weapon_void_thorn || u('./modules/weapon_lance.png'),
+    default: [generatedAssetMap['modules/alien_weapon_spore_lance'], u('./modules/weapon_lance.png'), u('./modules/weapon_turret.png'), u('./modules/module_drill.png')],
   },
   armor: {
     shield: u('./modules/shield_emitter.png'),
@@ -525,6 +648,108 @@ function normalizeAssetKey(value = '') {
     .replace(/[^a-z0-9_]+/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
+}
+
+const mapSpawnTypeAliases = {
+  ore: {
+    titanium: ['titanium'],
+    nickel_iron: ['nickel_iron', 'nickel', 'iron_rock'],
+    helium_3: ['helium_3', 'helium3', 'he3'],
+    iridium: ['iridium'],
+    quantum_silicate: ['quantum_silicate', 'silicate'],
+    void_crystal: ['void_crystal', 'void_crystals'],
+    pocket_ore: ['pocket_ore', 'pocket_rich'],
+    cobalt_lattice: ['cobalt_lattice', 'cobalt'],
+    osmium_black: ['osmium_black', 'osmium'],
+    vanadium_glass: ['vanadium_glass', 'vanadium'],
+    neodymium_bloom: ['neodymium_bloom', 'neodymium'],
+    plasma_ice: ['plasma_ice'],
+    stellar_gold: ['stellar_gold'],
+    dark_matter_ore: ['dark_matter_ore', 'dark_matter'],
+    bio_lattice: ['bio_lattice'],
+    zero_point_ore: ['zero_point_ore', 'zero_point'],
+  },
+  anomaly: {
+    ancient_ruin: ['ancient_ruin', 'ruin', 'ancient'],
+    signal_echo: ['signal_echo', 'unknown_signal', 'signal'],
+    relic_vault: ['relic_vault', 'relic', 'vault'],
+    derelict_archive: ['derelict_archive', 'archive'],
+    gravity_anomaly: ['gravity_anomaly', 'gravitational_anomaly', 'gravity'],
+    precursor_beacon: ['precursor_beacon', 'precursor', 'beacon'],
+    pocket_artifact: ['pocket_artifact', 'artifact_cache'],
+    wormhole: ['wormhole'],
+    temporal_rift: ['temporal_rift', 'rift'],
+    alien_signal: ['alien_signal', 'xeno_signal'],
+    plasma_storm: ['plasma_storm'],
+    data_cache: ['data_cache'],
+    quarantine_zone: ['quarantine_zone'],
+    psionic_mirror: ['psionic_mirror'],
+  },
+  salvage: {
+    wreck: ['wreck', 'salvage'],
+    derelict_engine: ['derelict_engine', 'engine'],
+    cargo_pod: ['cargo_pod'],
+    battle_debris: ['battle_debris', 'debris'],
+  },
+  cache: {
+    cargo_cache: ['cargo_cache', 'cache'],
+    smuggler_cache: ['smuggler_cache'],
+    medical_cache: ['medical_cache'],
+    fuel_cache: ['fuel_cache'],
+  },
+  hazard: {
+    radiation_cloud: ['radiation_cloud', 'radiation'],
+    minefield: ['minefield'],
+    ion_squall: ['ion_squall'],
+    void_wake: ['void_wake'],
+  },
+};
+
+const mapSpawnDefaults = {
+  ore: 'titanium',
+  anomaly: 'signal_echo',
+  salvage: 'wreck',
+  cache: 'cargo_cache',
+  hazard: 'ion_squall',
+};
+
+function spawnTierFromText(text, fallback = 1) {
+  const match = String(text || '').match(/(?:^|_)t(?:ier)?_?([1-6])(?=_|$)/);
+  if (match) return Number(match[1]);
+  const reward = String(text || '').match(/reward_tier_([1-6])(?=_|$)/);
+  if (reward) return Number(reward[1]);
+  return Math.max(1, Math.min(6, Number(fallback) || 1));
+}
+
+function mapSpawnFamiliesForText(text) {
+  const families = [];
+  const containsType = (family) => Object.values(mapSpawnTypeAliases[family] || {}).flat().some(alias => text.includes(alias));
+  if (text.includes('ore') || text.includes('mining') || text.includes('mine') || containsType('ore')) families.push('ore');
+  if (text.includes('anomaly') || text.includes('anomal') || text.includes('exploration') || text.includes('ancient') || text.includes('signal') || text.includes('relic') || text.includes('artifact') || containsType('anomaly')) families.push('anomaly');
+  if (text.includes('salvage') || text.includes('wreck') || text.includes('derelict') || containsType('salvage')) families.push('salvage');
+  if (text.includes('cache') || containsType('cache')) families.push('cache');
+  if (text.includes('hazard') || text.includes('storm') || text.includes('radiation') || containsType('hazard')) families.push('hazard');
+  return [...new Set(families)];
+}
+
+function mapSpawnAssetFor(assetType = 'material', hint = '', seed = '') {
+  const type = String(assetType || '').toLowerCase();
+  if (!['material', 'item'].includes(type)) return '';
+  const text = normalizeAssetKey(`${hint || ''} ${seed || ''}`);
+  if (!text) return '';
+  const families = mapSpawnFamiliesForText(text);
+  if (!families.length) return '';
+  const tier = spawnTierFromText(text, text.includes('pocket') ? 6 : 1);
+  for (const family of families) {
+    const types = mapSpawnTypeAliases[family] || {};
+    const matched = Object.entries(types).find(([, aliases]) => aliases.some(alias => text.includes(alias)));
+    const key = matched?.[0] || mapSpawnDefaults[family];
+    const asset = generatedAssetMap[`map_spawns/${family}/${key}_t${tier}`]
+      || generatedAssetMap[`${key}_t${tier}`]
+      || generatedAssetMap[`map_spawns/${family}/${mapSpawnDefaults[family]}_t${tier}`];
+    if (asset) return asset;
+  }
+  return '';
 }
 
 function exactGeneratedShipAssetFor(hint = '', seed = '') {
@@ -667,6 +892,9 @@ function exactGeneratedAsset(assetType = 'item', hint = '', seed = '') {
     const ship = exactGeneratedShipAssetFor(hint, seed);
     if (ship) return ship;
   }
+  const safeSeed = String(seed || '').startsWith('data:image') ? '' : String(seed || '').slice(0, 160);
+  const spawnAsset = mapSpawnAssetFor(assetType, hint, safeSeed);
+  if (spawnAsset) return spawnAsset;
   const tokens = new Set();
   const push = (value) => {
     const key = normalizeAssetKey(value);
@@ -675,7 +903,6 @@ function exactGeneratedAsset(assetType = 'item', hint = '', seed = '') {
     tokens.add(key.replace(/__(improved|advanced|elite|legendary)$/i, ''));
   };
   const safeHint = String(hint || '');
-  const safeSeed = String(seed || '').startsWith('data:image') ? '' : String(seed || '').slice(0, 160);
   push(safeHint);
   push(safeSeed);
   safeHint.split(/[\s,/|]+/).forEach(push);
@@ -695,7 +922,7 @@ function lookupByHint(bucket, hint) {
   if (Array.isArray(bucket)) return choose(bucket, hint);
   const needle = String(hint || '').toLowerCase();
   for (const [key, value] of Object.entries(bucket)) {
-    if (key !== 'default' && needle.includes(key)) return value;
+    if (key !== 'default' && new RegExp(`(^|[^a-z0-9])${key.replace(/_/g, '[_\\s-]*')}([^a-z0-9]|$)`, 'i').test(needle)) return Array.isArray(value) ? choose(value, needle) : value;
   }
   return choose(bucket.default || catalogs.item, needle);
 }
@@ -704,7 +931,7 @@ function selectCatalog(assetType, hint) {
   switch (String(assetType || 'item').toLowerCase()) {
     case 'avatar': return exactAvatarAsset(hint, hint) || choose(catalogs.avatar, hint);
     case 'ship': return exactGeneratedShipAssetFor(hint, hint) || themedShipAsset(hint, hint, hint) || lookupByHint(catalogs.ship, hint);
-    case 'station': return lookupByHint(catalogs.station, hint);
+    case 'station': return pirateBaseAssetForHint(hint) || lookupByHint(catalogs.station, hint);
     case 'planet': return lookupByHint(catalogs.planet, hint);
     case 'galaxy': return choose(catalogs.galaxy, hint);
     case 'material': return lookupByHint(catalogs.material, hint);
@@ -717,6 +944,8 @@ function selectCatalog(assetType, hint) {
 
 export function imageFallbackFor(assetType = 'item', category = '', seed = '') {
   const safeSeed = String(seed || '').startsWith('data:image') ? '' : String(seed || '').slice(0, 160);
+  const pirateBase = pirateBaseAssetForHint(`${category || ''} ${safeSeed || ''}`);
+  if (pirateBase) return pirateBase;
   if (String(assetType || '').toLowerCase() === 'avatar') return exactAvatarAsset(safeSeed, category) || selectCatalog(assetType, `${category || ''} ${safeSeed || ''}`.trim());
   const exact = exactGeneratedAsset(assetType, category, safeSeed);
   if (exact) return exact;
@@ -750,6 +979,8 @@ export function shouldUseProvidedAsset(src = '') {
 }
 
 export function resolveAsset(assetType = 'item', src = '', category = '', hint = '') {
+  const pirateBase = pirateBaseAssetForHint(`${category || ''} ${hint || ''} ${String(src || '').startsWith('data:image') ? '' : src || ''}`);
+  if (pirateBase) return pirateBase;
   if (String(assetType || '').toLowerCase() === 'avatar') {
     const exactAvatar = exactAvatarAsset(src, `${category || ''} ${hint || ''}`.trim());
     if (exactAvatar) return exactAvatar;

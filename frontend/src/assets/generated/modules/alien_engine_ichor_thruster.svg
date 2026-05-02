@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <defs>
+    <radialGradient id="g" cx="42%" cy="30%" r="70%"><stop offset="0%" stop-color="#72ff9c" stop-opacity=".7"/><stop offset="52%" stop-color="#7f8cff" stop-opacity=".34"/><stop offset="100%" stop-color="#010307"/></radialGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="3"/></filter>
+  </defs>
+  <rect width="192" height="192" rx="26" fill="#010307"/>
+  <circle cx="96" cy="96" r="74" fill="url(#g)" stroke="#7f8cff" stroke-opacity=".55" stroke-width="3"/>
+  <polygon points="96,56 118.06451117804755,88.83080573050123 119.51141009169893,128.3606797749979 82.36338214681463,114.76919426949878 57.957739348193854,83.63932022500211" fill="#06131a" stroke="#72ff9c" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="96" cy="96" r="26" fill="#7f8cff" opacity=".42" filter="url(#blur)"/>
+  <circle cx="96" cy="96" r="12" fill="#72ff9c"/>
+  <path d="M39 96 C58 65 78 57 96 34 C114 57 134 65 153 96 C134 127 114 135 96 158 C78 135 58 127 39 96Z" fill="none" stroke="#7f8cff" stroke-width="3" opacity=".68"/>
+  <title>Xeno Ichor Thruster</title>
+</svg>

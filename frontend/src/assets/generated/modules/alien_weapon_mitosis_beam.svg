@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <defs>
+    <radialGradient id="g" cx="42%" cy="30%" r="70%"><stop offset="0%" stop-color="#ffe66f" stop-opacity=".7"/><stop offset="52%" stop-color="#ff5cc8" stop-opacity=".34"/><stop offset="100%" stop-color="#010307"/></radialGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="3"/></filter>
+  </defs>
+  <rect width="192" height="192" rx="26" fill="#010307"/>
+  <circle cx="96" cy="96" r="74" fill="url(#g)" stroke="#ff5cc8" stroke-opacity=".55" stroke-width="3"/>
+  <polygon points="96,46 118.67311299157286,77.91879574609673 144.74639560909117,107.12604669781572 108.58262843440919,122.12809716917016 74.30581304412209,141.04844339512096 67.72709054672711,102.45310708473312 56.90842587659851,64.82550990706333" fill="#06131a" stroke="#ffe66f" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="96" cy="96" r="22" fill="#ff5cc8" opacity=".42" filter="url(#blur)"/>
+  <circle cx="96" cy="96" r="12" fill="#ffe66f"/>
+  <path d="M39 96 C58 67 78 59 96 34 C114 59 134 67 153 96 C134 125 114 133 96 158 C78 133 58 125 39 96Z" fill="none" stroke="#ff5cc8" stroke-width="3" opacity=".68"/>
+  <title>Xeno Mitosis Beam</title>
+</svg>

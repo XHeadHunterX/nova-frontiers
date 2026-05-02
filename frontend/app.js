@@ -24,6 +24,21 @@ let mapFilters = JSON.parse(localStorage.getItem("nova_map_filters") || "null") 
   territory: true,
   radar: true
 };
+let planetTab = localStorage.getItem("nova_planet_tab") || "overview";
+let planetScope = localStorage.getItem("nova_planet_scope") || "planet";
+let planetSearch = localStorage.getItem("nova_planet_search") || "";
+let planetItemFilters = JSON.parse(localStorage.getItem("nova_planet_item_filters") || "null") || {
+  ships: true,
+  modules: true,
+  cargo: true,
+  raw_materials: true,
+  crafting_materials: true,
+  refined_materials: true,
+  consumables: true,
+  equipment: true,
+  artifacts: true,
+  other: true
+};
 let dragging = false;
 let dragStart = null;
 let context = null;
@@ -43,6 +58,7 @@ function oy() { return bounds().min_y; }
 function wx(x) { return Number(x || 0) - ox(); }
 function wy(y) { return Number(y || 0) - oy(); }
 function esc(str) { return String(str ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#039;" }[c])); }
+function jsString(str) { return String(str ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/\n/g, "\\n"); }
 function uid() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`; }
 const FACTION_COLOR_FALLBACKS = {
   orange: "#ffcf70",
@@ -354,7 +370,10 @@ function navButton(id, label) {
 function topbar() {
   const p = state.player;
   const loc = p.location || {};
-  const busy = p.traveling ? `${(p.travel_mode || "travel").toUpperCase()} ${Math.round((p.progress || 0) * 100)}%` : (mapMode === "galaxy" ? "YOU ARE HERE" : "DOCKED");
+  const travel = state.travel_state || {};
+  const busy = (p.traveling || travel.active)
+    ? `${(travel.mode || p.travel_mode || "travel").toUpperCase()} ${Math.round(Number(travel.progress_pct ?? (p.progress || 0) * 100))}%`
+    : (mapMode === "galaxy" ? "YOU ARE HERE" : "DOCKED");
   return `
     <div class="topbar">
       <div class="stat">Credits <b>${fmt(p.credits)}</b></div>
@@ -424,13 +443,105 @@ function toggleMapFilter(key) {
   render();
 }
 
+function setMapFilters(value) {
+  Object.keys(mapFilters).forEach(key => mapFilters[key] = !!value);
+  localStorage.setItem("nova_map_filters", JSON.stringify(mapFilters));
+  render();
+}
+
+function setPlanetTab(tab) {
+  planetTab = ["overview", "refining", "crafting", "storage", "inventory"].includes(tab) ? tab : "overview";
+  localStorage.setItem("nova_planet_tab", planetTab);
+  render();
+}
+
+function setPlanetScope(scope) {
+  planetScope = scope === "everywhere" ? "everywhere" : "planet";
+  localStorage.setItem("nova_planet_scope", planetScope);
+  render();
+}
+
+function togglePlanetItemFilter(key) {
+  planetItemFilters[key] = !planetItemFilters[key];
+  localStorage.setItem("nova_planet_item_filters", JSON.stringify(planetItemFilters));
+  render();
+}
+
+function setPlanetItemFilters(value) {
+  Object.keys(planetItemFilters).forEach(key => planetItemFilters[key] = !!value);
+  localStorage.setItem("nova_planet_item_filters", JSON.stringify(planetItemFilters));
+  render();
+}
+
+function setPlanetSearch(value) {
+  planetSearch = String(value || "");
+  localStorage.setItem("nova_planet_search", planetSearch);
+  render();
+}
+
 function iconScale() {
   return Math.max(1, Math.min(4.5, 1 / Math.max(view.z, 0.18)));
 }
 
 function galaxyWarpActive() {
   const p = state?.player || {};
-  return !!(p.traveling && ["galaxy", "galaxy_route"].includes(String(p.travel_mode || "").toLowerCase()));
+  const travel = state?.travel_state || {};
+  const mode = String(travel.mode || p.travel_mode || "").toLowerCase();
+  return !!((travel.active || p.traveling) && ["galaxy", "galaxy_route"].includes(mode));
+}
+
+function activeGateCountdownForGalaxy(galaxyId) {
+  const travel = state?.travel_state || {};
+  if (mapMode !== "galaxy" || travel.mode !== "galaxy_route") return "";
+  const segment = (travel.route_segments || [])[Number(travel.route_segment_index) || 0] || {};
+  if (String(segment.from_galaxy_id || travel.origin_galaxy_id) !== String(galaxyId)) return "";
+  const remaining = Math.max(0, Number(travel.remaining_seconds || 0));
+  const status = String(travel.gate_jump_status || "").toLowerCase();
+  const label = status === "waiting" ? "Gate wait" : status === "initiating" ? "Jump in" : "Gate jump";
+  return `<small class="gateCountdown">${label} ${Math.ceil(remaining)}s</small>`;
+}
+
+function playerSpawnImmunityActive() {
+  return Number(state?.travel_state?.spawn_immunity_remaining_seconds || 0) > 0;
+}
+
+function galaxyPctToWorldPoint(xPct, yPct) {
+  return {
+    x: ox() + (Number(xPct ?? 50) / 100) * worldW(),
+    y: oy() + (Number(yPct ?? 50) / 100) * worldH()
+  };
+}
+
+function systemPctToWorldPoint(xPct, yPct) {
+  return {
+    x: ((Number(xPct ?? 50) - 50) / 1.45) * 2.3,
+    y: ((Number(yPct ?? 50) - 50) / 1.45) * 2.3
+  };
+}
+
+function playerRenderPoint() {
+  const p = state?.player || {};
+  const travel = state?.travel_state || {};
+  if (mapMode === "galaxy" && travel.map_type === "galaxy" && travel.origin_x_pct !== undefined && travel.destination_x_pct !== undefined) {
+    const progress = Math.max(0, Math.min(1, Number(travel.progress || 0)));
+    const x = Number(travel.origin_x_pct || 50) + (Number(travel.destination_x_pct || 50) - Number(travel.origin_x_pct || 50)) * progress;
+    const y = Number(travel.origin_y_pct || 50) + (Number(travel.destination_y_pct || 50) - Number(travel.origin_y_pct || 50)) * progress;
+    return galaxyPctToWorldPoint(x, y);
+  }
+  if (mapMode === "system") {
+    if (travel.active && travel.map_type === "system" && travel.origin_x_pct !== undefined && travel.destination_x_pct !== undefined) {
+      const progress = Math.max(0, Math.min(1, Number(travel.progress || 0)));
+      const x = Number(travel.origin_x_pct || 50) + (Number(travel.destination_x_pct || 50) - Number(travel.origin_x_pct || 50)) * progress;
+      const y = Number(travel.origin_y_pct || 50) + (Number(travel.destination_y_pct || 50) - Number(travel.origin_y_pct || 50)) * progress;
+      return systemPctToWorldPoint(x, y);
+    }
+    if (travel.open_space && travel.open_space_x_pct !== undefined) {
+      return systemPctToWorldPoint(travel.open_space_x_pct, travel.open_space_y_pct);
+    }
+    const current = state.planets?.find(pl => String(pl.id) === String(p.location_id || p.location_planet_id));
+    if (current) return { x: current.x, y: current.y };
+  }
+  return { x: p.render_x ?? p.x ?? 0, y: p.render_y ?? p.y ?? 0 };
 }
 
 function playerShouldRenderOnCurrentMap() {
@@ -488,6 +599,8 @@ function mapPanel() {
         </div>
       </div>
       <div class="mapFilterBar">
+        <button class="mapFilter filterBulk" onclick="setMapFilters(true)">Check All</button>
+        <button class="mapFilter filterBulk" onclick="setMapFilters(false)">Uncheck All</button>
         ${mapFilterButton("galaxies", "Galaxies")}
         ${mapFilterButton("planets", "Planets")}
         ${mapFilterButton("ships", "Ships")}
@@ -640,10 +753,11 @@ function entitiesHtml() {
     const intel = galaxyIntel(g.id);
     const owner = intel?.owner_faction || factionById(g.faction_id) || {};
     const color = cssColor(owner.color || g.faction_color || g.color);
+    const gateCountdown = activeGateCountdownForGalaxy(g.id);
     return `
     <div class="galaxy ${g.type || ""} ${intel?.war_state || ""} ${g.id === currentGid ? "currentGalaxy" : ""}" style="left:${mapNodeX(g)}px;top:${mapNodeY(g)}px;border-color:${color};--faction-color:${color};--icon-scale:${Math.max(1, scale * .45)};" data-type="galaxy" data-id="${g.id}">
       <div class="galaxyRing"></div>
-      <b>${esc(g.name)}</b><small>${esc(owner.name || g.faction_name || g.faction || "Neutral")}</small>${intel ? `<small class="warState">${esc(intel.war_label)}</small>` : ""}${g.id === currentGid && !galaxyWarpActive() ? `<small class="youHere">You are here</small>` : ""}
+      <b>${esc(g.name)}</b><small>${esc(owner.name || g.faction_name || g.faction || "Neutral")}</small>${intel ? `<small class="warState">${esc(intel.war_label)}</small>` : ""}${g.id === currentGid && !galaxyWarpActive() ? `<small class="youHere">You are here</small>` : ""}${gateCountdown}
     </div>`;
   }).join("") : "";
   const systemNodesById = Object.fromEntries((state.system_map?.nodes || []).map(n => [String(n.id), n]));
@@ -659,10 +773,11 @@ function entitiesHtml() {
       <small>Sec ${pl.security} • Market ${pl.market}</small>
     </div>`;
   }).join("") : "";
-  const px = p.render_x ?? p.x, py = p.render_y ?? p.y;
+  const playerPoint = playerRenderPoint();
+  const px = playerPoint.x, py = playerPoint.y;
   const renderPlayer = playerShouldRenderOnCurrentMap();
   const radar = renderPlayer && mapMode === "system" && mapFilters.radar ? `<div class="radarRing" style="left:${wx(px)}px;top:${wy(py)}px;width:${(p.radar_range_effective||640)*2}px;height:${(p.radar_range_effective||640)*2}px"></div>` : "";
-  const player = renderPlayer ? `<div class="player entityShip playerShip" title="Player" style="left:${wx(px)}px;top:${wy(py)}px;--icon-scale:${scale};"><span class="avatar">◎</span><span class="lvl">${fmt(p.level || 1)}</span><span class="guild">${esc(p.guild_tag || "YOU")}</span><b>◆</b></div>` : "";
+  const player = renderPlayer ? `<div class="player entityShip playerShip ${playerSpawnImmunityActive() ? "spawnImmune" : ""}" title="Player" style="left:${wx(px)}px;top:${wy(py)}px;--icon-scale:${scale};"><span class="avatar">◎</span><span class="lvl">${fmt(p.level || 1)}</span><span class="guild">${esc(p.guild_tag || "YOU")}</span><b>◆</b></div>` : "";
   const ships = (mapMode === "system" && mapFilters.ships) ? state.npcs.filter(inCurrentGalaxy).map(n => `
     <div class="ship entityShip ${n.alien ? "alien" : n.role}" title="${esc(n.name)} ${esc(n.role)} L${esc(n.level || "?")}" style="left:${wx(n.render_x ?? n.x)}px;top:${wy(n.render_y ?? n.y)}px;--icon-scale:${scale};" data-type="npc" data-id="${n.id}">
       <span class="avatar">${esc(n.avatar || "◌")}</span><span class="lvl">${esc(n.level || "?")}</span><span class="guild">${esc(n.guild_tag || "")}</span><b>${shipIcon(n)}</b>
@@ -760,8 +875,34 @@ function planetInspectPanel(id) {
   const node = systemNodeById(id) || pl;
   const ownerId = node.controlling_faction_id || node.faction_id || pl.faction_id;
   const color = cssColor(node.faction_color || factionColor(ownerId));
+  const tab = ["overview", "refining", "crafting", "storage", "inventory"].includes(planetTab) ? planetTab : "overview";
   return `<section class="panel panelBody inspectPanel" style="--faction-color:${color}">
     <div class="inspectHeader"><div><h2>${esc(pl.name || node.name || "Planet")}</h2><small><span class="miniFactionDot" style="background:${color}"></span>${esc(node.faction_name || factionName(ownerId))} / ${esc(node.territory_status || "secure")}</small></div><button onclick="selectObject('none','')">Close</button></div>
+    <div class="planetTabs">
+      ${planetTabButton("overview", "Overview", tab)}
+      ${planetTabButton("refining", "Refining", tab)}
+      ${planetTabButton("crafting", "Crafting", tab)}
+      ${planetTabButton("storage", "Storage", tab)}
+      ${planetTabButton("inventory", "Inventory", tab)}
+    </div>
+    ${planetTabContent(tab, pl, node)}
+  </section>`;
+}
+
+function planetTabButton(id, label, active) {
+  return `<button class="planetTab ${active === id ? "activeTool" : ""}" onclick="setPlanetTab('${id}')">${label}</button>`;
+}
+
+function planetTabContent(tab, pl, node) {
+  if (tab === "refining") return planetProductionTab(pl, node, "refining");
+  if (tab === "crafting") return planetProductionTab(pl, node, "crafting");
+  if (tab === "storage") return planetStorageTab(pl);
+  if (tab === "inventory") return planetInventoryTab(pl);
+  return planetOverviewTab(pl, node);
+}
+
+function planetOverviewTab(pl, node) {
+  return `
     <div class="inspectStats">${statBar("Security", pl.security_level ?? node.security_level, "#8cffb1")}${statBar("Stability", pl.stability_level ?? node.stability_level, "#67e8f9")}${statBar("Market", pl.market_activity ?? node.market_activity, "#ffcf70")}${statBar("Pirates", pl.pirate_activity ?? node.pirate_activity, "#ff7d7d")}${statBar("Conflict", pl.conflict_level ?? node.conflict_level, "#ff7d7d")}</div>
     <div class="grid2">
       <div class="kv"><label>Controller</label><b>${esc(pl.controller_type || "npc")}</b></div>
@@ -769,8 +910,294 @@ function planetInspectPanel(id) {
       <div class="kv"><label>Border</label><b>${node.is_border_system ? "Yes" : "No"}</b></div>
       <div class="kv"><label>Tax</label><b>${Math.round((pl.tax_rate || 0) * 100)}%</b></div>
     </div>
-    <h3>Supply Buff</h3><p class="muted">${esc(buffText(node.territory_supply_buff || {}))}</p>
-  </section>`;
+    <h3>Supply Buff</h3><p class="muted">${esc(buffText(node.territory_supply_buff || {}))}</p>`;
+}
+
+function currentPlanetIdValue() {
+  const p = state?.player || {};
+  return p.location_planet_id ?? p.location_id ?? p.location?.id ?? state?.location?.id;
+}
+
+function planetScopeBar(pl, includeFilters = true) {
+  return `
+    <div class="planetFilterPanel">
+      <div class="planetScopeRow">
+        <button class="mapFilter ${planetScope === "planet" ? "on" : "off"}" onclick="setPlanetScope('planet')">This Planet</button>
+        <button class="mapFilter ${planetScope === "everywhere" ? "on" : "off"}" onclick="setPlanetScope('everywhere')">Everywhere</button>
+        <input class="planetSearch" value="${esc(planetSearch)}" placeholder="Search items, ships, recipes..." oninput="setPlanetSearch(this.value)">
+      </div>
+      ${includeFilters ? planetItemFilterBar() : ""}
+    </div>`;
+}
+
+function planetItemFilterBar() {
+  const labels = [
+    ["ships", "Ships"],
+    ["modules", "Modules"],
+    ["cargo", "Cargo"],
+    ["raw_materials", "Raw"],
+    ["crafting_materials", "Crafting Mats"],
+    ["refined_materials", "Refined"],
+    ["consumables", "Consumables"],
+    ["equipment", "Equipment"],
+    ["artifacts", "Artifacts"],
+    ["other", "Other"]
+  ];
+  return `<div class="mapFilterBar planetItemFilters">
+    <button class="mapFilter filterBulk" onclick="setPlanetItemFilters(true)">Check All</button>
+    <button class="mapFilter filterBulk" onclick="setPlanetItemFilters(false)">Uncheck All</button>
+    ${labels.map(([key, label]) => `<button class="mapFilter ${planetItemFilters[key] ? "on" : "off"}" onclick="togglePlanetItemFilter('${key}')">${label}</button>`).join("")}
+  </div>`;
+}
+
+function isSelectedPlanetScope(row, planetId) {
+  if (planetScope === "everywhere") return true;
+  const id = row?.planet_id ?? row?.location_planet_id ?? row?.planetId ?? row?.locationPlanetId;
+  return String(id) === String(planetId);
+}
+
+function itemBucket(row) {
+  const category = String(row?.category || row?.item_category || "").toLowerCase();
+  const type = String(row?.item_type || row?.type || row?.role || "").toLowerCase();
+  const source = String(row?.source || "").toLowerCase();
+  const kind = String(row?.kind || "").toLowerCase();
+  if (kind === "ship" || category === "ships" || type.includes("ship_template")) return "ships";
+  if (category === "ship_modules" || type.includes("module") || source.includes("module")) return "modules";
+  if (source === "cargo_hold" || row?.trade_only || category === "goods" || category === "illicit_goods") return "cargo";
+  if (category === "raw_materials") return "raw_materials";
+  if (category === "crafting_materials" || category === "salvage") return "crafting_materials";
+  if (category === "refined_materials" || type.includes("refined")) return "refined_materials";
+  if (category === "consumables" || category === "fuel_supplies") return "consumables";
+  if (category === "weapons" || category === "armor" || category === "ship_parts") return "equipment";
+  if (category === "rare_artifacts" || type.includes("artifact") || type.includes("relic")) return "artifacts";
+  return "other";
+}
+
+function rowMatchesPlanetFilters(row) {
+  const bucket = itemBucket(row);
+  if (!planetItemFilters[bucket]) return false;
+  const q = planetSearch.trim().toLowerCase();
+  if (!q) return true;
+  return [
+    row?.name, row?.item_name, row?.item_code, row?.recipe_name, row?.category,
+    row?.item_type, row?.rarity, row?.location_name, row?.planet_name, row?.galaxy_name
+  ].some(value => String(value || "").toLowerCase().includes(q));
+}
+
+function isRefiningRecipe(recipe) {
+  const category = String(recipe?.category || "").toLowerCase();
+  const output = recipe?.output || {};
+  const outputCategory = String(output.category || output.item_type || "").toLowerCase();
+  return !!recipe?.requires_refinery || category.includes("refining") || outputCategory === "refined_materials" || outputCategory.includes("refined");
+}
+
+function recipeOutputBucket(recipe) {
+  const output = recipe?.output || {};
+  return itemBucket({
+    category: output.category || output.item_type || recipe?.category,
+    item_type: output.item_type || output.kind || output.module_code || output.ship_code,
+    kind: output.kind === "ship" ? "ship" : ""
+  });
+}
+
+function recipeMatchesPlanetFilters(recipe) {
+  const bucket = recipeOutputBucket(recipe);
+  if (!planetItemFilters[bucket]) return false;
+  const q = planetSearch.trim().toLowerCase();
+  if (!q) return true;
+  const inputs = Object.keys(recipe?.inputs || {}).join(" ");
+  const output = Object.values(recipe?.output || {}).join(" ");
+  return [recipe?.name, recipe?.code, recipe?.category, recipe?.description, inputs, output]
+    .some(value => String(value || "").toLowerCase().includes(q));
+}
+
+function planetProductionTab(pl, node, mode) {
+  const selectedPlanetId = pl.id || node.id;
+  const isCurrent = String(currentPlanetIdValue()) === String(selectedPlanetId);
+  const recipes = (state.crafting_recipes || [])
+    .filter(r => mode === "refining" ? isRefiningRecipe(r) : !isRefiningRecipe(r))
+    .filter(recipeMatchesPlanetFilters);
+  const jobs = (state.crafting_queue || [])
+    .filter(j => mode === "refining" ? String(j.job_kind || "").toLowerCase() === "refining" : String(j.job_kind || "").toLowerCase() !== "refining")
+    .filter(j => isSelectedPlanetScope(j, selectedPlanetId))
+    .filter(rowMatchesPlanetFilters);
+  const activeJobs = jobs.filter(j => j.status === "active");
+  const completeJobs = jobs.filter(j => j.status === "complete");
+  const claim = completeJobs.length ? `<button class="primary" onclick="apiAction('claim_crafting')">Claim Complete</button>` : "";
+  return `
+    ${planetScopeBar(pl)}
+    <div class="planetMiniSummary">
+      <div class="kv"><label>Scope</label><b>${planetScope === "planet" ? esc(pl.name || "This planet") : "Everywhere"}</b></div>
+      <div class="kv"><label>Active</label><b>${fmt(activeJobs.length)}</b></div>
+      <div class="kv"><label>Ready</label><b>${fmt(completeJobs.length)}</b></div>
+      <div class="kv"><label>Access</label><b>${isCurrent ? "Docked" : "Remote"}</b></div>
+    </div>
+    <div class="planetSectionHead"><h3>${mode === "refining" ? "Refining Jobs" : "Crafting Jobs"}</h3>${claim}</div>
+    ${jobs.map(craftingJobCard).join("") || `<p class="muted">No ${mode} jobs in this scope.</p>`}
+    <div class="planetSectionHead"><h3>${mode === "refining" ? "Refining Recipes" : "Crafting Recipes"}</h3></div>
+    ${recipes.map(r => recipeCard(r, mode, isCurrent)).join("") || `<p class="muted">No ${mode} recipes match these filters.</p>`}`;
+}
+
+function craftingJobCard(job) {
+  const active = job.status === "active";
+  const pctDone = Math.max(0, Math.min(100, Number(job.progress_pct || 0)));
+  return `<div class="planetItemCard">
+    <div>
+      <b>${esc(job.recipe_name || "Queued Job")}</b>
+      <small>${esc(job.location_name || "Unknown location")} / ${esc(job.status || "active")} / ${active ? esc(job.remaining_label || "") : esc(job.outcome || "")}</small>
+      <div class="bar"><div class="fill" style="width:${pctDone}%"></div></div>
+    </div>
+    <div class="rowBtns">
+      ${active ? `<button onclick="apiAction('cancel_crafting',{job_id:${Number(job.id) || 0}})">Cancel</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function recipeInputText(recipe) {
+  const inputs = recipe?.inputs || {};
+  const parts = Object.entries(inputs).map(([code, qty]) => `${fmt(qty)}x ${code.replaceAll("_", " ")}`);
+  return parts.join(", ") || "No material inputs";
+}
+
+function recipeOutputText(recipe) {
+  const output = recipe?.output || {};
+  const qty = output.qty || 1;
+  const name = output.name || output.item_name || output.item_code || output.module_code || output.ship_code || output.kind || "Output";
+  return `${fmt(qty)}x ${String(name).replaceAll("_", " ")}`;
+}
+
+function recipeCard(recipe, mode, isCurrent) {
+  const blockers = recipe.blockers || recipe.locked_reasons || [];
+  const canCraft = isCurrent && !!recipe.can_craft;
+  const reason = !isCurrent ? "Dock at this planet to start jobs." : blockers.join("; ");
+  const odds = recipe.success_odds !== undefined ? `${Math.round(Number(recipe.success_odds || 0) * 100)}%` : "n/a";
+  return `<div class="planetItemCard recipeCard">
+    <div>
+      <b>${esc(recipe.name)}</b>
+      <small>T${fmt(recipe.recipe_tier || recipe.tier || 1)} / ${esc(recipe.category || mode)} / ${esc(recipe.craft_time_label || "")} / ${odds} odds</small>
+      <small>Input: ${esc(recipeInputText(recipe))}</small>
+      <small>Output: ${esc(recipeOutputText(recipe))}</small>
+      ${reason ? `<small class="muted">${esc(reason)}</small>` : ""}
+    </div>
+    <div class="rowBtns"><button class="primary" ${canCraft ? "" : "disabled"} onclick="apiAction('craft_recipe',{recipe_code:'${jsString(recipe.code)}'})">Start</button></div>
+  </div>`;
+}
+
+function planetStorageTab(pl) {
+  const selectedPlanetId = pl.id;
+  const currentId = currentPlanetIdValue();
+  const isCurrent = String(currentId) === String(selectedPlanetId);
+  const stored = (state.player_storage?.stored || [])
+    .filter(row => isSelectedPlanetScope(row, selectedPlanetId))
+    .filter(rowMatchesPlanetFilters);
+  const depositCandidates = (state.player_storage?.depositCandidates || [])
+    .filter(rowMatchesPlanetFilters);
+  const canModify = isCurrent && planetScope === "planet" && !(state.player_storage?.rules || {}).inOpenSpace;
+  return `
+    ${planetScopeBar(pl)}
+    <div class="planetSectionHead"><h3>Stored Inventory</h3><span class="muted">${planetScope === "planet" ? esc(pl.name || "This planet") : "All stocked locations"}</span></div>
+    ${stored.map(storageRowCard).join("") || `<p class="muted">No stored inventory in this scope.</p>`}
+    <div class="planetSectionHead"><h3>Store From Ship</h3><span class="muted">${canModify ? "Docked here" : "Storage changes require docking on this planet."}</span></div>
+    ${canModify ? (depositCandidates.map(depositCandidateCard).join("") || `<p class="muted">No inventory available to store.</p>`) : `<p class="muted">Use Everywhere to review remote storage, or travel here to deposit and withdraw.</p>`}`;
+}
+
+function storageRowCard(item) {
+  return `<div class="planetItemCard">
+    <div>
+      <b>${esc(item.item_name || item.name)}</b>
+      <small>${esc(item.planet_name || "Unknown planet")} / ${esc(item.galaxy_name || "")} / ${esc(item.category || item.item_type || "item")} / ${esc(item.rarity || "common")}</small>
+      <small>${esc(item.description || "")}</small>
+    </div>
+    <div class="rowBtns">
+      <b>${fmt(item.qty)}</b>
+      <button ${item.available_here ? "" : "disabled"} onclick="apiAction('withdraw_storage_item',{storage_id:${Number(item.id) || 0},qty:1})">Withdraw 1</button>
+      <button ${item.available_here ? "" : "disabled"} onclick="apiAction('withdraw_storage_item',{storage_id:${Number(item.id) || 0},qty:${Number(item.qty) || 1}})">All</button>
+    </div>
+  </div>`;
+}
+
+function depositCandidatePayload(item, qty) {
+  if (item.source === "cargo_hold") return `{source:'cargo_hold',commodity_id:${Number(item.commodity_id) || 0},qty:${qty}}`;
+  if (item.source === "module_storage") return `{source:'module_storage',module_id:${Number(item.id) || 0},qty:1}`;
+  return `{source:'inventory',item_code:'${jsString(item.item_code)}',qty:${qty}}`;
+}
+
+function depositCandidateCard(item) {
+  const qty = Math.max(1, Number(item.available_qty || item.qty || 1));
+  return `<div class="planetItemCard">
+    <div>
+      <b>${esc(item.name || item.item_name)}</b>
+      <small>${esc(item.source || "inventory")} / ${esc(item.category || item.item_type || "item")} / ${esc(item.rarity || "common")}</small>
+    </div>
+    <div class="rowBtns">
+      <b>${fmt(qty)}</b>
+      <button onclick="apiAction('store_item',${depositCandidatePayload(item, 1)})">Store 1</button>
+      <button onclick="apiAction('store_item',${depositCandidatePayload(item, qty)})">All</button>
+    </div>
+  </div>`;
+}
+
+function inventoryLocationRows(pl) {
+  const currentId = currentPlanetIdValue();
+  const currentLoc = state.player?.location || state.location || {};
+  const shipRows = (state.inventory_summary || []).map(item => ({
+    ...item,
+    planet_id: currentId,
+    planet_name: currentLoc.name || state.location?.name || "Ship Hold",
+    galaxy_name: currentLoc.galaxy_name || state.location?.galaxy_name || "",
+    location_name: "Ship Hold"
+  }));
+  const ownedShips = (state.ships || []).map(ship => ({
+    ...ship,
+    kind: "ship",
+    category: "ships",
+    item_type: ship.role || ship.class_name || "ship",
+    name: ship.name || ship.template_name || "Ship",
+    qty: 1,
+    planet_id: ship.location_planet_id || currentId,
+    planet_name: ship.planet_name || currentLoc.name || "Ship Hangar",
+    galaxy_name: ship.galaxy_name || currentLoc.galaxy_name || "",
+    location_name: "Hangar"
+  }));
+  const stored = (state.player_storage?.stored || []).map(item => ({
+    ...item,
+    name: item.item_name,
+    location_name: "Planet Storage"
+  }));
+  return shipRows.concat(ownedShips, stored)
+    .filter(row => Number(row.qty || row.available_qty || 0) > 0)
+    .filter(row => isSelectedPlanetScope(row, pl.id))
+    .filter(rowMatchesPlanetFilters);
+}
+
+function planetInventoryTab(pl) {
+  const rows = inventoryLocationRows(pl);
+  const groups = {};
+  for (const item of rows) {
+    const key = `${item.planet_id || "ship"}:${item.location_name || ""}`;
+    if (!groups[key]) groups[key] = { planet: item.planet_name || "Unknown location", galaxy: item.galaxy_name || "", location: item.location_name || "Inventory", rows: [] };
+    groups[key].rows.push(item);
+  }
+  const groupHtml = Object.values(groups).map(group => `
+    <div class="inventoryLocationGroup">
+      <div class="planetSectionHead"><h3>${esc(group.planet)}</h3><span class="muted">${esc(group.location)}${group.galaxy ? ` / ${esc(group.galaxy)}` : ""}</span></div>
+      ${group.rows.map(inventoryItemCard).join("")}
+    </div>`).join("");
+  return `
+    ${planetScopeBar(pl)}
+    ${groupHtml || `<p class="muted">No inventory exists in locations matching these filters.</p>`}`;
+}
+
+function inventoryItemCard(item) {
+  const qty = Number(item.available_qty || item.qty || 1);
+  return `<div class="planetItemCard">
+    <div>
+      <b>${esc(item.name || item.item_name)}</b>
+      <small>${esc(item.category || item.item_type || "item")} / ${esc(item.rarity || item.class_name || "standard")} / ${esc(item.source || item.location_name || "")}</small>
+      ${item.description ? `<small>${esc(item.description)}</small>` : ""}
+    </div>
+    <b>${fmt(qty)}</b>
+  </div>`;
 }
 
 function detailPanel() {
@@ -1130,10 +1557,10 @@ function contextButtons() {
   if (c.type === "galaxy") {
     const g = state.galaxies.find(x => x.id === c.id);
     const isCurrent = g && g.id === currentGalaxyId();
-    const locked = state.player.traveling;
+    const locked = state.player.traveling || state.travel_state?.active;
     return `
       <button onclick="selectObject('galaxy','${c.id}');closeContext()">Inspect ${esc(g?.name || 'Galaxy')}</button>
-      ${isCurrent ? `<button onclick="setMapMode('system');closeContext()">Open Planet View</button>` : `<button ${locked ? "disabled" : ""} onclick="apiAction('galaxy_travel',{galaxy_id:'${c.id}'});closeContext()">Travel To Galaxy</button>`}
+      ${isCurrent ? `<button onclick="setMapMode('system');closeContext()">Open Planet View</button>` : `<button ${locked ? "disabled" : ""} onclick="apiAction('galaxy_travel',{galaxy_id:'${c.id}'});closeContext()">Jump To Galaxy</button>`}
       <button onclick="closeContext()">Cancel</button>`;
   }
   if (c.type === "planet") {
@@ -1175,7 +1602,14 @@ function contextButtons() {
   return `<button onclick="closeContext()">Cancel</button>`;
 }
 
-function selectObject(type, id) { selected = type === "none" ? null : { type, id }; render(); }
+function selectObject(type, id) {
+  if (type === "planet" && (!selected || selected.type !== "planet" || String(selected.id) !== String(id))) {
+    planetScope = "planet";
+    localStorage.setItem("nova_planet_scope", planetScope);
+  }
+  selected = type === "none" ? null : { type, id };
+  render();
+}
 function closeContext() { context = null; render(); }
 function timerText(epoch) { return `${Math.max(0, Math.ceil(epoch - nowServer()))}s`; }
 function dateTime(epoch) { return new Date(epoch * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }); }
@@ -1192,7 +1626,7 @@ function centerOnPlayer() {
   const w = vp?.clientWidth || window.innerWidth - 420;
   const h = vp?.clientHeight || window.innerHeight - 170;
   const p = state.player;
-  let target = { x: p.render_x ?? p.x, y: p.render_y ?? p.y };
+  let target = playerRenderPoint();
   if (mapMode === "galaxy" && !galaxyWarpActive()) {
     const g = currentGalaxy();
     view.x = w / 2 - mapNodeX(g) * view.z;
@@ -1202,7 +1636,7 @@ function centerOnPlayer() {
     return;
   }
   if (mapMode === "system" && galaxyWarpActive()) {
-    const pl = state.planets.find(x => x.id === p.location_id) || {};
+    const pl = state.planets.find(x => String(x.id) === String(p.location_id || p.location_planet_id)) || {};
     target = { x: pl.x ?? target.x, y: pl.y ?? target.y };
   }
   const x = wx(target.x), y = wy(target.y);
@@ -1314,13 +1748,19 @@ function exposeInlineHandlers() {
     postBounty,
     setMapMode,
     toggleMapFilter,
+    setMapFilters,
+    setPlanetTab,
+    setPlanetScope,
+    togglePlanetItemFilter,
+    setPlanetItemFilters,
+    setPlanetSearch,
   });
 }
 exposeInlineHandlers();
 
 window.addEventListener("error", e => {
   const msg = String(e?.message || "");
-  if (msg.includes("is not defined") && /apiAction|setPage|logout|zoomBy|centerOnPlayer|selectObject|closeContext|saveAdminSettings|postBounty|setMapMode|toggleMapFilter/.test(msg)) {
+  if (msg.includes("is not defined") && /apiAction|setPage|logout|zoomBy|centerOnPlayer|selectObject|closeContext|saveAdminSettings|postBounty|setMapMode|toggleMapFilter|setMapFilters|setPlanetTab|setPlanetScope|togglePlanetItemFilter|setPlanetItemFilters|setPlanetSearch/.test(msg)) {
     exposeInlineHandlers();
   }
 });

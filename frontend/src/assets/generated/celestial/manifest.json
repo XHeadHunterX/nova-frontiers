@@ -1,0 +1,953 @@
+{
+  "planets": [
+    {
+      "file": "planets/habitable_water_001.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_002.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_003.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_004.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_005.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_006.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_007.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_008.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_009.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_010.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_011.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_012.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_013.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_014.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_015.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_016.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_017.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_018.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_019.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_020.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_021.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_022.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_023.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_024.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/habitable_water_025.png",
+      "kind": "habitable_water",
+      "habitable_water": true
+    },
+    {
+      "file": "planets/desert_001.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_001.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_001.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_001.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_001.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_001.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_001.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_001.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_001.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_002.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_002.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_002.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_002.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_002.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_002.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_002.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_002.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_002.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_003.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_003.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_003.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_003.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_003.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_003.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_003.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_003.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_003.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_004.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_004.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_004.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_004.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_004.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_004.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_004.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_004.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_004.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_005.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_005.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_005.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_005.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_005.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_005.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_005.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_005.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_005.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_006.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_006.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_006.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_006.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_006.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_006.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_006.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_006.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_006.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_007.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_007.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_007.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_007.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_007.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_007.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_007.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_007.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_007.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_008.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_008.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_008.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_008.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_008.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_008.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_008.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_008.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_008.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_009.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_009.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_009.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_009.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_009.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_009.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_009.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_009.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_009.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_010.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_010.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_010.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_010.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_010.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_010.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_010.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_010.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_010.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_011.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_011.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_011.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_011.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_011.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_011.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_011.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_011.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_011.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_012.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_012.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_012.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_012.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_012.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_012.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_012.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_012.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_012.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_013.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_013.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_013.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_013.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_013.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_013.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_013.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_013.png",
+      "kind": "barren",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/storm_013.png",
+      "kind": "storm",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/desert_014.png",
+      "kind": "desert",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/ice_014.png",
+      "kind": "ice",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/lava_014.png",
+      "kind": "lava",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/gas_014.png",
+      "kind": "gas",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/moon_014.png",
+      "kind": "moon",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/toxic_014.png",
+      "kind": "toxic",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/crystal_014.png",
+      "kind": "crystal",
+      "habitable_water": false
+    },
+    {
+      "file": "planets/barren_014.png",
+      "kind": "barren",
+      "habitable_water": false
+    }
+  ],
+  "celestial": [
+    {
+      "file": "galaxies/galaxy_01.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_02.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_03.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_04.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_05.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_06.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_07.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_08.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_09.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_10.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_11.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_12.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_13.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_14.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_15.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_16.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_17.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_18.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_19.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_20.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_21.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_22.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_23.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "galaxies/galaxy_24.png",
+      "kind": "galaxy"
+    },
+    {
+      "file": "suns/sun_01.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_02.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_03.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_04.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_05.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_06.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_07.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_08.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_09.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_10.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_11.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_12.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_13.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_14.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_15.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_16.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_17.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_18.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_19.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_20.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_21.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_22.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_23.png",
+      "kind": "sun"
+    },
+    {
+      "file": "suns/sun_24.png",
+      "kind": "sun"
+    }
+  ],
+  "counts": {
+    "planets": 150,
+    "habitable_water": 25,
+    "galaxies_and_suns": 48
+  }
+}

@@ -6,10 +6,11 @@ import {
   Hammer, Brain, Building2, Mail, Trophy, Settings, Shield, Zap, Info, Plus,
   ShipWheel, HeartPulse, AlertTriangle, Coins, Fuel, Package, Clock, Swords,
   UserRound, MessageCircle, Send, Save, CalendarDays, Minus, RotateCcw,
-  LocateFixed, Radar, Layers, MoreHorizontal, X
+  LocateFixed, Radar, Layers, MoreHorizontal, X, Pin, Lock, Eye, Search,
+  Filter, ArrowUp, ArrowDown, CheckSquare, Square
 } from 'lucide-react';
 import './styles.css';
-import { resolveAsset, imageFallbackFor, brandAssets, factionAssets } from './assets/gameAssets';
+import { resolveAsset, imageFallbackFor, brandAssets, factionAssets, celestialSunAssets } from './assets/gameAssets';
 import novaFrontiersCore from './assets/generated/landing/nova-frontiers-core.png';
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -94,8 +95,78 @@ function factionCssColor(value) {
   return map[key] || value || '#45d8ff';
 }
 
+function visualSeed(value) {
+  const text = String(value || 'nova');
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function galaxyVisualFor(node) {
+  const seed = visualSeed(`${node?.id ?? ''}:${node?.name ?? ''}:${node?.faction_name ?? ''}`);
+  const hue = seed % 360;
+  const companionHue = (hue + 112 + (seed % 58)) % 360;
+  return {
+    visualClass: `galaxyVisual${seed % 5}`,
+    cssVars: {
+      '--galaxy-hue': `${hue}deg`,
+      '--galaxy-companion-hue': `${companionHue}deg`,
+      '--galaxy-tilt': `${(seed % 70) - 35}deg`,
+      '--galaxy-spin': `${(seed % 96) - 48}deg`,
+      '--galaxy-glow-scale': String(0.86 + (seed % 42) / 100),
+      '--galaxy-dust-offset': `${seed % 120}px`
+    }
+  };
+}
+
 function mapNodeFactionColor(node) {
   return factionCssColor(node?.faction_color || node?.color || node?.factionColor || node?.controller_color);
+}
+
+function isGalaxyGateMapNode(node) {
+  const kind = String(node?.kind || '').toLowerCase();
+  const type = String(node?.type || node?.details_label || '').toLowerCase();
+  const name = String(node?.name || '').toLowerCase();
+  return kind === 'gate' || !!node?.is_gate || type.includes('galaxy gate') || (type.includes('gate') && name.includes('gate'));
+}
+
+const MAP_NODE_TYPE_COLORS = {
+  planet: '#4dff91',
+  gate: '#d97cff',
+  uninhabitable: '#ff8f5a'
+};
+
+function mapObjectDisplayName(obj) {
+  const raw = obj?.realName || obj?.name || obj?.label || obj?.ship_name || 'Map target';
+  if (isGalaxyGateMapNode(obj)) return raw;
+  return String(raw)
+    .replace(/\s+Station$/i, '')
+    .replace(/\s+Hub$/i, ' Prime')
+    .replace(/\s+Relay$/i, ' Reach')
+    .replace(/\s+Outpost$/i, ' Frontier')
+    .replace(/\s+Freeport$/i, ' Haven')
+    .replace(/\s+Gate$/i, ' Terminus')
+    .trim() || 'Map target';
+}
+
+function isUninhabitableMapNode(node, mapType = 'system') {
+  return String(mapType || 'system').toLowerCase() === 'system'
+    && !!node
+    && (node.isUninhabitable || node.is_uninhabitable || /uninhab|barren|toxic|frozen|volcanic|irradiated|gas giant|desert tomb/i.test(String(node.type || '')));
+}
+
+function mapNodeAccentColor(node, mapType = 'system') {
+  const normalizedMapType = String(mapType || 'system').toLowerCase();
+  if (normalizedMapType === 'galaxy') return mapNodeFactionColor(node);
+  const kind = String(node?.kind || '').toLowerCase();
+  const typeText = String(node?.type || '').toLowerCase();
+  const nameText = String(node?.name || '').toLowerCase();
+  if (isGalaxyGateMapNode(node) || kind === 'gate' || /gate|jump/.test(typeText) || /gate|jump/.test(nameText)) return MAP_NODE_TYPE_COLORS.gate;
+  if (isUninhabitableMapNode(node, normalizedMapType)) return MAP_NODE_TYPE_COLORS.uninhabitable;
+  if (kind === 'planet' || kind === 'node') return MAP_NODE_TYPE_COLORS.planet;
+  return mapNodeFactionColor(node);
 }
 
 function shipFactionColor(ship, summary) {
@@ -114,6 +185,28 @@ function distancePct(a, b) {
   const bx = clampPct(b?.x_pct ?? b?.x);
   const by = clampPct(b?.y_pct ?? b?.y);
   return Math.hypot(bx - ax, by - ay);
+}
+
+const SYSTEM_MAP_Y_ASPECT = 31200 / 48000;
+const MAP_DOCK_DEPARTURE_RADIUS_PCT = 2.75;
+
+function dockDeparturePoint(anchor, target) {
+  const ax = clampPct(anchor?.x_pct ?? anchor?.x);
+  const ay = clampPct(anchor?.y_pct ?? anchor?.y);
+  const tx = clampPct(target?.x_pct ?? target?.x, ax + 1);
+  const ty = clampPct(target?.y_pct ?? target?.y, ay);
+  let dx = tx - ax;
+  let dy = (ty - ay) * SYSTEM_MAP_Y_ASPECT;
+  let dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist < 0.001) {
+    dx = 1;
+    dy = 0;
+    dist = 1;
+  }
+  return {
+    x_pct: clampPct(ax + (dx / dist) * MAP_DOCK_DEPARTURE_RADIUS_PCT, 1),
+    y_pct: clampPct(ay + (dy / dist) * (MAP_DOCK_DEPARTURE_RADIUS_PCT / SYSTEM_MAP_Y_ASPECT), 1),
+  };
 }
 
 function findStateMapNode(state, mapType, id) {
@@ -200,12 +293,7 @@ function buildOptimisticTravelState(prevState, actionType, payload = {}) {
     dest = {x_pct:clampPct(node.x_pct), y_pct:clampPct(node.y_pct)};
     destinationLabel = node.name || p.label || 'Planet';
   } else if (type === 'galaxy_travel' && p.galaxy_id != null) {
-    mapType = 'galaxy';
-    mode = 'galaxy';
-    const node = findStateMapNode(prevState, mapType, p.galaxy_id);
-    if (!node) return null;
-    dest = {x_pct:clampPct(node.x_pct), y_pct:clampPct(node.y_pct)};
-    destinationLabel = node.name || p.label || 'Galaxy';
+    return null;
   } else if (type === 'intercept_traveler') {
     mapType = String(p.map_type || p.mapType || '').toLowerCase() === 'galaxy' ? 'galaxy' : 'system';
     mode = 'intercept';
@@ -215,7 +303,14 @@ function buildOptimisticTravelState(prevState, actionType, payload = {}) {
     return null;
   }
 
-  const origin = currentStateMapPoint(prevState, mapType);
+  let origin = currentStateMapPoint(prevState, mapType);
+  const wasDocked = mapType === 'system'
+    && !prevState?.travel_state?.active
+    && !prevState?.travel_state?.open_space
+    && prevState?.travel_state?.docked !== false;
+  if (wasDocked && ['go_here', 'travel'].includes(type)) {
+    origin = dockDeparturePoint(origin, dest);
+  }
   const speed = Math.max(0.28, Math.min(4.25, Number(prevState?.active_ship?.effective_map_speed || prevState?.active_ship?.drive_speed || 1)));
   const seconds = Math.max(2, Math.ceil((distancePct(origin, dest) * 5.8) / speed));
   const startedAt = new Date();
@@ -284,7 +379,7 @@ function withImmediateMapResult(prevState, actionType, payload = {}, result = {}
     const cooldown = Math.max(0, Number(result?.scan_area?.cooldown_seconds || 0));
     const cooldownStartedAt = result?.scan_area?.cooldown_started_at || (cooldown ? new Date(now).toISOString() : null);
     const cooldownUntil = result?.scan_area?.cooldown_until || (cooldown ? new Date(now + cooldown * 1000).toISOString() : null);
-    const ping = {
+    const fallbackPing = {
       id: `optimistic-scan:${mapType}:${Math.round(x * 10)}:${Math.round(y * 10)}:${now}`,
       x_pct: x,
       y_pct: y,
@@ -292,11 +387,25 @@ function withImmediateMapResult(prevState, actionType, payload = {}, result = {}
       expires_at: new Date(now + Math.min(duration, animationSeconds + 0.4) * 1000).toISOString(),
       animation_seconds: animationSeconds,
     };
+    const mergeMapObjects = (incoming, existing, limit) => {
+      const out = [];
+      const seen = new Set();
+      [...(incoming || []), ...(existing || [])].forEach(obj => {
+        const key = obj?.id || obj?.objectKey || obj?.object_key;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        out.push(obj);
+      });
+      return out.slice(0, limit);
+    };
+    const serverPings = Array.isArray(result?.scan_pings) && result.scan_pings.length ? result.scan_pings : [fallbackPing];
+    const serverBlips = Array.isArray(result?.scan_blips) ? result.scan_blips : [];
     nextState = {
       ...nextState,
       [mapKey]: {
         ...map,
-        scan_pings: [ping, ...(map.scan_pings || [])].slice(0, 6),
+        scan_pings: mergeMapObjects(serverPings, map.scan_pings, 8),
+        scan_blips: mergeMapObjects(serverBlips, map.scan_blips, 80),
         summary: {
           ...(map.summary || {}),
           scan_area: {
@@ -317,49 +426,159 @@ function withImmediateMapResult(prevState, actionType, payload = {}, result = {}
 }
 
 const nav = [
-  ['Dashboard', Home], ['Profile', UserRound], ['Chat', MessageCircle], ['Party', Users], ['Social', Users], ['Map', Globe2], ['Calendar', CalendarDays], ['Market', Store], ['Inventory', Package],
-  ['Ships & Hangar', Rocket], ['Fight', Swords], ['Guild', Users], ['Faction War', Crosshair], ['Warfare', Crosshair], ['Planet Control', Building2], ['Contracts', Briefcase],
-  ['Jobs', Briefcase], ['Skills', Brain], ['Industry', Factory], ['Crafting', Hammer], ['Properties', Building2],
-  ['Medical', HeartPulse], ['Messages', Mail], ['Leaderboards', Trophy], ['Admin', Settings]
+  ['Map', Globe2],
+  ['Planet', Building2],
+  ['Character', UserRound],
+  ['Guilds / War', Shield],
+  ['Ship / Cargo', Rocket],
+  ['Auction', Store],
+  ['Events', CalendarDays],
+  ['Social', Users],
+  ['Suggestions', MessageCircle],
+  ['Messages', Mail],
+  ['Admin', Settings],
+  ['Leaderboards', Trophy],
 ];
 
 const NAV_GROUPS = [
-  { label:'Command', pages:['Dashboard','Map','Calendar','Messages'] },
-  { label:'Pilot', pages:['Profile','Chat','Party','Social','Medical'] },
-  { label:'Shipyard', pages:['Ships & Hangar','Inventory','Market','Crafting','Industry'] },
-  { label:'Frontier', pages:['Contracts','Jobs','Skills','Properties','Leaderboards'] },
-  { label:'War Room', pages:['Fight','Guild','Faction War','Warfare','Planet Control'] },
-  { label:'Control', pages:['Admin'] },
+  { label:'Navigation', pages:['Map','Planet','Character','Guilds / War','Ship / Cargo','Auction','Events','Social','Suggestions','Messages','Admin','Leaderboards'] },
 ];
 
+const HUB_DEFAULT_TABS = {
+  Galaxy: 'navigation',
+  Planet: 'overview',
+  Character: 'character',
+  Market: 'auction',
+};
+
+const LEGACY_PAGE_TO_HUB_TAB = {
+  Dashboard: ['Galaxy', 'overview'],
+  Galaxy: ['Galaxy', 'navigation'],
+  Map: ['Galaxy', 'navigation'],
+  Calendar: ['Galaxy', 'events'],
+  'Planet Control': ['Planet', 'overview'],
+  Industry: ['Planet', 'industry'],
+  Crafting: ['Planet', 'industry'],
+  Properties: ['Planet', 'storage'],
+  Profile: ['Character', 'character'],
+  'Ships & Hangar': ['Character', 'ship'],
+  'Ship / Cargo': ['Character', 'ship'],
+  Inventory: ['Character', 'ship'],
+  Skills: ['Character', 'skills'],
+  Medical: ['Character', 'effects'],
+  Fight: ['Galaxy', 'combat'],
+  Chat: ['Market', 'social'],
+  Party: ['Market', 'social'],
+  Social: ['Market', 'social'],
+  Suggestions: ['Market', 'forum'],
+  Forum: ['Market', 'forum'],
+  Messages: ['Market', 'messages'],
+  Guild: ['Market', 'guilds'],
+  'Guilds / War': ['Market', 'guilds'],
+  'Faction War': ['Market', 'guilds'],
+  Warfare: ['Market', 'guilds'],
+  Leaderboards: ['Market', 'leaderboards'],
+  Admin: ['Market', 'admin'],
+  Auction: ['Market', 'auction'],
+  Market: ['Market', 'auction'],
+  Events: ['Market', 'events'],
+};
+
+function resolveHubDestination(pageName, currentHub='Galaxy') {
+  if (HUB_DEFAULT_TABS[pageName]) return {hub:pageName, tab:HUB_DEFAULT_TABS[pageName]};
+  const mapped = LEGACY_PAGE_TO_HUB_TAB[pageName];
+  if (mapped) return {hub:mapped[0], tab:mapped[1]};
+  return {hub:HUB_DEFAULT_TABS[currentHub] ? currentHub : 'Galaxy', tab:HUB_DEFAULT_TABS[currentHub] || HUB_DEFAULT_TABS.Galaxy};
+}
+
+function isDockedAtPlanetOrStation(state) {
+  const travel = state?.travel_state || {};
+  if (travel.active || travel.open_space || travel.docked === false) return false;
+  if (state?.active_pirate_station) return true;
+  return !!(
+    travel.dock_planet_id ||
+    travel.dock_base_id ||
+    state?.location?.id ||
+    state?.location?.planet_id
+  );
+}
+
+function planetNavDisabled(state) {
+  return !isDockedAtPlanetOrStation(state);
+}
+
+const SITE_PALETTE_ACCENT = '#58e6ff';
+
 const PAGE_INTEL = {
+  Galaxy: { eyebrow:'Navigation', title:'Map', deck:'Galaxy and local-space navigation, scanning, pilots, conflict zones, anomalies, travel, and battle entry.', accent:'#58e6ff' },
+  Planet: { eyebrow:'Docked Operations', title:'Planet', deck:'Docked planet controls, Sell Inventory, NPC Goods Market, storage, and Refining/Crafting.', accent:'#7df5a8' },
+  Character: { eyebrow:'Pilot', title:'Character', deck:'Pilot identity, skills, ship equipment, cargo, loadouts, buffs, debuffs, and recovery.', accent:'#b174ff' },
+  Market: { eyebrow:'Global Exchange', title:'Auction', deck:'Global player listings, social tools, messages, events, guild war, leaderboards, and admin controls when permitted.', accent:'#57ffa3' },
+  Auction: { eyebrow:'Global Exchange', title:'Auction', deck:'Global player listings with planet-bound delivery.', accent:'#57ffa3' },
+  Events: { eyebrow:'Operations', title:'Events', deck:'Server events, bounties, wormholes, derelicts, artifacts, refining windows, and weekly ladder activity.', accent:'#b174ff' },
+  'Guilds / War': { eyebrow:'Guild War', title:'Guilds / War', deck:'Guild organization, treasury, territory pressure, faction conflict, and warfare readiness.', accent:'#a9e86f' },
+  'Ship / Cargo': { eyebrow:'Shipyard', title:'Ship / Cargo', deck:'Active ship, owned hulls, equipment, cargo, materials, modules, repairs, and loadout readiness.', accent:'#6cf6ff' },
   Dashboard: { eyebrow:'Live Command', title:'Bridge Overview', deck:'The full pulse of your pilot, ship, market, route, and local sector pressure.', accent:'#6cf6ff' },
   Profile: { eyebrow:'Pilot Identity', title:'Public Signal', deck:'Shape how other captains see you across chat, social, achievements, and the frontier record.', accent:'#b174ff' },
   Chat: { eyebrow:'Comms', title:'Open Channel', deck:'Live station noise, pilot chatter, and social signals from the edge.', accent:'#7df5a8' },
   Party: { eyebrow:'Squad', title:'Crew Coordination', deck:'Invite allies, form runs, and keep your group ready for contracts or combat.', accent:'#ffbf5a' },
   Social: { eyebrow:'Network', title:'Pilot Contacts', deck:'Friends, public profiles, trade invites, and reputation ties in one place.', accent:'#8cfaff' },
+  Suggestions: { eyebrow:'Community', title:'Suggestions', deck:'Player ideas, votes, comments, and admin status tracking.', accent:'#74a7ff' },
+  Forum: { eyebrow:'Community', title:'Suggestions', deck:'Player ideas, votes, comments, and admin status tracking.', accent:'#74a7ff' },
   Map: { eyebrow:'Navigation', title:'Living Star Map', deck:'Scan, route, intercept, mine, salvage, and read the pressure systems before committing.', accent:'#58e6ff' },
   Calendar: { eyebrow:'Operations', title:'Server Calendar', deck:'Events, anomalies, raids, wormholes, and timed opportunities shaping the galaxy.', accent:'#b174ff' },
-  'Pirate Station': { eyebrow:'Black Dock', title:'Pirate Station', deck:'A dangerous private dock for illicit trade, heat, recovery, and risk.', accent:'#ff4d9d' },
-  Market: { eyebrow:'Economy', title:'Trade Floor', deck:'Legal and illegal markets, heat, custody risk, local pressure, and margins.', accent:'#57ffa3' },
-  Inventory: { eyebrow:'Cargo', title:'Hold Manifest', deck:'Every item, module, rarity, recipe hook, value signal, and risky asset you own.', accent:'#ffc247' },
+  Inventory: { eyebrow:'Cargo', title:'Ship / Cargo', deck:'Ship equipment, cargo, materials, modules, consumables, sale value, and item inspection.', accent:'#ffc247' },
   'Ships & Hangar': { eyebrow:'Shipyard', title:'Hangar Bay', deck:'Choose a hull, fit modules, repair, insure, and understand what your ship is built to do.', accent:'#6cf6ff' },
-  Fight: { eyebrow:'Combat', title:'Battle Desk', deck:'Targets, recent outcomes, action energy, and battlefield readiness.', accent:'#ff744d' },
+  Fight: { eyebrow:'Combat', title:'Battle Desk', deck:'Targets, recent outcomes, and battlefield readiness.', accent:'#ff744d' },
   Guild: { eyebrow:'Guild', title:'Faction Table', deck:'Organize treasury, territory, defense, influence, and shared power.', accent:'#a9e86f' },
   'Faction War': { eyebrow:'Warfront', title:'Faction War', deck:'Conflict theaters, active pressure, contested space, and the faction map.', accent:'#ff744d' },
   Warfare: { eyebrow:'Strategy', title:'Warfare Console', deck:'Threat posture, defenses, deployments, and galaxy-scale pressure.', accent:'#ff9270' },
   'Planet Control': { eyebrow:'Territory', title:'Planet Control', deck:'Influence, taxes, conflict, defense, economy, and control actions.', accent:'#58e6ff' },
   Contracts: { eyebrow:'Work Board', title:'Contracts', deck:'Credit routes, missions, and local opportunities with operational context.', accent:'#ffbf5a' },
-  Jobs: { eyebrow:'Career', title:'Job Terminal', deck:'Active career identity, bonuses, tasks, and next-run decisions.', accent:'#7df5a8' },
-  Skills: { eyebrow:'Progression', title:'Skill Matrix', deck:'Spend points, compare trees, and sharpen the way your pilot bends the game.', accent:'#b174ff' },
-  Industry: { eyebrow:'Production', title:'Industrial Yard', deck:'Refining, base economy, materials, and infrastructure momentum.', accent:'#cfd7df' },
-  Crafting: { eyebrow:'Fabrication', title:'Craft Bench', deck:'Recipes, queue, missing materials, output previews, and upgrade paths.', accent:'#ffc247' },
+  Skills: { eyebrow:'Skills', title:'Skill Matrix', deck:'Spend points, compare trees, and sharpen the way your pilot bends the game.', accent:'#b174ff' },
+  Industry: { eyebrow:'Production', title:'Refining/Crafting', deck:'Refining, crafting recipes, queues, output previews, and upgrade paths.', accent:'#cfd7df' },
+  Crafting: { eyebrow:'Production', title:'Refining/Crafting', deck:'Refining, crafting recipes, queues, output previews, and upgrade paths.', accent:'#ffc247' },
   Properties: { eyebrow:'Holdings', title:'Property Ledger', deck:'Bases, storage, ownership, and orbital claims across the frontier.', accent:'#a9e86f' },
   Medical: { eyebrow:'Recovery', title:'Med Bay', deck:'Hospital timers, surgery options, and return-to-flight readiness.', accent:'#ff92ae' },
   Messages: { eyebrow:'Inbox', title:'Signal Inbox', deck:'Actionable messages, alerts, social events, and server dispatches.', accent:'#8cfaff' },
   Leaderboards: { eyebrow:'Rankings', title:'Frontier Legends', deck:'Guild standings, planetary control, and the players shaping the server story.', accent:'#ffc247' },
   Admin: { eyebrow:'Control Room', title:'Admin Console', deck:'World tuning, security, economy, spawns, missions, and live operation tools.', accent:'#ff744d' },
 };
+
+const HUB_TAB_INTEL_PAGES = {
+  Galaxy: {
+    navigation: 'Map',
+    events: 'Calendar',
+    combat: 'Fight',
+  },
+  Planet: {
+    overview: 'Planet',
+    goods: 'Planet',
+    industry: 'Industry',
+    storage: 'Properties',
+  },
+  Character: {
+    character: 'Character',
+    ship: 'Ship / Cargo',
+    skills: 'Skills',
+    effects: 'Medical',
+  },
+  Market: {
+    guilds: 'Guilds / War',
+    auction: 'Auction',
+    events: 'Events',
+    social: 'Social',
+    forum: 'Suggestions',
+    messages: 'Messages',
+    admin: 'Admin',
+    leaderboards: 'Leaderboards',
+  },
+};
+
+function ribbonPageFor(pageName, hubTabs={}) {
+  const activeTab = hubTabs?.[pageName];
+  return HUB_TAB_INTEL_PAGES[pageName]?.[activeTab] || pageName;
+}
 
 const STATE_SLICE_ENDPOINTS = {
   profile: '/api/state/profile',
@@ -370,7 +589,7 @@ const STATE_SLICE_ENDPOINTS = {
   public_profiles: '/api/profile/public-profiles',
 };
 
-const DEFERRED_STATE_KEYS = ['achievements', 'avatar_options', 'chat_messages', 'galaxy_map', 'map_operation', 'map_snapshot', 'party', 'planet_missions', 'public_profiles', 'social', 'system_map', 'player_core', 'active_battle'];
+const DEFERRED_STATE_KEYS = ['achievements', 'avatar_options', 'chat_messages', 'galaxy_map', 'gathering_state', 'map_operation', 'map_snapshot', 'party', 'planet_missions', 'public_profiles', 'social', 'system_map', 'player_core', 'active_battle'];
 
 function mergeDeferredState(prev, next) {
   if (!prev || !next || typeof next !== 'object') return next;
@@ -435,12 +654,16 @@ function sliceNamesForPage(pageName) {
   if (pageName === 'Party') return ['party', 'public_profiles'];
   if (pageName === 'Social') return ['social'];
   if (pageName === 'Map') return ['map', 'party', 'public_profiles'];
+  if (pageName === 'Galaxy') return ['map', 'party', 'public_profiles'];
+  if (pageName === 'Character') return ['profile', 'public_profiles'];
+  if (pageName === 'Market') return ['chat', 'party', 'social', 'public_profiles'];
   return [];
 }
 
 function sliceNamesForAction(type) {
   if (['update_profile', 'set_achievement_badge'].includes(type)) return ['profile'];
   if (type === 'send_chat_message') return ['chat', 'public_profiles'];
+  if (['scan_area', 'scan_object'].includes(type)) return ['map'];
   if (String(type || '').startsWith('party_')) return ['party', 'public_profiles'];
   if (String(type || '').startsWith('social_')) return ['social', 'public_profiles'];
   if (String(type || '').startsWith('trade_')) return ['social'];
@@ -573,7 +796,8 @@ function NovaDialogModal({dialog, onCancel, onConfirm, onInputChange}) {
 function App() {
   const [token, setToken] = useState(initialAuthToken);
   const [state, setState] = useState(null);
-  const [page, setPage] = useState('Dashboard');
+  const [page, setPage] = useState('Galaxy');
+  const [hubTabs, setHubTabs] = useState(() => ({...HUB_DEFAULT_TABS}));
   const [log, setLog] = useState([]);
   const [loading, setLoading] = useState(false);
   const [bootError, setBootError] = useState('');
@@ -585,6 +809,7 @@ function App() {
   const [mobileMoreOpen, setMobileMoreOpen] = useState(false);
   const [clientVisualTravel, setClientVisualTravel] = useState(null);
   const [dialog, setDialog] = useState(null);
+  const [refiningPanelOpen, setRefiningPanelOpen] = useState(false);
   const [tabHidden, setTabHidden] = useState(() => typeof document !== 'undefined' ? document.hidden : false);
   const [autoExploreMode, setAutoExploreMode] = useState(() => {
     const saved = localStorage.getItem('nova_auto_explore_mode') || '';
@@ -609,6 +834,7 @@ function App() {
   const clientVisualTravelRef = useRef(null);
   const stateRef = useRef(null);
   const dialogResolveRef = useRef(null);
+  const completedRefiningToastRef = useRef(new Set());
 
   useEffect(() => {
     stateRef.current = state;
@@ -761,6 +987,21 @@ function App() {
     return res.json().catch(()=>({ok:true}));
   }
 
+  async function changePassword(payload) {
+    const currentToken = sessionStorage.getItem('nova_token') || token || '';
+    const res = await fetch(`${API}/api/profile/password`, { method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${currentToken}`}, body:JSON.stringify(payload) });
+    if (!res.ok) {
+      const text = await res.text();
+      let message = text || 'Password change failed';
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed.detail || message;
+      } catch {}
+      throw new Error(message);
+    }
+    return res.json().catch(()=>({ok:true, message:'Password updated.'}));
+  }
+
   function pushToast(toast) {
     if (!toast?.key || toastSeenRef.current.has(toast.key)) return;
     toastSeenRef.current.add(toast.key);
@@ -770,6 +1011,13 @@ function App() {
 
   function dismissToast(key) {
     setToasts(v => v.filter(t => t.key !== key));
+  }
+
+  function goToHubPage(nextPage) {
+    const destination = resolveHubDestination(nextPage, page);
+    setPage(destination.hub);
+    setHubTabs(prev => ({...prev, [destination.hub]:destination.tab}));
+    syncFeatureHash(destination.hub);
   }
 
   const openServerEventOnMap = useCallback((event) => {
@@ -790,8 +1038,9 @@ function App() {
       objectKey: site.objectKey || site.object_key,
       nonce: Date.now()
     });
-    setPage('Map');
-    syncFeatureHash('Map');
+    setPage('Galaxy');
+    setHubTabs(prev => ({...prev, Galaxy:'navigation'}));
+    syncFeatureHash('Galaxy');
   }, []);
 
   async function load(options = {}) {
@@ -974,7 +1223,13 @@ function App() {
       if (type === 'cancel_travel' || SERVER_VALIDATED_EVENT_ACTION_TYPES.has(type)) {
         clearClientVisualTravel();
       }
-      if (result.openPage) { const mapPages = new Set(['Galaxies','System Map','Star Map']); setPage(mapPages.has(result.openPage) ? 'Map' : result.openPage); }
+      if (result.openPage) {
+        const mapPages = new Set(['Galaxies','System Map','Star Map']);
+        const target = mapPages.has(result.openPage) ? 'Map' : result.openPage;
+        const destination = resolveHubDestination(target, page);
+        setPage(destination.hub);
+        setHubTabs(prev => ({...prev, [destination.hub]:destination.tab}));
+      }
       if (!silent) setLog(l => [result.message || `${type} complete`, ...l].slice(0, 8));
       refreshStateSlices(sliceNamesForAction(type), {force:true, silent:true});
       if (!hasState && data.refresh !== false && !skipRefresh) {
@@ -1039,12 +1294,39 @@ function App() {
   useEffect(() => { load(); }, [token]);
   useEffect(() => {
     const handler = (evt) => {
-      const nextPage = evt?.detail?.page;
-      if (nextPage) setPage(nextPage);
+      const detail = evt?.detail || {};
+      if (detail.hub) {
+        const nextHub = String(detail.hub);
+        const nextTab = detail.tab ? String(detail.tab) : HUB_DEFAULT_TABS[nextHub];
+        setPage(nextHub);
+        if (nextTab) setHubTabs(prev => ({...prev, [nextHub]:nextTab}));
+        syncFeatureHash(nextHub);
+        return;
+      }
+      const nextPage = detail.page;
+      if (nextPage) {
+        const destination = resolveHubDestination(nextPage, page);
+        setPage(destination.hub);
+        setHubTabs(prev => ({...prev, [destination.hub]:destination.tab}));
+      }
     };
     window.addEventListener('nova:set-page', handler);
     return () => window.removeEventListener('nova:set-page', handler);
-  }, []);
+  }, [page]);
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const target = event.target;
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const key = String(event.key || '').toLowerCase();
+      const hotkey = {m:'Galaxy', p:'Planet', c:'Character', o:'Market'}[key];
+      if (!hotkey) return;
+      event.preventDefault();
+      goToHubPage(hotkey);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [page]);
   useEffect(() => {
     if (!token || !state) return;
     const tutorialUserKey = String(
@@ -1125,7 +1407,7 @@ function App() {
       window.clearInterval(id);
     };
   }, [token, !!state, autoExploreMode]);
-  const effectivePage = state?.active_pirate_station ? 'Pirate Station' : page;
+  const effectivePage = state?.active_pirate_station ? 'Planet' : page;
   const activeMapBattle = !!(globalBattle?.id || state?.active_battle?.id || state?.fight?.latestBattle?.id);
   const refreshSeconds = Math.max(20, Number(state?.game_tuning?.client_runtime?.state_refresh_seconds || 45));
   const mapRefreshMs = mapPollingCadenceMs(state, effectivePage, activeMapBattle, tabHidden);
@@ -1145,7 +1427,10 @@ function App() {
     if (seenBattleRef.current == null) { seenBattleRef.current = latest.id; return; }
     if (seenBattleRef.current !== latest.id) {
       seenBattleRef.current = latest.id;
-      if (openSpace && page !== 'Map') setPage('Map');
+      if (openSpace && page !== 'Galaxy') {
+        setPage('Galaxy');
+        setHubTabs(prev => ({...prev, Galaxy:'navigation'}));
+      }
       setGlobalBattle(latest);
     }
   }, [state?.fight?.latestBattle?.id, state?.travel_state?.open_space, page]);
@@ -1155,7 +1440,7 @@ function App() {
       type:'party',
       message:`${invite.inviter_callsign || invite.inviter_username || 'Pilot'} asked you to join a party.`,
       actionLabel:'Open Party',
-      onClick:()=>setPage('Party')
+      onClick:()=>goToHubPage('Party')
     }));
     (state?.trade?.incomingTrades || []).forEach(trade => pushToast({
       key:`trade:${trade.id}`,
@@ -1169,9 +1454,22 @@ function App() {
       type:'social',
       message:`${req.displayName || req.username || 'Pilot'} sent you a friend request.`,
       actionLabel:'Open Social',
-      onClick:()=>setPage('Social')
+      onClick:()=>goToHubPage('Social')
     }));
   }, [state?.party?.incomingInvites, state?.trade?.incomingTrades, state?.social?.incomingFriendRequests]);
+
+  useEffect(() => {
+    const completed = (state?.crafting_queue || []).filter(j => j.job_kind === 'refining' && j.status === 'complete' && !completedRefiningToastRef.current.has(j.id));
+    if (!completed.length) return;
+    completed.forEach(j => completedRefiningToastRef.current.add(j.id));
+    pushToast({
+      key:`refining-complete:${completed.map(j=>j.id).join('-')}`,
+      type:'refining',
+      message:completed.length === 1 ? `${completed[0].recipe_name} finished refining.` : `${completed.length} refining jobs finished.`,
+      actionLabel:'Open Pipeline',
+      onClick:()=>setRefiningPanelOpen(true)
+    });
+  }, [state?.crafting_queue]);
 
   useEffect(() => {
     const friends = state?.social?.friends || [];
@@ -1180,7 +1478,7 @@ function App() {
       friends.forEach(f => {
         const id = String(f.playerId);
         if (f.online && prev.get(id) === false) {
-          pushToast({key:`friend-online:${id}:${Date.now()}`, type:'social', message:`${f.displayName || f.username || 'Friend'} is online.`, actionLabel:'View Social', onClick:()=>setPage('Social')});
+          pushToast({key:`friend-online:${id}:${Date.now()}`, type:'social', message:`${f.displayName || f.username || 'Friend'} is online.`, actionLabel:'View Social', onClick:()=>goToHubPage('Social')});
         }
       });
     }
@@ -1192,8 +1490,8 @@ function App() {
 
   useEffect(() => {
     const fuel = state?.phase_expansion?.fuelStatus || state?.fuel_status;
-    if (fuel?.empty) pushToast({key:'fuel-empty', type:'fuel', message:fuel.message || 'Emergency power active. Speed reduced and jump gates disabled.', actionLabel:'Open Calendar', onClick:()=>setPage('Calendar')});
-    else if (fuel?.low) pushToast({key:'fuel-low', type:'fuel', message:fuel.message || 'Low fuel warning.', actionLabel:'Refuel', onClick:()=>setPage('Calendar')});
+    if (fuel?.empty) pushToast({key:'fuel-empty', type:'fuel', message:fuel.message || 'Emergency power active. Speed reduced and jump gates disabled.', actionLabel:'Open Calendar', onClick:()=>goToHubPage('Calendar')});
+    else if (fuel?.low) pushToast({key:'fuel-low', type:'fuel', message:fuel.message || 'Low fuel warning.', actionLabel:'Refuel', onClick:()=>goToHubPage('Calendar')});
     (state?.phase_expansion?.serverEvents || []).filter(e => ['warning','active'].includes(e.status)).slice(0,6).forEach(e => {
       pushToast({key:`server-event:${e.id}:${e.status}`, type:'event', message:`${e.name} ${e.status === 'active' ? 'is active' : 'starts soon'}.`, actionLabel:'Open Map', onClick:()=>openServerEventOnMap(e)});
     });
@@ -1213,7 +1511,8 @@ function App() {
         if (closed || !data?.hasActiveBattle || !battle?.id) return;
         if (seenBattleRef.current === battle.id && globalBattle?.id === battle.id) return;
         seenBattleRef.current = battle.id;
-        setPage('Map');
+        setPage('Galaxy');
+        setHubTabs(prev => ({...prev, Galaxy:'navigation'}));
         setGlobalBattle(battle);
       } catch {
       } finally {
@@ -1233,18 +1532,16 @@ function App() {
   useEffect(() => {
     if (!token || !state) return;
     refreshStateSlices(sliceNamesForPage(effectivePage), {silent:true});
-    if (!['Chat', 'Party', 'Social', 'Map'].includes(effectivePage)) return;
-    const intervalMs = effectivePage === 'Chat'
-      ? (tabHidden ? 30000 : 5000)
-      : effectivePage === 'Map'
-        ? mapRefreshMs
-        : (tabHidden ? 30000 : 15000);
+    if (!['Galaxy', 'Market'].includes(effectivePage)) return;
+    const intervalMs = effectivePage === 'Galaxy'
+      ? mapRefreshMs
+      : (tabHidden ? 30000 : 15000);
     const id = setInterval(() => {
-      if (effectivePage === 'Map') {
+      if (effectivePage === 'Galaxy') {
         pingMapSlice({silent:true, ttlMs:Math.max(1000, mapRefreshMs - 250)});
         if (!tabHidden) refreshStateSlices(['party', 'public_profiles'], {force:true, silent:true});
       } else {
-        refreshStateSlices(sliceNamesForPage(effectivePage), {force:true, silent:true});
+        refreshStateSlices(['chat', 'party', 'social', 'public_profiles'], {force:true, silent:true});
       }
     }, intervalMs);
     return () => clearInterval(id);
@@ -1265,16 +1562,21 @@ function App() {
   </div>;
 
   const renderState = applyClientVisualTravelState(state, clientVisualTravel);
-  const stationMapLocked = !!renderState.active_pirate_station;
   const visiblePage = effectivePage;
   const guardedSetPage = (nextPage) => {
-    if (stationMapLocked && nextPage !== 'Pirate Station') {
-      setPage('Pirate Station');
-      syncFeatureHash('Pirate Station');
+    const requested = String(nextPage || '');
+    const destination = resolveHubDestination(requested, visiblePage);
+    if (requested === 'Planet' && planetNavDisabled(renderState)) {
       return;
     }
-    setPage(nextPage);
-    syncFeatureHash(nextPage);
+    setPage(destination.hub);
+    setHubTabs(prev => ({...prev, [destination.hub]:destination.tab}));
+    syncFeatureHash(requested);
+  };
+  const setHubTab = (hub, tab) => {
+    setPage(hub);
+    setHubTabs(prev => ({...prev, [hub]:tab}));
+    syncFeatureHash(hub);
   };
   const toggleAutoExploreMode = (mode) => {
     const config = AUTO_EXPLORE_MODE_BY_KEY[mode] || AUTO_EXPLORE_MODE_BY_KEY.pirate;
@@ -1292,6 +1594,7 @@ function App() {
     clock,
     setTradeModalId,
     token,
+    refreshState: load,
     mapFocus,
     openServerEventOnMap,
     autoExploreMode,
@@ -1314,46 +1617,26 @@ function App() {
       <span className="authOrbit authOrbitTwo" />
       <span className="authScanline" />
     </div>
-    <Sidebar page={visiblePage} setPage={guardedSetPage} state={renderState} />
-    <MobileMoreMenu open={mobileMoreOpen} page={visiblePage} setPage={guardedSetPage} onClose={()=>setMobileMoreOpen(false)} />
+    <Sidebar page={visiblePage} setPage={guardedSetPage} state={renderState} hubTabs={hubTabs} />
+    <MobileMoreMenu open={mobileMoreOpen} page={visiblePage} setPage={guardedSetPage} state={renderState} onClose={()=>setMobileMoreOpen(false)} />
     <main className="main">
       <Topbar state={renderState} onLogout={logout} />
-      <div className={`content ${visiblePage === 'Map' ? 'wideMapContent' : ''}`}>
-        <CommandRibbon state={renderState} page={visiblePage} setPage={guardedSetPage} clock={clock} />
-        {visiblePage === 'Dashboard' && <Dashboard {...ctx} />}
-        {visiblePage === 'Profile' && <Profile {...ctx} onDeleteProfile={deleteProfile} />}
-        {visiblePage === 'Chat' && <Chat {...ctx} />}
-        {visiblePage === 'Party' && <Party {...ctx} />}
-        {visiblePage === 'Social' && <Social {...ctx} />}
-        {visiblePage === 'Map' && <StarMap {...ctx} />}
-        {visiblePage === 'Calendar' && <ServerCalendar {...ctx} />}
-        {visiblePage === 'Pirate Station' && <PirateStation {...ctx} />}
-        {visiblePage === 'Market' && <Market {...ctx} />}
-        {visiblePage === 'Inventory' && <Inventory {...ctx} />}
-        {visiblePage === 'Ships & Hangar' && <Ships {...ctx} />}
-        {visiblePage === 'Fight' && <Fight {...ctx} />}
-        {visiblePage === 'Guild' && <Guild {...ctx} />}
-        {visiblePage === 'Faction War' && <FactionWar {...ctx} />}
-        {visiblePage === 'Warfare' && <Warfare {...ctx} />}
-        {visiblePage === 'Planet Control' && <PlanetControl {...ctx} />}
-        {visiblePage === 'Contracts' && <Contracts {...ctx} />}
-        {visiblePage === 'Jobs' && <Jobs {...ctx} />}
-        {visiblePage === 'Skills' && <Skills {...ctx} />}
-        {visiblePage === 'Industry' && <Industry {...ctx} />}
-        {visiblePage === 'Crafting' && <Crafting {...ctx} />}
-        {visiblePage === 'Properties' && <Properties {...ctx} />}
-        {visiblePage === 'Medical' && <Medical {...ctx} />}
-        {visiblePage === 'Messages' && <Messages {...ctx} />}
-        {visiblePage === 'Leaderboards' && <Leaderboards {...ctx} />}
-        {visiblePage === 'Admin' && <Admin {...ctx} />}
+      <RefiningPipelineHUD state={renderState} clock={clock} act={act} onOpen={()=>setRefiningPanelOpen(true)} />
+      <div className={`content ${visiblePage === 'Galaxy' ? 'wideMapContent' : ''}`}>
+        <CommandRibbon state={renderState} page={ribbonPageFor(visiblePage, hubTabs)} setPage={guardedSetPage} clock={clock} />
+        {visiblePage === 'Galaxy' && <GalaxyHub {...ctx} activeTab={hubTabs.Galaxy || HUB_DEFAULT_TABS.Galaxy} setHubTab={(tab)=>setHubTab('Galaxy', tab)} />}
+        {visiblePage === 'Planet' && <PlanetHub {...ctx} activeTab={hubTabs.Planet || HUB_DEFAULT_TABS.Planet} setHubTab={(tab)=>setHubTab('Planet', tab)} />}
+        {visiblePage === 'Character' && <CharacterHub {...ctx} activeTab={hubTabs.Character || HUB_DEFAULT_TABS.Character} setHubTab={(tab)=>setHubTab('Character', tab)} onDeleteProfile={deleteProfile} onChangePassword={changePassword} />}
+        {visiblePage === 'Market' && <MarketSocialMetaHub {...ctx} activeTab={hubTabs.Market || HUB_DEFAULT_TABS.Market} setHubTab={(tab)=>setHubTab('Market', tab)} />}
       </div>
       <ActionLog log={log} />
     </main>
     <MobileContextActionBar state={renderState} page={visiblePage} setPage={guardedSetPage} />
-    <MobileBottomNav page={visiblePage} setPage={guardedSetPage} moreOpen={mobileMoreOpen} setMoreOpen={setMobileMoreOpen} />
+    <MobileBottomNav page={visiblePage} setPage={guardedSetPage} state={renderState} moreOpen={mobileMoreOpen} setMoreOpen={setMobileMoreOpen} />
     <ToastStack toasts={toasts} dismissToast={dismissToast} />
     <TradeModal trade={(renderState.trade?.trades || []).find(t=>Number(t.id)===Number(tradeModalId)) || (tradeModalId ? renderState.trade?.current : null)} state={renderState} act={act} onClose={()=>setTradeModalId(null)} />
     {globalBattle && <GlobalBattleModal battle={globalBattle} act={act} onClose={()=>setGlobalBattle(null)} />}
+    {refiningPanelOpen && <RefiningPanelModal state={renderState} clock={clock} act={act} onClose={()=>setRefiningPanelOpen(false)} />}
     <NovaDialogModal dialog={dialog} onCancel={cancelDialog} onConfirm={confirmDialog} onInputChange={updateDialogInput} />
   </div>;
 }
@@ -1374,15 +1657,20 @@ function pageSlug(pageName='dashboard') {
 }
 
 function pageIntel(pageName='Dashboard') {
-  return PAGE_INTEL[pageName] || {
+  const intel = PAGE_INTEL[pageName] || {
     eyebrow:'Frontier Console',
     title:pageName || 'Command',
     deck:'Live tools, pilot state, and frontier operations.',
-    accent:'#6cf6ff',
+    accent:SITE_PALETTE_ACCENT,
   };
+  return {...intel, accent:SITE_PALETTE_ACCENT};
 }
 
 function quickActionForPage(pageName, setPage) {
+  if (pageName === 'Galaxy') return { label:'Open Ship Hub', onClick:()=>setPage('Ships & Hangar') };
+  if (pageName === 'Planet') return { label:'Open Map', onClick:()=>setPage('Map') };
+  if (pageName === 'Character') return { label:'Open Auction', onClick:()=>setPage('Auction') };
+  if (pageName === 'Market') return { label:'Open Map', onClick:()=>setPage('Map') };
   if (pageName === 'Map') return { label:'Open Hangar', onClick:()=>setPage('Ships & Hangar') };
   if (pageName === 'Market') return { label:'Open Cargo', onClick:()=>setPage('Inventory') };
   if (pageName === 'Inventory') return { label:'Open Crafting', onClick:()=>setPage('Crafting') };
@@ -1693,7 +1981,7 @@ function renderLandingVisual(section) {
       <span className="planet p3"><GameImage src="" assetType="planet" category="lava industrial" hint="industrial lava planet" alt="" loading="lazy" /></span>
       <span className="movingShip s1"><GameImage src="" assetType="ship" category="freighter cargo" hint="freighter cargo ship" alt="" loading="lazy" /></span>
       <span className="movingShip s2 hostile"><GameImage src="" assetType="ship" category="pirate interceptor" hint="pirate interceptor" alt="" loading="lazy" /></span>
-      <em>Scan ping</em>
+      <em>Probe ping</em>
     </div>;
   }
 
@@ -1907,7 +2195,7 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
             <span>Persistent browser MMO</span>
             <h1 id="nova-login-title">Nova Frontiers</h1>
             <p>Your routes, cargo, claims, and enemies are still out there.</p>
-            <div className="landingRoleCards registrationRoleCards" aria-label="Starter career paths">
+            <div className="landingRoleCards registrationRoleCards" aria-label="Starter skill paths">
               <span><b>Haul</b><small>Move cargo. Read the lane.</small></span>
               <span><b>Salvage</b><small>Find wrecks. Keep what lasts.</small></span>
               <span><b>Fight</b><small>Push borders. Hold ground.</small></span>
@@ -2104,25 +2392,30 @@ function Login({onLogin, onRegister, onGoogleLogin, onGoogleRegisterStart, onCle
 
 function syncFeatureHash(pageName) {
   if (typeof window === 'undefined') return;
-  const routeHashes = {Guild:'#guild', Leaderboards:'#leaderboards'};
-  const nextHash = routeHashes[pageName] || '';
   const currentHash = window.location.hash.toLowerCase();
-  if (nextHash) {
-    if (currentHash !== nextHash) window.location.hash = nextHash.slice(1);
-    else window.dispatchEvent(new Event('hashchange'));
-    return;
-  }
   if (currentHash === '#guild' || currentHash === '#leaderboards') {
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
     window.dispatchEvent(new Event('hashchange'));
   }
 }
 
-function Sidebar({page,setPage,state}) {
+function Sidebar({page,setPage,state,hubTabs={}}) {
   const selectPage = (nextPage) => {
     setPage(nextPage);
     syncFeatureHash(nextPage);
   };
+  const openTutorial = () => {
+    window.dispatchEvent(new CustomEvent('nova:tutorial-open'));
+  };
+  const navDestination = (name) => resolveHubDestination(name, page);
+  const activeNavItem = (name) => {
+    const dest = navDestination(name);
+    if (dest.hub !== page) return false;
+    const tab = hubTabs[dest.hub] || HUB_DEFAULT_TABS[dest.hub];
+    return tab === dest.tab;
+  };
+  const isAdmin = !!state.user?.god_mode || String(state.user?.role || '').toLowerCase() === 'admin';
+  const visibleNav = nav.filter(([name]) => name !== 'Admin' || isAdmin);
   return <aside className="sidebar">
     <BrandLockup size="sidebar" />
     <div className="pilotCard">
@@ -2131,32 +2424,39 @@ function Sidebar({page,setPage,state}) {
     </div>
     <div className="bars">
       <Bar label="XP" value={state.player.xp} max={state.next_level_xp || Math.max(1000, state.player.level*state.player.level*1200)} />
+      <small>Next skill point: {fmt(state.xp_needed_next_skill_point ?? Math.max(0, (state.next_level_xp || 0) - (state.player.xp || 0)))} XP</small>
       <Bar label="Health" value={state.player.health} max={state.player.max_health} danger />
       <Bar label="Fuel" value={state.player.fuel} max={state.player.max_fuel} />
-      <Bar label="Energy" value={state.player.energy} max={state.player.max_energy} />
       <Bar label="Cargo" value={state.cargo_usage?.total ?? state.player.cargo} max={state.cargo_usage?.max ?? state.player.max_cargo} />
     </div>
     <nav className="navRail">
-      {NAV_GROUPS.map(group => <div className="navGroup" key={group.label}>
-        <strong>{group.label}</strong>
-        {group.pages.map(n => {
-          const Icon = (nav.find(([name]) => name === n) || [n, Home])[1];
-          return <button key={n} data-page={n} className={page===n?'active':''} onClick={()=>selectPage(n)}><Icon size={18}/><span>{n}</span>{n==='Messages' && <em>8</em>}</button>;
+      <div className="navGroup">
+        <strong>Navigation</strong>
+        {visibleNav.map(([name, Icon]) => {
+          const disabled = name === 'Planet' && planetNavDisabled(state);
+          return <button key={name} data-page={name} disabled={disabled} className={activeNavItem(name)?'active':''} onClick={()=>selectPage(name)} title={disabled ? 'Dock at a planet or station to use planet services.' : name}>
+            <Icon size={18}/><span>{name}</span>
+          </button>;
         })}
-      </div>)}
+      </div>
     </nav>
     <div className="sector">UTC {new Date(state.server_time).toLocaleTimeString()}<br/>Sector VX-9 / ECHO</div>
+    <div className="sidebarTutorialDock">
+      <button type="button" className="sidebarTutorialButton hasHoverTooltip" data-tooltip="Restart the starter guide." onClick={openTutorial}>
+        <Info size={17}/><span>Starter Guide</span>
+      </button>
+    </div>
   </aside>
 }
 
 const MOBILE_PRIMARY_TABS = [
-  {label:'Map', page:'Map', pages:['Map'], icon:Globe2},
-  {label:'Ship', page:'Ships & Hangar', pages:['Ships & Hangar','Fight'], icon:Rocket},
-  {label:'Inventory', page:'Inventory', pages:['Inventory','Market','Crafting'], icon:Package},
-  {label:'Missions', page:'Contracts', pages:['Contracts','Jobs','Calendar'], icon:Briefcase},
+  {label:'Galaxy', page:'Galaxy', pages:['Galaxy'], icon:Globe2},
+  {label:'Planet', page:'Planet', pages:['Planet'], icon:Building2},
+  {label:'Character', page:'Character', pages:['Character'], icon:UserRound},
+  {label:'Market', page:'Market', pages:['Market'], icon:Store},
 ];
 
-function MobileBottomNav({page,setPage,moreOpen,setMoreOpen}) {
+function MobileBottomNav({page,setPage,state,moreOpen,setMoreOpen}) {
   const selectTab = (tab) => {
     setMoreOpen(false);
     setPage(tab.page);
@@ -2165,17 +2465,15 @@ function MobileBottomNav({page,setPage,moreOpen,setMoreOpen}) {
     {MOBILE_PRIMARY_TABS.map(tab => {
       const Icon = tab.icon;
       const active = tab.pages.includes(page);
-      return <button key={tab.label} className={active ? 'active' : ''} aria-current={active ? 'page' : undefined} onClick={()=>selectTab(tab)}>
+      const disabled = tab.page === 'Planet' && planetNavDisabled(state);
+      return <button key={tab.label} className={active ? 'active' : ''} aria-current={active ? 'page' : undefined} disabled={disabled} title={disabled ? 'Dock at a planet or station to use planet services.' : tab.label} onClick={()=>selectTab(tab)}>
         <Icon size={20}/><span>{tab.label}</span>
       </button>;
     })}
-    <button className={moreOpen || !MOBILE_PRIMARY_TABS.some(tab => tab.pages.includes(page)) ? 'active' : ''} onClick={()=>setMoreOpen(v=>!v)} aria-expanded={moreOpen}>
-      <MoreHorizontal size={20}/><span>More</span>
-    </button>
   </nav>;
 }
 
-function MobileMoreMenu({open,page,setPage,onClose}) {
+function MobileMoreMenu({open,page,setPage,state,onClose}) {
   if (!open) return null;
   const selectPage = (nextPage) => {
     setPage(nextPage);
@@ -2191,7 +2489,8 @@ function MobileMoreMenu({open,page,setPage,onClose}) {
           <div>
             {group.pages.filter(n => !primaryPages.has(n) || n === page).map(n => {
               const Icon = (nav.find(([name]) => name === n) || [n, Home])[1];
-              return <button key={n} className={page===n?'active':''} onClick={()=>selectPage(n)}><Icon size={17}/><span>{n}</span></button>;
+              const disabled = n === 'Planet' && planetNavDisabled(state);
+              return <button key={n} className={page===n?'active':''} disabled={disabled} title={disabled ? 'Dock at a planet or station to use planet services.' : n} onClick={()=>selectPage(n)}><Icon size={17}/><span>{n}</span></button>;
             })}
           </div>
         </div>)}
@@ -2209,7 +2508,7 @@ function MobileContextActionBar({state,page,setPage}) {
   return <div className="mobileContextActionBar">
     <div>
       <b>{travel.active ? `${label(travel.mode || 'travel')} ${clockTimeLeft(travel.arrival_at)}` : (ship.name || state.location?.name || 'Ready')}</b>
-      <span>Fuel {fmt(state.player?.fuel)} · Energy {fmt(state.player?.energy)} · Cargo {fmt(cargoUsed)}/{fmt(cargoMax)}</span>
+      <span>Fuel {fmt(state.player?.fuel)} - Cargo {fmt(cargoUsed)}/{fmt(cargoMax)}</span>
     </div>
     <button className="primary" onClick={action.onClick}>{action.label}</button>
   </div>;
@@ -2287,13 +2586,8 @@ function RealtimeBattleModal({battle, act, onClose}) {
   const complete = battleIsComplete(localBattle);
   const playerLost = complete && localBattle?.winner === 'enemy';
   const enemyLost = complete && localBattle?.winner === 'player';
-  const playerEnergy = Number(localBattle?.playerAttackEnergy || 0);
-  const enemyEnergy = Number(localBattle?.enemyAttackEnergy || 0);
-  const maxEnergy = Number(localBattle?.attackEnergyMax || 12);
-  const availableEnergy = Math.floor(playerEnergy);
   const playerActionCooldown = secondsUntilIso(localBattle?.playerActionUntil);
-  const escapeCost = Number(localBattle?.escapeEnergyCost || 2);
-  const escapeDisabled = complete || escapeCooldown > 0 || playerActionCooldown > 0 || availableEnergy < escapeCost;
+  const escapeDisabled = complete || escapeCooldown > 0 || playerActionCooldown > 0;
   const combatants = localBattle?.combatants || [];
   const viewerRef = localBattle?.viewerRef || '';
   const viewerSide = localBattle?.viewerSide || 'player';
@@ -2371,12 +2665,12 @@ function RealtimeBattleModal({battle, act, onClose}) {
 
   useEffect(() => {
     if (!autoBattleEnabled || !localBattle || complete || autoBattleBusyRef.current) return;
-    if (playerActionCooldown > 0 || availableEnergy < 1) return;
+    if (playerActionCooldown > 0) return;
     autoBattleBusyRef.current = true;
     performCombatAction('use_all', {}, { auto:true }).finally(() => {
       window.setTimeout(() => { autoBattleBusyRef.current = false; }, 450);
     });
-  }, [autoBattleEnabled, localBattle?.id, localBattle?.updated_at, localBattle?.updatedAt, complete, availableEnergy, playerActionCooldown, playerEnergy, enemyEnergy, selectedTargetRef]);
+  }, [autoBattleEnabled, localBattle?.id, localBattle?.updated_at, localBattle?.updatedAt, complete, playerActionCooldown, selectedTargetRef]);
 
   function toggleAutoBattle() {
     if (autoBattleEnabled) setLastManualCombatActionAt(Date.now());
@@ -2396,16 +2690,15 @@ function RealtimeBattleModal({battle, act, onClose}) {
   return <div className="modalBackdrop battleModalBackdrop globalBattleLock">
     <div className="battleModal" role="dialog" aria-modal="true">
       {complete && <button className="modalClose" onClick={onClose}>Close</button>}
-      <div className={`battleScreen realtimeBattleScreen energyBattleScreen ${complete ? 'completeBattleScreen' : 'activeBattleScreen'}`}>
+      <div className={`battleScreen realtimeBattleScreen ${complete ? 'completeBattleScreen' : 'activeBattleScreen'}`}>
         {!complete && <div className="battleEnergyStrip battleEnergyStripWithEscape">
-          <BattleEnergyMeter label="Your Attack Energy" value={playerEnergy} max={maxEnergy} rate={localBattle?.playerEnergyRateSeconds} />
           <div className="battleEnergyCenterControls">
             <div className="battleAutoSlot">
               <button
                 className={`autoBattleToggle ${autoBattleEnabled ? 'active' : ''}`}
                 disabled={complete}
                 onClick={toggleAutoBattle}
-                data-tooltip={humanHelpText('Automatically fires Use All when attack energy is ready. Turns on after 1 minute without manual combat actions.')}
+                data-tooltip={humanHelpText('Automatically fires Use All when your weapons recover. Turns on after 1 minute without manual combat actions.')}
               >
                 {autoBattleEnabled ? 'AUTO BATTLE ON' : 'AUTO BATTLE'}
               </button>
@@ -2413,11 +2706,10 @@ function RealtimeBattleModal({battle, act, onClose}) {
             <div className="battleEscapeSlot">
               <button className="escapeBtn" disabled={escapeDisabled} onClick={attemptEscape}>
                 <span>{escapeCooldown > 0 ? `ESCAPE ${escapeCooldown}s` : 'ATTEMPT ESCAPE'}</span>
-                <small>Req {fmt(escapeCost)} E</small>
+                <small>{playerActionCooldown > 0 ? `Recovering ${playerActionCooldown}s` : 'Ready'}</small>
               </button>
             </div>
           </div>
-          <BattleEnergyMeter label="Enemy Attack Energy" value={enemyEnergy} max={maxEnergy} rate={localBattle?.enemyEnergyRateSeconds} enemy />
         </div>}
 
         <BattleStageView
@@ -2432,10 +2724,7 @@ function RealtimeBattleModal({battle, act, onClose}) {
           enemyShield={enemyShield}
           playerLost={playerLost}
           enemyLost={enemyLost}
-          availableEnergy={availableEnergy}
           playerActionCooldown={playerActionCooldown}
-          enemyEnergy={enemyEnergy}
-          maxEnergy={maxEnergy}
           selectedTargetRef={selectedTargetRef}
           onSelectTarget={setSelectedTargetRef}
           onWeapon={(weapon)=>performCombatAction("weapon", { weapon_id: weapon.id })}
@@ -2453,7 +2742,7 @@ function RealtimeBattleModal({battle, act, onClose}) {
             <Stats pairs={{Outcome:battleStatusText(localBattle), Winner:complete ? label(localBattle?.winner) : 'Pending', Credits:complete ? fmt(localBattle?.rewards?.credits || 0) : 'Pending', XP:complete ? fmt(localBattle?.rewards?.xp || 0) : 'Pending', Salvage:localBattle?.rewards?.salvageSite ? `Wreck #${localBattle.rewards.salvageSite.id}` : 'None', Immunity:complete ? `${fmt(localBattle?.postBattleImmunitySeconds || 5)}s` : 'Locked while fighting'}} />
             {complete && enemyLost && <div className="salvageCallout dangerCallout"><b>Target Destroyed</b><span>The losing side is marked out of combat. Post-battle immunity is active.</span></div>}
             {localBattle?.rewards?.defeatedNpcReplacement && <div className="salvageCallout"><b>NPC Destroyed</b><span>Old NPC removed. Replacement spawned {fmt(localBattle.rewards.defeatedNpcReplacement.xpLossPct)}% weaker.</span></div>}
-            {localBattle?.rewards?.salvageSite && <div className="salvageCallout"><b>Wreck Generated</b><span>Open-space wreck is now visible on the System Map. Energy cost {fmt(localBattle.rewards.salvageSite.energyCost)}.</span></div>}
+            {localBattle?.rewards?.salvageSite && <div className="salvageCallout"><b>Wreck Generated</b><span>Open-space wreck is now visible on the System Map.</span></div>}
           </div>
         </div>}
       </div>
@@ -2467,7 +2756,7 @@ function battleEventKey(event) {
 }
 
 function battleEventLabel(event) {
-  if (!event?.action && !event?.weaponType) return 'ENERGY CHARGING';
+  if (!event?.action && !event?.weaponType) return 'READY';
   if (event.weaponType === 'escape') return event.hit ? 'ESCAPE' : 'ESCAPE FAILED';
   if (event.weaponType === 'utility') return 'UTILITY ACTIVE';
   if (event.action === 'defend') return 'DEFENSIVE MANEUVER';
@@ -2514,7 +2803,7 @@ function combatEffectIcon(effect) {
   return Zap;
 }
 
-function BattleStageView({battle, current, complete, your, enemy, playerHull, playerShield, enemyHull, enemyShield, playerLost, enemyLost, availableEnergy, playerActionCooldown, enemyEnergy, maxEnergy, selectedTargetRef='', onSelectTarget=()=>{}, onWeapon, onUtility, onDefend, onUseAll, log=[]}) {
+function BattleStageView({battle, current, complete, your, enemy, playerHull, playerShield, enemyHull, enemyShield, playerLost, enemyLost, playerActionCooldown, selectedTargetRef='', onSelectTarget=()=>{}, onWeapon, onUtility, onDefend, onUseAll, log=[]}) {
   const event = current || {};
   const actor = event.actor === 'enemy' ? 'enemy' : event.actor === 'player' ? 'player' : 'system';
   const weaponType = String(event.weaponType || event.action || 'laser').toLowerCase().replace(/[^a-z0-9_-]/g, '');
@@ -2585,7 +2874,6 @@ function BattleStageView({battle, current, complete, your, enemy, playerHull, pl
       <div className="battleControlSlot playerControlSlot">
         {!complete && <BattleActionDeck
           battle={battle}
-          energy={availableEnergy}
           actionCooldown={playerActionCooldown}
           selectedTargetRef={selectedTargetRef}
           viewerEffectKey={battle?.viewerEffectKey || battle?.viewerSide || 'player'}
@@ -2602,8 +2890,7 @@ function BattleStageView({battle, current, complete, your, enemy, playerHull, pl
       <div className="battleControlSlot enemyControlSlot">
         <div className="enemyIntentPanel">
           <b>{selectedTarget?.name || 'Target'}</b>
-          <span>{enemyRecover > 0 ? `Recovering ${enemyRecover}s` : 'Can act when enough energy is banked'}</span>
-          <span>Energy {fmt(enemyEnergy)} / {fmt(maxEnergy)}</span>
+          <span>{enemyRecover > 0 ? `Recovering ${enemyRecover}s` : 'Ready to act'}</span>
         </div>
       </div>
     </div>}
@@ -2688,55 +2975,40 @@ function BattleEventLog({log=[], compact=false, title}) {
   </div>
 }
 
-function BattleEnergyMeter({label, value, max, rate, enemy=false}) {
-  const pct = Math.max(0, Math.min(100, (Number(value || 0) / Math.max(1, Number(max || 12))) * 100));
-  const stacks = Array.from({length: Math.max(1, Number(max || 12))}, (_,i)=>i+1);
-  return <div className={`battleEnergyMeter ${enemy ? 'enemy' : ''}`}>
-    <div><b>{label}</b><span>{fmt(value || 0)} / {fmt(max || 12)} • +1 E / {fmt(rate || 4)}s</span></div>
-    <div className="battleEnergyTrack"><i style={{width:`${pct}%`}}></i></div>
-    <div className="battleEnergyPips">{stacks.map(n=><span key={n} className={n <= Math.floor(value || 0) ? 'filled' : ''}>{n}</span>)}</div>
-  </div>
-}
-
-function BattleActionDeck({battle, energy, actionCooldown, selectedTargetRef='', viewerEffectKey='player', onWeapon, onUtility, onDefend, onUseAll, activeEffects=[]}) {
+function BattleActionDeck({battle, actionCooldown, selectedTargetRef='', viewerEffectKey='player', onWeapon, onUtility, onDefend, onUseAll, activeEffects=[]}) {
   const weapons = battle?.playerWeapons || battle?.yourShip?.weapons || [];
   const utilities = battle?.playerUtilities || battle?.yourShip?.utilities || [];
-  const defendCost = Number(battle?.defendEnergyCost || 1);
   const locked = actionCooldown > 0;
   const liveEffects = liveCombatEffects(activeEffects);
   const activeForKey = (key, category) => findActiveEffect(liveEffects, key, category) || liveEffects.find(e => effectCategory(e) === String(category || '') && (!key || String(e?.side) === String(key))) || null;
   const activeDefense = activeForKey(viewerEffectKey, 'self_defense_buff');
   const defenseRemaining = activeDefense ? effectRemaining(activeDefense) : 0;
-  const canUseAny = weapons.some(w => Number(w.requiredEnergy || w.energy || 1) <= energy);
   return <div className="battleActionDeck">
-    <div className="actionDeckHeader"><b>Actions</b><span>{locked ? `Recovering ${actionCooldown}s` : `${energy} E available`}</span></div>
+    <div className="actionDeckHeader"><b>Actions</b><span>{locked ? `Recovering ${actionCooldown}s` : 'Ready'}</span></div>
     <div className="weaponButtonGrid">
       {weapons.map((w,i)=>{
-        const req = Number(w.requiredEnergy || w.energy || 1);
-        const disabled = locked || energy < req;
+        const disabled = locked;
         return <button key={w.id || i} className={`combatActionBtn weapon ${disabled ? 'disabled' : ''}`} disabled={disabled} onClick={()=>onWeapon(w)}>
           <span>{w.name || `Weapon ${i+1}`}</span>
-          <small>{locked ? `Recovering ${actionCooldown}s` : `Req ${req} E`}</small>
+          <small>{locked ? `Recovering ${actionCooldown}s` : 'Ready'}</small>
         </button>
       })}
     </div>
     <div className="specialActionRow">
-      <button className={`combatActionBtn defend ${locked || energy < defendCost || defenseRemaining > 0 ? 'disabled activeLocked' : ''}`} disabled={locked || energy < defendCost || defenseRemaining > 0} onClick={onDefend}>
-        <span>Defend</span><small>{defenseRemaining > 0 ? `Active ${defenseRemaining}s` : `Req ${defendCost} E • +15% DEF/Dodge`}</small>
+      <button className={`combatActionBtn defend ${locked || defenseRemaining > 0 ? 'disabled activeLocked' : ''}`} disabled={locked || defenseRemaining > 0} onClick={onDefend}>
+        <span>Defend</span><small>{defenseRemaining > 0 ? `Active ${defenseRemaining}s` : '+15% DEF/Dodge'}</small>
       </button>
-      <button className={`combatActionBtn useAll ${locked || !canUseAny ? 'disabled' : ''}`} disabled={locked || !canUseAny} onClick={onUseAll}>
-        <span>Use All</span><small>{locked ? `Recovering ${actionCooldown}s` : 'Highest E first'}</small>
+      <button className={`combatActionBtn useAll ${locked || !weapons.length ? 'disabled' : ''}`} disabled={locked || !weapons.length} onClick={onUseAll}>
+        <span>Use All</span><small>{locked ? `Recovering ${actionCooldown}s` : 'All weapons'}</small>
       </button>
     </div>
     <div className="utilityButtonGrid">
       {utilities.map((u,i)=>{
-        const req = Number(u.requiredEnergy || u.cost || 2);
         const targetKey = String(u?.target || 'self').toLowerCase() === 'self' ? viewerEffectKey : selectedTargetRef;
         const active = activeForKey(targetKey, u.category || u.key || 'utility');
         const remaining = active ? effectRemaining(active) : 0;
-        const shortEnergy = energy < req;
-        const disabled = locked || shortEnergy || remaining > 0;
-        const status = remaining > 0 ? `Active ${remaining}s` : shortEnergy ? `Need ${req} E` : `Req ${req} E`;
+        const disabled = locked || remaining > 0;
+        const status = remaining > 0 ? `Active ${remaining}s` : 'Ready';
         return <button key={u.id || i} data-tooltip={humanHelpText(u.desc || `${u.name || 'Utility'} changes the fight for a short time. Watch the timer before trying to use it again.`)} className={`combatActionBtn utility hasHoverTooltip ${disabled ? 'disabled' : ''} ${remaining > 0 ? 'activeLocked' : ''}`} disabled={disabled} onClick={()=>onUtility(u)}>
           <span>{u.name || `Utility ${i+1}`}</span>
           <small>{status} • {label(u.category || u.key || 'utility')}</small>
@@ -2773,22 +3045,120 @@ function GlobalBattleModal({battle, act, onClose}) {
 
 function Topbar({state,onLogout}) {
   const p = state.player, ship = state.active_ship || {}, travel = state.travel_state || {};
-  const openTutorial = () => {
-    window.dispatchEvent(new CustomEvent('nova:tutorial-open'));
-  };
   return <header className="topbar">
     <div className="identityStat"><ProfileAvatar profile={state.profile} size="sm" /><span>{state.profile?.displayName || state.player.callsign}<small>@{state.profile?.username || state.user.username}</small></span></div>
     <div className="stat"><Coins/> Credits <b>{fmt(p.credits)}</b></div>
     <div className={`stat ${state.phase_expansion?.fuelStatus?.empty ? 'dangerStat' : state.phase_expansion?.fuelStatus?.low ? 'warningStat' : ''}`}><Fuel/> Fuel <b>{fmt(p.fuel)} / {fmt(p.max_fuel)}</b>{state.phase_expansion?.fuelStatus?.message && <small>{state.phase_expansion.fuelStatus.message}</small>}</div>
     <div className="stat"><Package/> Cargo <b>{fmt(state.cargo_usage?.total ?? p.cargo)} / {fmt(state.cargo_usage?.max ?? p.max_cargo)}</b></div>
-    <div className="stat"><Zap/> Energy <b>{fmt(p.energy)} / {fmt(p.max_energy)}</b></div>
     <div className="stat"><Brain/> Skill Points <b>{fmt(p.skill_points)}</b></div>
     <div className="stat"><Shield/> Ship <b>{ship.name || 'None'}</b></div>
     {travel.active && <div className="stat travelTop"><Clock/> {label(travel.mode)} Travel <b>{travel.destination_galaxy_name || travel.destination_planet_name} • {clockTimeLeft(travel.arrival_at)}</b></div>}
     {state.user.god_mode && <div className="god">GOD MODE</div>}
-    <button type="button" className="viewTutorialButton hasHoverTooltip" data-tooltip="Open the starter guide again. It walks through the important early screens and the simple loops that make the space sim click." onClick={openTutorial}><Info size={16} /> Starter Guide</button>
-    <button onClick={onLogout}>Logout</button>
+    <button className="topbarLogout" onClick={onLogout}>Logout</button>
   </header>
+}
+
+function HubTabs({tabs, activeTab, setHubTab}) {
+  return <div className="hubTabs" role="tablist">
+    {tabs.map(tab => {
+      const Icon = tab.icon || Layers;
+      return <button key={tab.key} role="tab" aria-selected={activeTab === tab.key} className={activeTab === tab.key ? 'active' : ''} onClick={()=>setHubTab(tab.key)}>
+        <Icon size={16}/><span>{tab.label}</span>
+      </button>;
+    })}
+  </div>;
+}
+
+function HubFrame({tabs, activeTab, setHubTab, children}) {
+  return <section className="hubFrame">
+    <div className="hubBody">{children}</div>
+  </section>;
+}
+
+const GALAXY_HUB_TABS = [
+  {key:'navigation', label:'Navigation', icon:Globe2},
+  {key:'overview', label:'Command', icon:Home},
+  {key:'events', label:'Events', icon:CalendarDays},
+  {key:'combat', label:'Combat', icon:Swords},
+];
+
+function GalaxyHub(props) {
+  const {activeTab, setHubTab} = props;
+  return <HubFrame tabs={GALAXY_HUB_TABS} activeTab={activeTab} setHubTab={setHubTab}>
+    {activeTab === 'navigation' && <StarMap {...props} />}
+    {activeTab === 'overview' && <Dashboard {...props} />}
+    {activeTab === 'events' && <ServerCalendar {...props} />}
+    {activeTab === 'combat' && <Fight {...props} />}
+  </HubFrame>;
+}
+
+const PLANET_HUB_TABS = [
+  {key:'overview', label:'Overview', icon:Building2},
+  {key:'goods', label:'NPC Goods Market', icon:Store},
+  {key:'industry', label:'Refining/Crafting', icon:Factory},
+  {key:'storage', label:'Storage / Bases', icon:Package},
+];
+
+function PlanetHub(props) {
+  const {activeTab, setHubTab, state} = props;
+  if (planetNavDisabled(state)) {
+    return <HubFrame tabs={PLANET_HUB_TABS} activeTab={activeTab} setHubTab={setHubTab}>
+      <Panel title="Planet Unavailable While Undocked" help="Planet interaction, Sell Inventory, and the NPC Goods Market become active only while docked. Use Map for flight, local-space navigation, and interactions while undocked.">
+        <TravelStatus state={state} clock={props.clock} />
+      </Panel>
+    </HubFrame>;
+  }
+  return <HubFrame tabs={PLANET_HUB_TABS} activeTab={activeTab} setHubTab={setHubTab}>
+    {activeTab === 'overview' && <PlanetControl {...props} />}
+    {activeTab === 'goods' && <Market {...props} initialTab="goods" planetMode />}
+    {activeTab === 'industry' && <div className="hubSplitStack"><Industry {...props} /><Crafting {...props} /></div>}
+    {activeTab === 'storage' && <div className="hubSplitStack"><Market {...props} initialTab="storage" planetMode /><Properties {...props} /></div>}
+  </HubFrame>;
+}
+
+const CHARACTER_HUB_TABS = [
+  {key:'character', label:'Character', icon:UserRound},
+  {key:'ship', label:'Ship / Cargo', icon:Rocket},
+  {key:'skills', label:'Skills', icon:Brain},
+  {key:'effects', label:'Effects / Recovery', icon:HeartPulse},
+];
+
+function CharacterHub(props) {
+  const {activeTab, setHubTab, onDeleteProfile, onChangePassword} = props;
+  return <HubFrame tabs={CHARACTER_HUB_TABS} activeTab={activeTab} setHubTab={setHubTab}>
+    {activeTab === 'character' && <Profile {...props} onDeleteProfile={onDeleteProfile} onChangePassword={onChangePassword} />}
+    {activeTab === 'ship' && <div className="hubSplitStack"><Ships {...props} /><Inventory {...props} /></div>}
+    {activeTab === 'skills' && <Skills {...props} />}
+    {activeTab === 'effects' && <Medical {...props} />}
+  </HubFrame>;
+}
+
+const MARKET_META_HUB_TABS = [
+  {key:'guilds', label:'Guilds / War', icon:Shield},
+  {key:'auction', label:'Auction', icon:Store},
+  {key:'events', label:'Events', icon:CalendarDays},
+  {key:'social', label:'Social', icon:Users},
+  {key:'forum', label:'Forum', icon:MessageCircle},
+  {key:'messages', label:'Messages', icon:Mail},
+  {key:'admin', label:'Admin', icon:Settings},
+  {key:'leaderboards', label:'Leaderboards', icon:Trophy},
+];
+
+function MarketSocialMetaHub(props) {
+  const {activeTab, setHubTab, state} = props;
+  const isAdmin = !!state.user?.god_mode || String(state.user?.role || '').toLowerCase() === 'admin';
+  const tabs = isAdmin ? MARKET_META_HUB_TABS : MARKET_META_HUB_TABS.filter(t => t.key !== 'admin');
+  const safeTab = tabs.some(t => t.key === activeTab) ? activeTab : 'auction';
+  return <HubFrame tabs={tabs} activeTab={safeTab} setHubTab={setHubTab}>
+    {safeTab === 'guilds' && <div className="hubSplitStack"><Guild {...props} /><FactionWar {...props} /><Warfare {...props} /></div>}
+    {safeTab === 'auction' && <Market {...props} initialTab="auction" />}
+    {safeTab === 'events' && <ServerCalendar {...props} eventOnly />}
+    {safeTab === 'social' && <div className="hubSplitStack"><Chat {...props} /><Party {...props} /><Social {...props} /></div>}
+    {safeTab === 'forum' && <SuggestionsForum {...props} />}
+    {safeTab === 'messages' && <Messages {...props} />}
+    {safeTab === 'admin' && isAdmin && <Admin {...props} />}
+    {safeTab === 'leaderboards' && <Leaderboards {...props} />}
+  </HubFrame>;
 }
 
 function Dashboard({state,act,setPage,clock,token}) {
@@ -2800,8 +3170,6 @@ function Dashboard({state,act,setPage,clock,token}) {
     o.galaxy_id === state.location?.galaxy_id &&
     o.operation_tier === 'basic'
   ).slice(0, 5);
-  const activeJob = state.jobs.find(j => j.active);
-  const careerTasks = (state.career_tasks || []).slice(0, 3);
   const sectorActivity = (state.npc_activity || []).filter(a => a.galaxy_id === state.location?.galaxy_id).slice(0, 10);
   const sim = state.simulation || {};
   const [securityDetails, setSecurityDetails] = useState({status:'idle', galaxy:null, alerts:[]});
@@ -2854,6 +3222,7 @@ function Dashboard({state,act,setPage,clock,token}) {
     <Panel title="Current Details" help="Your current galaxy and stop live here, including local safety, stability, defense, and galaxy security forces.">
       <div className="currentGalaxyCard">
         <div className={`galaxy ${currentGalaxy.color || 'blue'}`}>
+          <GameImage className="currentGalaxyArt" src={currentGalaxy.image_url} assetType="galaxy" category={`${currentGalaxy.name || ''} ${currentGalaxy.sector || ''}`} alt={currentGalaxy.name || state.location.galaxy_name || 'Current galaxy'} />
           <h3>{currentGalaxy.name || state.location.galaxy_name}</h3>
           <p>{currentGalaxy.sector || state.location.galaxy_code}</p>
           <small>Current location: {state.location.name}</small>
@@ -2898,7 +3267,7 @@ function Dashboard({state,act,setPage,clock,token}) {
         Lawfulness:state.location?.lawfulness || 0,
         Defense:state.location?.defense_strength || 0
       }} />
-      <div className="tagCloud">{(state.npc_summary?.careers||[]).slice(0,8).map(c=><span key={c.career}>{label(c.career)}: {c.count}</span>)}</div>
+      <div className="tagCloud">{(state.npc_summary?.skills||[]).slice(0,8).map(c=><span key={c.skill}>{label(c.skill)}: {c.count}</span>)}</div>
     </Panel>
 
     <Panel title="Planet Control" help="Local control affects prices, mission risk, illegal trade risk, crafting bonuses, and travel danger.">
@@ -2928,9 +3297,9 @@ function Dashboard({state,act,setPage,clock,token}) {
       <button onClick={()=>setPage('Ships & Hangar')}>Manage Ship</button>
     </Panel>
 
-    <Panel title="Local Goods" help="Current location prices. Legal goods are safer; illicit goods carry more risk and larger spread.">
-      <TwoCols leftTitle="Legal Goods" rightTitle="Illicit Goods" left={state.market.filter(m=>m.legal).slice(0,5)} right={state.market.filter(m=>!m.legal).slice(0,5)} />
-      <button onClick={()=>setPage('Market')}>View Market</button>
+    <Panel title="Local Goods" help="Current location prices for NPC goods.">
+      <TwoCols leftTitle="Goods" rightTitle="Supply" left={state.market.filter(m=>m.legal).slice(0,5)} right={[]} />
+      <button onClick={()=>setPage('Planet')}>View NPC Goods Market</button>
     </Panel>
 
     <Panel title="Local Planet Contracts" help="Planet-side/station-side missions. Each mission levels separately for each planet; higher local mission level takes slightly longer but pays much better.">
@@ -2938,18 +3307,16 @@ function Dashboard({state,act,setPage,clock,token}) {
       <button onClick={()=>setPage('Map')}>Open Mission Map Screen</button>
     </Panel>
 
-    <Panel title="PvE Operations" help="Dashboard operations are limited to basic credit/XP work plus current-career jobs. Bosses, raids, wars, and galaxy-scale content stay off this quick panel.">
+    <Panel title="PvE Operations" help="Dashboard operations are limited to basic credit/XP work. Bosses, raids, wars, and galaxy-scale content stay off this quick panel.">
       <h3 className="panelSubhead">Basic Work</h3>
       <div className="opList detailed">{basicOps.map(o=><OperationRow key={o.code} item={o} actionLabel="Run" onRun={()=>act('pve_operation',{code:o.code})} />)}</div>
-      {activeJob && <h3 className="panelSubhead">Career: {activeJob.name}</h3>}
-      <div className="opList detailed">{careerTasks.map(t=><OperationRow key={t.key} item={t} actionLabel="Run Job" onRun={()=>act('career_task',{task_key:t.key})} />)}</div>
     </Panel>
 
-    <Panel title="Recommended Next Actions" help="Sorted from current career, skills, ship power, energy use, and local planet conditions.">
-      <div className="opList detailed">{(state.recommended_actions || []).slice(0,5).map(r=><OperationRow key={`${r.kind}-${r.code}`} item={r} actionLabel={r.kind === 'career' ? 'Run Job' : 'Run'} onRun={()=>act(r.kind === 'career' ? 'career_task' : 'pve_operation', r.kind === 'career' ? {task_key:r.code} : {code:r.code})} />)}</div>
+    <Panel title="Recommended Next Actions" help="Sorted from current skill, skills, ship power, and local planet conditions.">
+      <div className="opList detailed">{(state.recommended_actions || []).filter(r=>r.kind !== 'skill').slice(0,5).map(r=><OperationRow key={`${r.kind}-${r.code}`} item={r} actionLabel="Run" onRun={()=>act('pve_operation', {code:r.code})} />)}</div>
     </Panel>
 
-    <Panel title="Recent Sector Activity" help="Server-side NPC simulation events from planets and stations in your current galaxy.">
+    <Panel title="Recent Sector Activity" help="Server-side NPC simulation events from planets in your current galaxy.">
       <div className="simulationMeta">
         <span>Tick: {sim.balance?.tick_minutes || '—'} min</span>
         <span>Last actions: {sim.last_action_count ?? 0}</span>
@@ -2967,12 +3334,16 @@ function Dashboard({state,act,setPage,clock,token}) {
 
 
 
-function Profile({state,act,onDeleteProfile}) {
+function Profile({state,act,onDeleteProfile,onChangePassword}) {
   const profile = state.profile || {};
   const avatars = state.avatar_options || [];
   const achievements = state.achievements || profile.achievements || {loops:[], unlockedBadges:[], passiveBuffs:{}};
   const [tab,setTab] = useState('overview');
   const [form,setForm] = useState({username:profile.username || '', displayName:profile.displayName || '', bio:profile.bio || '', avatarId:profile.avatarId || 'default', selectedBadgeCode:profile.selectedBadgeCode || ''});
+  const [passwordForm,setPasswordForm] = useState({oldPassword:'', newPassword:'', confirmPassword:''});
+  const [passwordBusy,setPasswordBusy] = useState(false);
+  const [passwordError,setPasswordError] = useState('');
+  const [passwordStatus,setPasswordStatus] = useState('');
   const [deleteOpen,setDeleteOpen] = useState(false);
   const [deleteText,setDeleteText] = useState('');
   const [deleteBusy,setDeleteBusy] = useState(false);
@@ -2980,6 +3351,36 @@ function Profile({state,act,onDeleteProfile}) {
   useEffect(()=>{ setForm({username:profile.username || '', displayName:profile.displayName || '', bio:profile.bio || '', avatarId:profile.avatarId || 'default', selectedBadgeCode:profile.selectedBadgeCode || ''}); }, [profile.username, profile.displayName, profile.bio, profile.avatarId, profile.selectedBadgeCode]);
   const selected = avatars.find(a=>a.id===form.avatarId) || avatars[0] || {url:'/assets/avatars/default.svg', label:'Default Pilot'};
   const save = () => act('update_profile', form);
+  const submitPasswordChange = async (event) => {
+    event.preventDefault();
+    setPasswordError('');
+    setPasswordStatus('');
+    const oldPassword = passwordForm.oldPassword;
+    const newPassword = passwordForm.newPassword;
+    const confirmPassword = passwordForm.confirmPassword;
+    if (!oldPassword) {
+      setPasswordError('Enter your old password.');
+      return;
+    }
+    if (newPassword.length < 6) {
+      setPasswordError('New password must be at least 6 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('New password and confirmation do not match.');
+      return;
+    }
+    setPasswordBusy(true);
+    try {
+      const result = await onChangePassword?.({old_password:oldPassword, new_password:newPassword, confirm_password:confirmPassword});
+      setPasswordForm({oldPassword:'', newPassword:'', confirmPassword:''});
+      setPasswordStatus(result?.message || 'Password updated.');
+    } catch (ex) {
+      setPasswordError(String(ex.message || ex));
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
   const stats = profile.stats || {};
   const topLoops = [...(achievements.loops || [])].sort((a,b)=>(b.tierUnlocked-a.tierUnlocked)||(b.progress-a.progress)).slice(0,8);
   const badgeOptions = achievements.unlockedBadges || [];
@@ -2994,7 +3395,7 @@ function Profile({state,act,onDeleteProfile}) {
             <p>{form.bio || 'No status message set.'}</p>
           </div>
         </div>
-        <Stats pairs={{Level:state.player.level, XP:stats.xp || state.player.xp, Credits:stats.credits || state.player.credits, Galaxy:profile.homeGalaxy || '—', Location:profile.currentLocation || '—', Career:profile.currentJob?.name || '—', Ship:profile.currentShip?.name || profile.currentShip?.template_name || '—'}} />
+        <Stats pairs={{Level:state.player.level, XP:stats.xp || state.player.xp, Credits:stats.credits || state.player.credits, Galaxy:profile.homeGalaxy || '—', Location:profile.currentLocation || '—', Skill:profile.currentJob?.name || '—', Ship:profile.currentShip?.name || profile.currentShip?.template_name || '—'}} />
       </Panel>
 
       <Panel title="Edit Profile">
@@ -3004,6 +3405,16 @@ function Profile({state,act,onDeleteProfile}) {
           <label>Status / Bio<textarea value={form.bio} maxLength={180} onChange={e=>setForm(f=>({...f, bio:e.target.value}))} placeholder="Short pilot status" /></label>
           <button className="primary" onClick={save}><Save size={16}/> Save Profile</button>
         </div>
+      </Panel>
+      <Panel title="Change Password">
+        <form className="profileForm passwordChangeForm" onSubmit={submitPasswordChange}>
+          <label>Old Password<input value={passwordForm.oldPassword} type="password" autoComplete="current-password" onChange={e=>setPasswordForm(f=>({...f, oldPassword:e.target.value}))} /></label>
+          <label>New Password<input value={passwordForm.newPassword} type="password" autoComplete="new-password" minLength={6} onChange={e=>setPasswordForm(f=>({...f, newPassword:e.target.value}))} /></label>
+          <label>Confirm New Password<input value={passwordForm.confirmPassword} type="password" autoComplete="new-password" minLength={6} onChange={e=>setPasswordForm(f=>({...f, confirmPassword:e.target.value}))} /></label>
+          {passwordError && <div className="error">{passwordError}</div>}
+          {passwordStatus && <div className="ok passwordChangeStatus">{passwordStatus}</div>}
+          <button type="submit" className="primary" disabled={passwordBusy}><Lock size={16}/> {passwordBusy ? 'Updating...' : 'Update Password'}</button>
+        </form>
       </Panel>
       <Panel title="Danger Zone">
         <div className="profileDangerZone">
@@ -3018,7 +3429,7 @@ function Profile({state,act,onDeleteProfile}) {
     </div>
 
     {tab === 'overview' && <Grid>
-      <Panel title="Career Stats">
+      <Panel title="Skill Stats">
         <Stats pairs={{Travel:stats.travelEvents || 0, Combat:stats.combatEvents || 0, Mining:stats.miningEvents || 0, Salvage:stats.salvageEvents || 0, Exploration:stats.explorationEvents || 0, Crafting:stats.craftingEvents || 0, ShipPower:stats.shipPower || 0, Cargo:stats.cargo || 0}} />
       </Panel>
       <Panel title="Top Achievements">
@@ -3073,6 +3484,196 @@ function Profile({state,act,onDeleteProfile}) {
         </div>
       </div>
     </div>}
+  </Page>;
+}
+
+function SuggestionsForum({state, token}) {
+  const [scope,setScope] = useState('all');
+  const [status,setStatus] = useState('open');
+  const [sort,setSort] = useState('most_voted');
+  const [search,setSearch] = useState('');
+  const [query,setQuery] = useState('');
+  const [suggestions,setSuggestions] = useState([]);
+  const [isAdmin,setIsAdmin] = useState(!!state.user?.god_mode || String(state.user?.role || '').toLowerCase() === 'admin');
+  const [loading,setLoading] = useState(false);
+  const [error,setError] = useState('');
+  const [composer,setComposer] = useState({title:'', body:''});
+  const [commentDrafts,setCommentDrafts] = useState({});
+  const [expanded,setExpanded] = useState({});
+  const [submitting,setSubmitting] = useState(false);
+  const authHeaders = useMemo(() => ({
+    'Content-Type':'application/json',
+    Authorization:`Bearer ${token}`,
+  }), [token]);
+  const statusOptions = ['open','planned','in_progress','closed','rejected','duplicate'];
+  const reactionOptions = [
+    ['thumbs_up','👍'],
+    ['heart','💗'],
+    ['party','🎉'],
+    ['thinking','🤔'],
+    ['rocket','🚀'],
+  ];
+  const replaceSuggestion = (next) => {
+    if (!next?.id) return;
+    setSuggestions(list => list.map(s => Number(s.id) === Number(next.id) ? next : s));
+  };
+  const loadSuggestions = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    setError('');
+    try {
+      const params = new URLSearchParams({scope, status, sort, search:query});
+      const res = await fetch(`${API}/api/suggestions?${params.toString()}`, {headers:{Authorization:`Bearer ${token}`}});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Failed to load suggestions');
+      setSuggestions(data.suggestions || []);
+      setIsAdmin(!!data.isAdmin);
+    } catch (ex) {
+      setError(String(ex.message || ex));
+    } finally {
+      setLoading(false);
+    }
+  }, [token, scope, status, sort, query]);
+  useEffect(() => { loadSuggestions(); }, [loadSuggestions]);
+  const submitSuggestion = async (e) => {
+    e.preventDefault();
+    if (!composer.title.trim() || !composer.body.trim()) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      const res = await fetch(`${API}/api/suggestions`, {method:'POST', headers:authHeaders, body:JSON.stringify(composer)});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Failed to submit suggestion');
+      setComposer({title:'', body:''});
+      setSuggestions(list => [data.suggestion, ...list.filter(s => Number(s.id) !== Number(data.suggestion?.id))]);
+    } catch (ex) {
+      setError(String(ex.message || ex));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+  const suggestionAction = async (id, path, body, method='POST') => {
+    setError('');
+    try {
+      const res = await fetch(`${API}/api/suggestions/${id}/${path}`, {method, headers:authHeaders, body:JSON.stringify(body)});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.detail || 'Suggestion action failed');
+      replaceSuggestion(data.suggestion);
+      return data.suggestion;
+    } catch (ex) {
+      setError(String(ex.message || ex));
+      return null;
+    }
+  };
+  const vote = (s, value) => suggestionAction(s.id, 'vote', {value: Number(s.myVote) === value ? 0 : value});
+  const react = (s, reaction) => suggestionAction(s.id, 'react', {reaction});
+  const updateStatus = (s, nextStatus) => suggestionAction(s.id, 'status', {status: nextStatus}, 'PATCH');
+  const addComment = async (s) => {
+    const body = String(commentDrafts[s.id] || '').trim();
+    if (!body) return;
+    const next = await suggestionAction(s.id, 'comments', {body});
+    if (next) setCommentDrafts(d => ({...d, [s.id]:''}));
+  };
+  const submitSearch = (e) => {
+    e.preventDefault();
+    setQuery(search.trim());
+  };
+  const age = (value) => {
+    const ms = Date.now() - new Date(value || Date.now()).getTime();
+    if (!Number.isFinite(ms) || ms < 60000) return 'just now';
+    const mins = Math.floor(ms / 60000);
+    if (mins < 60) return `${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 48) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 60) return `${days}d ago`;
+    const months = Math.floor(days / 30);
+    return `${months}mo ago`;
+  };
+  return <Page title="Suggestions" sub="Player-submitted ideas with voting, comments, and admin-only status tracking.">
+    <section className="suggestionsBoard">
+      <div className="suggestionsToolbar">
+        <div className="suggestionsScopeTabs" role="tablist" aria-label="Suggestion views">
+          <button className={scope==='all'?'active':''} onClick={()=>setScope('all')}>All</button>
+          <button className={scope==='mine'?'active':''} onClick={()=>setScope('mine')}>Mine</button>
+          <button className={scope==='top'?'active':''} onClick={()=>{ setScope('top'); setSort('top_rated'); }}>Top Rated</button>
+        </div>
+        <form className="suggestionsSearch" onSubmit={submitSearch}>
+          <Search size={17}/>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search suggestions..." />
+        </form>
+        <div className="suggestionsFilters">
+          <label><Filter size={14}/> Status<select value={status} onChange={e=>setStatus(e.target.value)}>
+            <option value="open">Open</option>
+            <option value="all">All</option>
+            {statusOptions.filter(x=>x !== 'open').map(x=><option key={x} value={x}>{label(x)}</option>)}
+          </select></label>
+          <label>Sort<select value={sort} onChange={e=>setSort(e.target.value)}>
+            <option value="most_voted">Most Voted</option>
+            <option value="recent">Newest</option>
+            <option value="most_discussed">Most Discussed</option>
+          </select></label>
+        </div>
+      </div>
+
+      <Panel title="Submit Suggestion">
+        <form className="suggestionComposer" onSubmit={submitSuggestion}>
+          <input value={composer.title} maxLength={140} onChange={e=>setComposer(f=>({...f, title:e.target.value}))} placeholder="Suggestion title" />
+          <textarea value={composer.body} maxLength={4000} onChange={e=>setComposer(f=>({...f, body:e.target.value}))} placeholder="Describe the problem, idea, or improvement..." />
+          <button className="primary" disabled={submitting || !composer.title.trim() || !composer.body.trim()}><Plus size={16}/>{submitting ? 'Posting...' : 'Post Suggestion'}</button>
+        </form>
+      </Panel>
+
+      {error && <div className="error suggestionError">{error}</div>}
+      {loading && <div className="suggestionEmpty">Loading suggestions...</div>}
+      {!loading && !suggestions.length && <div className="suggestionEmpty">No suggestions match this view yet.</div>}
+      <div className="suggestionList">
+        {suggestions.map(s => {
+          const isExpanded = !!expanded[s.id];
+          const body = s.body || '';
+          const needsTrim = body.length > 260;
+          const visibleBody = !needsTrim || isExpanded ? body : `${body.slice(0, 260).trim()}...`;
+          return <article key={s.id} className={`suggestionCard status-${s.status}`}>
+            <div className="suggestionVoteRail">
+              <button className={s.myVote > 0 ? 'active' : ''} onClick={()=>vote(s, 1)} title="Upvote"><ArrowUp size={18}/></button>
+              <b>{fmt(s.voteScore)}</b>
+              <button className={s.myVote < 0 ? 'active' : ''} onClick={()=>vote(s, -1)} title="Downvote"><ArrowDown size={18}/></button>
+            </div>
+            <div className="suggestionMain">
+              <header className="suggestionHeader">
+                <ProfileAvatar profile={s.author} size="sm" />
+                <div>
+                  <h3>{s.title}</h3>
+                  <span>{s.author?.displayName || 'Pilot'} <small>{age(s.createdAt)}</small></span>
+                </div>
+                <em className={`suggestionStatus status-${s.status}`}>{label(s.status)}</em>
+              </header>
+              <p className="suggestionBody">{visibleBody}</p>
+              {needsTrim && <button className="suggestionReadMore" onClick={()=>setExpanded(v=>({...v, [s.id]:!isExpanded}))}>{isExpanded ? 'Show less' : 'Read more'}</button>}
+              <div className="suggestionMetaRow">
+                <div className="suggestionReactions">
+                  {reactionOptions.map(([key, icon]) => <button key={key} className={(s.myReactions || []).includes(key) ? 'active' : ''} onClick={()=>react(s, key)}>{icon} <span>{fmt((s.reactions || {})[key] || 0)}</span></button>)}
+                </div>
+                <span className="suggestionCommentCount"><MessageCircle size={14}/>{fmt(s.commentsCount || 0)}</span>
+                {isAdmin && <label className="suggestionAdminStatus">Admin Status<select value={s.status} onChange={e=>updateStatus(s, e.target.value)}>
+                  {statusOptions.map(x=><option key={x} value={x}>{label(x)}</option>)}
+                </select></label>}
+              </div>
+              <div className="suggestionComments">
+                {(s.comments || []).map(c => <div key={c.id} className="suggestionComment">
+                  <ProfileAvatar profile={c.author} size="tiny" />
+                  <div><b>{c.author?.displayName || 'Pilot'}</b><p>{c.body}</p><small>{age(c.createdAt)}</small></div>
+                </div>)}
+                <div className="suggestionCommentComposer">
+                  <input value={commentDrafts[s.id] || ''} maxLength={1200} onChange={e=>setCommentDrafts(d=>({...d, [s.id]:e.target.value}))} placeholder="Add a comment..." />
+                  <button onClick={()=>addComment(s)} disabled={!String(commentDrafts[s.id] || '').trim()}><Send size={15}/> Reply</button>
+                </div>
+              </div>
+            </div>
+          </article>;
+        })}
+      </div>
+    </section>
   </Page>;
 }
 
@@ -3282,7 +3883,9 @@ function TradeModal({trade,state,act,onClose}) {
 
 function StarMap({state,act,clock,mapFocus,autoExploreMode='',autoExploreLastMode='pirate',autoExploreStatus='',onToggleAutoExploreMode=null,dialogs}) {
   const travel = state.travel_state || {};
-  const preferredMode = travel.active && ['galaxy', 'galaxy_route'].includes(String(travel.mode || '')) ? 'galaxy' : travel.open_space && travel.open_space_map_type === 'galaxy' ? 'galaxy' : 'system';
+  const travelMode = String(travel.mode || '').toLowerCase();
+  const routePhase = String(travel.route_phase || '').toLowerCase();
+  const preferredMode = travel.active && (travelMode === 'galaxy' || (travelMode === 'galaxy_route' && routePhase !== 'wait')) ? 'galaxy' : travel.open_space && travel.open_space_map_type === 'galaxy' ? 'galaxy' : 'system';
   const [mode,setMode] = useState(preferredMode);
   const [viewGalaxyId,setViewGalaxyId] = useState(null);
   useEffect(() => { setMode(preferredMode); if (preferredMode === 'galaxy') setViewGalaxyId(null); }, [preferredMode, state.location?.planet_id, state.location?.galaxy_id]);
@@ -3334,11 +3937,12 @@ function Galaxies({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocus
         onPilotTrade={(p)=>act('trade_invite',{playerId:p.playerId})}
         onPilotParty={(p)=>act('party_invite',{playerId:p.playerId})}
         onPilotBlock={(p)=>act('social_block_player',{playerId:p.playerId})}
+        onGatheringMinigame={(event,payload)=>act(event === 'bonus' ? 'earn_gathering_minigame_bonus' : 'gathering_minigame_presence', payload, {silent:true, skipRefresh:true})}
 currentId={map.current_galaxy_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} onViewGalaxy={onViewGalaxy} focusTarget={mapFocus} party={state.party} publicProfiles={state.public_profiles || []} missionCooldown={state.planet_missions?.cooldown || null} />
       <div className="routeLegend"><span className="solid">Visited route</span><span className="dash">Available route</span><span className="activeLine">Active travel</span><span>Ship marker follows backend timestamp progress.</span></div>
     </Panel>
     <div className="cards3">{map.nodes.map(g => <Panel key={g.id} title={g.name}>
-      <div className="nodeHeader"><ItemVisual item={g} size="ship"/><div><b>{g.sector}</b><span>{g.faction_name || 'Neutral'} control • {g.capturable ? 'Capturable' : 'Home safe'} • Center value {fmt(g.center_value || 0)}</span></div></div>
+      <div className="nodeHeader"><div className="itemVisual ship"><GameImage src={g.image_url} assetType="galaxy" category={`${g.name || ''} ${g.sector || ''} ${g.faction_name || ''}`} alt={g.name || 'Galaxy'} /></div><div><b>{g.sector}</b><span>{g.faction_name || 'Neutral'} control • {g.capturable ? 'Capturable' : 'Home safe'} • Center value {fmt(g.center_value || 0)}</span></div></div>
       <Stats pairs={{Locations:g.planet_count, Gates:g.gate_count, SecurityAvg:g.security_avg, Market:g.market_activity_avg, Conflict:g.conflict_avg, Bonus:`${g.control_bonus_pct||0}%`}} />
       <div className="galaxyCardButtons"><button onClick={()=>onViewGalaxy?.(g)}>View</button>{g.current ? <button disabled>Current Galaxy</button> : <button disabled={travel.active} onClick={()=>act('galaxy_travel',{galaxy_id:g.id})}>Jump via Gate</button>}</div>
       <small className="muted">{g.declare_reason || 'Planet wars happen from Planet View. Galaxy flips after all planets are controlled.'}</small>
@@ -3351,15 +3955,15 @@ function SystemMap({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocu
   const travel = state.travel_state || {};
   const activeMission = state.planet_missions?.active;
   if (activeMission) {
-    return <Page title="Map — Mission View" sub="You are away from the ship on a planet mission. The local map returns after completion or cancellation.">
+    return <Page title="Map — Mission View" sub="You are away from the ship on a planet mission. The map returns after completion or cancellation.">
       <MissionScreen state={state} act={act} clock={clock} dialogs={dialogs} />
     </Page>;
   }
-  return <Page title="Map — System View" sub="Planet view shows local planets, stations, pirate stations, resources, and galaxy gates leading to adjacent galaxies.">
+  return <Page title="Map — System View" sub="Planet view shows planets, uninhabitable planets, resources, traffic, and galaxy gates leading to adjacent galaxies.">
     <TravelStatus state={state} clock={clock} />
     <CargoOperationPanel state={state} act={act} />
     <MapOperationPanel state={state} clock={clock} />
-    <Panel title={`${state.location?.galaxy_name || 'Current Galaxy'} Local Map`} help="Planet/station nodes expose security, stability, faction control, market strength, operation count, and route danger.">
+    <Panel title={`${state.location?.galaxy_name || 'Current Galaxy'} Map`} help="Planet nodes expose security, stability, faction control, market strength, operation count, and route danger.">
       <MapView state={state} type="system" map={map} travel={travel}
         onTravel={(node)=>node.kind === 'gate' ? act('galaxy_travel',{galaxy_id:node.target_galaxy_id}) : act('travel',{planet_id:node.id,dock:true})}
         onGoHere={(pos)=>act('go_here',{...pos,map_type:'system'})}
@@ -3383,6 +3987,7 @@ function SystemMap({state,act,clock,mapMode,onMapModeChange,onViewGalaxy,mapFocu
         onPilotTrade={(p)=>act('trade_invite',{playerId:p.playerId})}
         onPilotParty={(p)=>act('party_invite',{playerId:p.playerId})}
         onPilotBlock={(p)=>act('social_block_player',{playerId:p.playerId})}
+        onGatheringMinigame={(event,payload)=>act(event === 'bonus' ? 'earn_gathering_minigame_bonus' : 'gathering_minigame_presence', payload, {silent:true, skipRefresh:true})}
 currentId={map.current_planet_id} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} onViewGalaxy={onViewGalaxy} focusTarget={mapFocus} party={state.party} publicProfiles={state.public_profiles || []} missionCooldown={state.planet_missions?.cooldown || null} autoExploreMode={autoExploreMode} autoExploreLastMode={autoExploreLastMode} autoExploreStatus={autoExploreStatus} onToggleAutoExploreMode={onToggleAutoExploreMode} />
       <div className="routeLegend"><span className="solid">Visited local route</span><span className="dash">Available local route</span><span className="activeLine">Active local travel</span></div>
     </Panel>
@@ -3431,14 +4036,14 @@ function RemoteSystemMap({state,act,clock,galaxyId,onBack,mapMode,onMapModeChang
   const map = {nodes, lanes:[], traffic, current_galaxy_id:Number(galaxyId), remote:true, summary:{radar_range_pct:partyMembers.length ? 22 : 0, radar_center_x_pct:partyMembers[0]?.position?.system_x_pct || 50, radar_center_y_pct:partyMembers[0]?.position?.system_y_pct || 50}};
   return <Page title={`Map — ${galaxy.name || 'Remote Galaxy'} View`} sub="Remote local view shows planets only unless a party member provides radar coverage there.">
     <button onClick={onBack}>Back to Current Galaxy</button>
-    <Panel title={`${galaxy.name || 'Remote Galaxy'} Local Map`} help="You are not physically here. Party members act as radar relays.">
+    <Panel title={`${galaxy.name || 'Remote Galaxy'} Map`} help="You are not physically here. Party members act as radar relays.">
       <MapView state={state} type="system" map={map} travel={{}} onTravel={()=>{}} onGoHere={()=>{}} onCancelTravel={()=>{}} onScanArea={()=>{}} onIntercept={()=>{}} onResolveIntercept={()=>{}} onPilotTrade={(p)=>act('trade_invite',{playerId:p.playerId})} onPilotParty={(p)=>act('party_invite',{playerId:p.playerId})} onPilotBlock={(p)=>act('social_block_player',{playerId:p.playerId})} currentId={null} clock={clock} mapMode={mapMode} onMapModeChange={onMapModeChange} onViewGalaxy={onViewGalaxy} focusTarget={mapFocus} party={state.party} publicProfiles={state.public_profiles || []} missionCooldown={null} />
     </Panel>
   </Page>;
 }
 
 
-function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs}) {
+function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs,eventOnly=false}) {
   const phase = state.phase_expansion || {};
   const [tab,setTab] = useState('events');
   const events = useMemo(
@@ -3464,9 +4069,9 @@ function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs}) 
   const bonuses = phase.artifactBonuses || {};
   const eventTypes = ['alien_raid','wormhole_control','convoy_breakthrough','mining_surge','derelict_armada','warfront_surge'];
 
-  const scan = async () => {
-    const x = Number(await dialogs.textInput('Scan X percent', '50', {title:'Scan Area', inputLabel:'X percent'})) || 50;
-    const y = Number(await dialogs.textInput('Scan Y percent', '50', {title:'Scan Area', inputLabel:'Y percent'})) || 50;
+  const launchProbe = async () => {
+    const x = Number(await dialogs.textInput('Probe X percent', '50', {title:'Launch Probe', inputLabel:'X percent'})) || 50;
+    const y = Number(await dialogs.textInput('Probe Y percent', '50', {title:'Launch Probe', inputLabel:'Y percent'})) || 50;
     act('scan_area', {map_type:'system', x_pct:x, y_pct:y});
   };
   const contribute = async () => {
@@ -3484,6 +4089,18 @@ function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs}) 
     const qty = Number(await dialogs.textInput('Quantity', '10', {title:'Start Refinery Job', inputLabel:'Quantity'})) || 10;
     act('start_refinery_job', {input_code:input_code || 'ore', qty});
   };
+
+  if (eventOnly) {
+    return <Page title="Events" sub="Server and scheduled events only.">
+      <Panel title="Active / Starting Soon">
+        {[...active, ...warning].map(e=><ServerEventRow key={e.id} event={e} onOpenMap={openServerEventOnMap} />)}
+        {![...active,...warning].length && <p className="muted">No active event or two-hour warning currently.</p>}
+      </Panel>
+      <Panel title="Upcoming Event Calendar">
+        <div className="eventGrid">{scheduled.map(e=><ServerEventCard key={e.id} event={e} />)}</div>
+      </Panel>
+    </Page>;
+  }
 
   return <Page title="Server Calendar" sub="Server events, bounties, wormholes, derelicts, artifacts, refining, contracts, fuel, and weekly event ladder.">
     <div className="phaseHeroGrid">
@@ -3508,7 +4125,7 @@ function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs}) 
       <button className={tab==='contracts'?'active':''} onClick={()=>setTab('contracts')}>Enemy Contracts</button>
       <button className={tab==='bounties'?'active':''} onClick={()=>setTab('bounties')}>Bounty Board</button>
       <button className={tab==='wormhole'?'active':''} onClick={()=>setTab('wormhole')}>Wormhole Control</button>
-      <button className={tab==='exploration'?'active':''} onClick={()=>setTab('exploration')}>Scans / Derelicts / Artifacts</button>
+      <button className={tab==='exploration'?'active':''} onClick={()=>setTab('exploration')}>Probes / Derelicts / Artifacts</button>
       <button className={tab==='industry'?'active':''} onClick={()=>setTab('industry')}>Refining</button>
       <button className={tab==='war'?'active':''} onClick={()=>setTab('war')}>War Supply</button>
       {state.user.god_mode && <button className={tab==='admin'?'active':''} onClick={()=>setTab('admin')}>Admin Events</button>}
@@ -3564,8 +4181,8 @@ function ServerCalendar({state,act,clock,setPage,openServerEventOnMap,dialogs}) 
     </>}
 
     {tab === 'exploration' && <>
-      <Panel title="Probe Scan" help="Scan outside radar to create 30-second category blips. Scanner/counter-scanner math is clamped between 20% and 80% certainty.">
-        <div className="buttonRow"><button onClick={scan}>Scan Area</button><button onClick={()=>setPage?.('Map')}>Open Map</button></div>
+      <Panel title="Probe Launcher" help="Send probes outside radar to create 30-second category blips. Object scans still use scanner/counter-scanner math clamped between 20% and 80% certainty.">
+        <div className="buttonRow"><button onClick={launchProbe}>Launch Probe</button><button onClick={()=>setPage?.('Map')}>Open Map</button></div>
         <div className="blipGrid">{blips.map(b=><div className={`blipCard ${b.category}`} key={b.id}><b>{label(b.category)} Blip</b><span>{fmt(b.x_pct)}%, {fmt(b.y_pct)}%</span><small>Expires {clockTimeLeft(b.expires_at)}</small></div>)}</div>
       </Panel>
       <Panel title="Derelict Sites" help="Derelicts are scan/discovery objects. Exploration is shorter than planet exploration and pays about 85% of comparable rewards.">
@@ -3625,8 +4242,11 @@ function ServerEventCard({event}) {
   return <div className={`serverEventCard ${event.event_type}`}><b>{event.name}</b><span>{new Date(event.starts_at).toLocaleString()}</span><small>{label(event.schedule_type)} • {label(event.status)}</small><p>{event.rewards?.rareEquipment ? 'Rare equipment chance. ' : ''}{event.rewards?.artifactChance ? 'Artifact chance. ' : ''}{event.rewards?.fuelVouchers ? 'Fuel vouchers. ' : ''}</p></div>
 }
 
-function Market({state,act,dialogs}) {
-  const [tab,setTab] = useState('legal');
+function Market({state,act,dialogs,initialTab='goods',planetMode=false}) {
+  const [tab,setTab] = useState(initialTab || 'goods');
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
   const [category,setCategory] = useState('all');
   const [query,setQuery] = useState('');
   const [listingQuery,setListingQuery] = useState('');
@@ -3637,8 +4257,7 @@ function Market({state,act,dialogs}) {
   const [storagePlanet,setStoragePlanet] = useState('all');
   const [depositQuery,setDepositQuery] = useState('');
   const [depositCategory,setDepositCategory] = useState('all');
-  const legalGoods = state.market.filter(m=>m.legal);
-  const illicitGoods = [];
+  const goods = state.market.filter(m=>m.legal);
   const inventory = state.inventory_summary || [];
   const categories = [['all','All'], ...Object.entries(state.inventory_categories || {})];
   const sellable = inventory.filter(i => i.sellable !== false && i.available_qty > 0 && (category === 'all' || i.category === category) && `${i.name} ${i.item_code} ${i.category_label}`.toLowerCase().includes(query.toLowerCase()));
@@ -3663,7 +4282,6 @@ function Market({state,act,dialogs}) {
     act('store_item', payload);
   };
   const buyListing = (listing, qty=1) => {
-    if (!listing.can_trade_here) return;
     const safeQty = Math.max(1, Math.min(qty, listing.remaining_qty || 1));
     act('buy_player_listing', {listing_id:listing.id, qty:safeQty});
   };
@@ -3701,19 +4319,20 @@ function Market({state,act,dialogs}) {
   }, [storage.stored, storageQuery, storageGalaxy, storagePlanet]);
   const depositCandidates = (storage.depositCandidates || []).filter(i => i.sellable !== false && (depositCategory === 'all' || i.category === depositCategory) && `${i.name} ${i.item_code} ${i.category_label}`.toLowerCase().includes(depositQuery.toLowerCase()));
 
-  return <Page title="Commodities Market" sub="Station trade is local. Illicit goods are removed. Trade goods are station-market cargo only; player listings are galaxy-scoped.">
+  const tabs = planetMode ? ['goods', 'sell', 'storage'] : ['auction', 'activity'];
+  return <Page title={planetMode ? "NPC Goods Market" : "Auction"} sub={planetMode ? "Docked station goods, Sell Inventory, and planet storage. Auction stays global in the left navigation." : "Global player listings. Purchases are delivered to storage on the listing planet."}>
     <div className="tabBar">
-      <button className={tab==='legal'?'active':''} onClick={()=>setTab('legal')}>Legal Goods</button>
-      <button className={tab==='sell'?'active':''} onClick={()=>setTab('sell')}>Sell Inventory</button>
-      <button className={tab==='player'?'active':''} onClick={()=>setTab('player')}>Galaxy Player Market</button>
-      <button className={tab==='storage'?'active':''} onClick={()=>setTab('storage')}>Planet Storage</button>
-      <button className={tab==='activity'?'active':''} onClick={()=>setTab('activity')}>Market Activity</button>
+      {tabs.includes('goods') && <button className={tab==='goods'?'active':''} onClick={()=>setTab('goods')}>Goods</button>}
+      {tabs.includes('sell') && <button className={tab==='sell'?'active':''} onClick={()=>setTab('sell')}>Sell Inventory</button>}
+      {tabs.includes('auction') && <button className={tab==='auction'?'active':''} onClick={()=>setTab('auction')}>Auction</button>}
+      {tabs.includes('storage') && <button className={tab==='storage'?'active':''} onClick={()=>setTab('storage')}>Planet Storage</button>}
+      {tabs.includes('activity') && <button className={tab==='activity'?'active':''} onClick={()=>setTab('activity')}>Market Activity</button>}
     </div>
 
     <JailHeatPanel state={state} act={act} />
     <CargoOperationPanel state={state} act={act} />
 
-    {(tab === 'legal' || tab === 'illicit') && <>
+    {tab === 'goods' && <>
       <Panel title="Cargo Usage" help="Buying market goods uses backend cargo capacity checks. Trade goods are for station markets and cannot be exploited through player-market listing.">
         <Stats pairs={{Used:state.cargo_usage?.total ?? state.player.cargo, Free:state.cargo_usage?.free ?? Math.max(0,state.player.max_cargo-state.player.cargo), Max:state.cargo_usage?.max ?? state.player.max_cargo, MarketCargo:state.cargo_usage?.market_mass ?? 0, Inventory:state.cargo_usage?.inventory_mass ?? 0, Modules:state.cargo_usage?.module_mass ?? 0, Pending:state.cargo_usage?.pending_mass ?? 0}} />
         <Progress value={((state.cargo_usage?.total ?? state.player.cargo) / Math.max(1, state.cargo_usage?.max ?? state.player.max_cargo))*100} danger={state.cargo_usage?.over_capacity} />
@@ -3722,8 +4341,7 @@ function Market({state,act,dialogs}) {
       <MarketPressure state={state} />
     </>}
 
-    {tab === 'legal' && <Panel title="Legal Goods" help="Station trade goods are legal cargo. Same-galaxy arbitrage is intentionally low; cross-galaxy routes are the profit layer."><MarketTable rows={legalGoods} act={act} /></Panel>}
-    {tab === 'illicit' && <Panel title="Illicit Goods" help="Illicit goods pay better but raise heat and can cause jail. Risk scales with item severity, quantity, security, stability, heat, ship stealth, and skills."><MarketTable rows={illicitGoods} act={act} illegal /></Panel>}
+    {tab === 'goods' && <Panel title="Goods" help="Station goods are NPC market cargo. Same-galaxy arbitrage is intentionally low; cross-galaxy routes are the profit layer."><MarketTable rows={goods} act={act} /></Panel>}
 
     {tab === 'sell' && <>
       <Panel title="Inventory Filters">
@@ -3732,12 +4350,12 @@ function Market({state,act,dialogs}) {
           <div className="chipRow">{categories.map(([key,name])=><button key={key} className={category===key?'active':''} onClick={()=>setCategory(key)}>{name}</button>)}</div>
         </div>
       </Panel>
-      <Panel title="Sell Inventory" help="Selling legal items restocks the local market with no risk. Listing on the player market creates a current-galaxy listing.">
+      <Panel title="Sell Inventory" help="Selling items restocks the local market with no risk. Use Auction from the left navigation for global player listings.">
         <table><thead><tr><th>Item</th><th>Category</th><th>Status</th><th>Qty</th><th>Mass</th><th>Value</th><th>Risk</th><th></th></tr></thead><tbody>
           {sellable.map(i=><tr key={`${i.source}-${i.id}-${i.item_code}`}>
             <td><div className="itemNameCell"><ItemVisual item={i} /><div><b>{i.name}</b><br/><small>{i.description || i.item_code}</small></div></div></td>
             <td>{i.category_label || label(i.category)}</td>
-            <td className={i.legal?'ok':'bad'}>{i.legal?'Legal':'Illegal'} • {label(i.rarity || 'common')} <TierBadge item={i}/></td>
+            <td className={i.legal?'ok':'bad'}>{i.legal?'Goods':'Restricted'} • {label(i.rarity || 'common')} <TierBadge item={i}/></td>
             <td>{fmt(i.available_qty)}</td>
             <td>{fmt(i.cargo_mass)}</td>
             <td>{fmt(i.market_sell_estimate?.unit || i.base_value)}</td>
@@ -3748,15 +4366,15 @@ function Market({state,act,dialogs}) {
       </Panel>
     </>}
 
-    {tab === 'player' && <>
-      <Panel title="Galaxy Player Market Rules">
+    {tab === 'auction' && <>
+      <Panel title="Auction Rules">
         <div className="rulesExplainer compactRules">
-          <p className="rulesLead">You can window-shop across every galaxy, but trades are local. Travel to the listing galaxy before buying, cancelling, or creating listings there.</p>
+          <p className="rulesLead">Auction listings are visible and purchasable globally. Purchased items are delivered to storage on the planet where the seller listed them.</p>
         </div>
-        <Stats pairs={{CurrentGalaxy:playerMarket.scope?.galaxy_name || 'Unknown', CurrentPlanet:playerMarket.scope?.planet_name || state.location?.name, ActiveListings:playerMarket.active.length, LocalListings:(playerMarket.active || []).filter(x=>x.can_trade_here).length, RemoteListings:(playerMarket.active || []).filter(x=>!x.can_trade_here).length, ListingFee:`${Math.round((playerMarket.balance?.listing_fee_rate || 0)*1000)/10}%`, SaleFee:`${Math.round((playerMarket.balance?.sale_fee_rate || 0)*1000)/10}%`}} />
-        <div className="marketScopeNotice">Remote galaxy listings are read-only until you travel to that galaxy.</div>
+        <Stats pairs={{CurrentGalaxy:playerMarket.scope?.galaxy_name || 'Unknown', CurrentPlanet:playerMarket.scope?.planet_name || state.location?.name, ActiveListings:playerMarket.active.length, ListingFee:`${Math.round((playerMarket.balance?.listing_fee_rate || 0)*1000)/10}%`, SaleFee:`${Math.round((playerMarket.balance?.sale_fee_rate || 0)*1000)/10}%`}} />
+        <div className="marketScopeNotice">Delivery planet is fixed by the listing origin, not your current location.</div>
       </Panel>
-      <Panel title="Search Player Listings">
+      <Panel title="Search Auction Listings">
         <div className="inventoryToolbar galaxyMarketFilters">
           <input value={listingQuery} onChange={e=>setListingQuery(e.target.value)} placeholder="Search item, seller, planet, galaxy..." />
           <select value={listingGalaxy} onChange={e=>setListingGalaxy(e.target.value)}>
@@ -3768,19 +4386,19 @@ function Market({state,act,dialogs}) {
           </select>
         </div>
       </Panel>
-      <Panel title="Active Player Listings">
+      <Panel title="Active Auction Listings">
         <table><thead><tr><th>Item</th><th>Seller</th><th>Galaxy / Planet</th><th>Status</th><th>Qty</th><th>Unit</th><th>Total</th><th></th></tr></thead><tbody>
-          {filteredListings.map(l=><tr key={l.id} className={!l.can_trade_here ? 'rowMuted remoteMarketRow' : ''}>
+          {filteredListings.map(l=><tr key={l.id} >
             <td><div className="itemNameCell"><ItemVisual item={l} /><div><b>{l.item_name}</b><br/><small>{l.description || l.item_code}</small></div></div></td>
-            <td>{l.seller_name}<br/><small>{l.own_listing ? 'Your listing' : 'Player listing'}</small></td>
-            <td><b>{l.galaxy_name || 'Unknown Galaxy'}</b><br/><small>{l.planet_name || 'Unknown origin'} {l.can_trade_here ? '• Current galaxy' : '• Remote view only'}</small></td>
-            <td className={l.legal?'ok':'bad'}>{l.legal?'Legal':'Illegal'} • {label(l.category)} • {label(l.rarity || 'common')} <TierBadge item={l}/></td>
+            <td>{l.seller_name}<br/><small>{l.own_listing ? 'Your listing' : 'Auction listing'}</small></td>
+            <td><b>{l.galaxy_name || 'Unknown Galaxy'}</b><br/><small>{l.planet_name || 'Unknown origin'} delivery</small></td>
+            <td className={l.legal?'ok':'bad'}>{l.legal?'Goods':'Restricted'} • {label(l.category)} • {label(l.rarity || 'common')} <TierBadge item={l}/></td>
             <td>{fmt(l.remaining_qty)} / {fmt(l.qty)}</td>
             <td>{fmt(l.unit_price)}</td>
             <td>{fmt((l.remaining_qty || 0) * (l.unit_price || 0))}</td>
-            <td>{l.own_listing ? <button disabled={!l.can_trade_here} className="hasHoverTooltip" data-tooltip={!l.can_trade_here ? 'Travel to this listing galaxy before cancelling this listing.' : ''} onClick={()=>act('cancel_player_listing',{listing_id:l.id})}>Cancel</button> : <><button disabled={!l.can_trade_here} className="hasHoverTooltip" data-tooltip={!l.can_trade_here ? 'This listing is in another galaxy. Travel there before buying.' : ''} onClick={()=>buyListing(l,1)}>Buy 1</button><button disabled={!l.can_trade_here} onClick={()=>buyListing(l,Math.min(5,l.remaining_qty || 1))}>Buy 5</button><button disabled={!l.can_trade_here} onClick={()=>buyListing(l,l.remaining_qty || 1)}>Buy All</button></>}</td>
+            <td>{l.own_listing ? <button onClick={()=>act('cancel_player_listing',{listing_id:l.id})}>Cancel</button> : <><button onClick={()=>buyListing(l,1)}>Buy 1</button><button onClick={()=>buyListing(l,Math.min(5,l.remaining_qty || 1))}>Buy 5</button><button onClick={()=>buyListing(l,l.remaining_qty || 1)}>Buy All</button></>}</td>
           </tr>)}
-          {!filteredListings.length && <tr><td colSpan="8">No player listings match the current filters.</td></tr>}
+          {!filteredListings.length && <tr><td colSpan="8">No auction listings match the current filters.</td></tr>}
         </tbody></table>
       </Panel>
       <Panel title="My Listing History">
@@ -3861,7 +4479,7 @@ function MarketTable({rows,act,illegal}) {
     const cooldown = risk.blockedReason;
     return <tr key={m.commodity_id} className={out?'rowMuted':''}>
       <td><div className="itemNameCell"><ItemVisual item={m} /><div><b>{m.name}</b><br/><small>{m.description}</small></div></div></td>
-      <td className={m.legal?'ok':'bad'}>{m.legal?'LEGAL':'ILLICIT'} • {label(m.category)} <TierBadge item={m}/></td>
+      <td className={m.legal?'ok':'bad'}>{m.legal?'Goods':'Restricted'} • {label(m.category)} <TierBadge item={m}/></td>
       <td><PressureBadge item={m}/></td>
       <td><Progress value={stockPct}/><small>{out ? 'Out of Stock • 0%' : `${stockPct}% • ${label(m.supplyRating)}`}</small></td>
       <td><Progress value={m.demand}/><small>{m.demand}% • {label(m.demandRating)}</small></td>
@@ -3875,10 +4493,10 @@ function MarketTable({rows,act,illegal}) {
 function JailHeatPanel({state,act}) {
   const h = state.heat_jail || {};
   if (!h || (h.heat === 0 && !h.jailed && !h.illegalActionCooldownUntil)) return null;
-  return <Panel title="Heat / Jail Status" help="Heat is created only by illegal activity. Legal trade never raises heat. Heat decays slowly server-side.">
+  return <Panel title="Heat / Jail Status" help="Heat is created only by restricted activity. Goods trade never raises heat. Heat decays slowly server-side.">
     <div className={`jailHeatPanel ${h.jailed ? 'jailed' : ''}`}>
       <div className="heatBlock"><b>Heat</b><Progress value={h.heat || 0} danger={(h.heat||0)>=40}/><span>{fmt(h.heat)} / 100 • {label(h.heatLevel || 'cold')}</span></div>
-      {h.illegalActionCooldownUntil && <div className="cooldownBlock"><b>Illegal Cooldown</b><span>{clockTimeLeft(h.illegalActionCooldownUntil)} remaining</span></div>}
+      {h.illegalActionCooldownUntil && <div className="cooldownBlock"><b>Restricted Cooldown</b><span>{clockTimeLeft(h.illegalActionCooldownUntil)} remaining</span></div>}
       {h.jailed && <div className="jailBlock"><b>JAILED</b><span>{h.jailReason}</span><small>{h.jailLocation} • {label(h.jailSeverity)} • {clockTimeLeft(h.jailedUntil)} remaining</small><div className="buttonRow"><button disabled={!h.bribe?.available} onClick={()=>act('attempt_bribe')}>Bribe {fmt(h.bribe?.cost || 0)}</button><button disabled={!h.breakout?.available} onClick={()=>act('attempt_breakout')}>Breakout {fmt(h.breakout?.chance || 0)}%</button></div>{h.breakoutCooldownUntil && <small>Breakout cooldown: {clockTimeLeft(h.breakoutCooldownUntil)}</small>}</div>}
     </div>
   </Panel>;
@@ -3988,7 +4606,7 @@ function Inventory({state,act,dialogs}) {
   const depositCargoCandidates = (storage.depositCandidates || [])
     .filter(i => i.sellable !== false && (cargoDepositCategory === 'all' || i.category === cargoDepositCategory) && `${i.name} ${i.item_code} ${i.category_label}`.toLowerCase().includes(cargoDepositQuery.toLowerCase()))
     .slice(0, 80);
-  return <Page title="Inventory" sub="Unified cargo, loose inventory, materials, modules, consumables, illegal goods, market listing readiness, and item inspection.">
+  return <Page title="Inventory" sub="Unified cargo, loose inventory, materials, modules, consumables, restricted goods, market listing readiness, and item inspection.">
     <Panel title="Cargo Capacity">
       <Stats pairs={{Used:state.cargo_usage?.total ?? 0, Free:state.cargo_usage?.free ?? 0, Max:state.cargo_usage?.max ?? 0, Full:`${Math.round(cargoPct)}%`, Value:totals.value, Reserved:totals.reserved}} />
       <Progress value={cargoPct} danger={state.cargo_usage?.over_capacity || cargoPct >= 95} />
@@ -4058,7 +4676,7 @@ function Inventory({state,act,dialogs}) {
         <div className="inventoryStats"><small>Avail</small><b>{fmt(i.available_qty)}</b></div>
         <div className="inventoryStats"><small>Mass</small><b>{fmt(i.cargo_mass)}</b></div>
         <div className="inventoryStats"><small>Value</small><b>{fmt(i.total_value || i.base_value)}</b></div>
-        <div className="inventoryFlags"><span className={i.legal?'ok':'bad'}>{i.legal?'Legal':'Illegal'}</span><span className={`rarityBadge ${i.rarity || 'common'}`}>{label(i.rarity || 'common')}</span><TierBadge item={i}/><span>{i.source}</span>{i.reserved_qty > 0 && <span className="warn">Reserved {fmt(i.reserved_qty)}</span>}{i.used_in_recipe_count > 0 && <span>Used in {i.used_in_recipe_count} recipes</span>}</div>
+        <div className="inventoryFlags"><span className={i.legal?'ok':'bad'}>{i.legal?'Goods':'Restricted'}</span><span className={`rarityBadge ${i.rarity || 'common'}`}>{label(i.rarity || 'common')}</span><TierBadge item={i}/><span>{i.source}</span>{i.reserved_qty > 0 && <span className="warn">Reserved {fmt(i.reserved_qty)}</span>}{i.used_in_recipe_count > 0 && <span>Used in {i.used_in_recipe_count} recipes</span>}</div>
         <div className="actions inventoryActions">
           <button onClick={()=>setSelected(i)}>Inspect</button>
           {i.sellable && <button disabled={(i.available_qty||0)<=0} onClick={()=>sellItem(i,1)}>Sell 1</button>}
@@ -4094,7 +4712,7 @@ function InventoryDetails({item, act, sellItem, listItem, dialogs}) {
       <div><h3>{item.name}</h3><p>{item.description || item.item_code}</p></div>
       <Stats pairs={{Owned:item.qty, Available:item.available_qty, Reserved:item.reserved_qty || 0, Tier:`T${item.current_tier ?? item.tier ?? 1}/${item.max_tier ?? '—'}`, UnitValue:item.unit_value ?? item.base_value, TotalValue:item.total_value, Cargo:item.cargo_mass}} />
       <div className="inventoryFlags detailFlags"><span>{item.category_label || label(item.category)}</span><span>{label(item.subcategory || item.item_type)}</span><span className={`rarityBadge ${item.rarity || 'common'}`}>{label(item.rarity || 'common')}</span><TierBadge item={item}/><span className={item.legal?'ok':'bad'}>{item.legal?'Legal':'Illegal'}</span>{item.cargo_exempt ? <span>Cargo Exempt</span> : null}</div>
-      {!item.legal && <div className="warningLine"><AlertTriangle size={16}/> {risk.message || 'Illegal goods risk depends on current security.'} Risk score {fmt(risk.score || 0)}</div>}
+      {!item.legal && <div className="warningLine"><AlertTriangle size={16}/> {risk.message || 'Restricted goods risk depends on current security.'} Risk score {fmt(risk.score || 0)}</div>}
       <div className="detailGrid">
         <div><b>Market estimate</b><span>Unit {fmt(item.market_sell_estimate?.unit)} • Net all {fmt(item.market_sell_estimate?.net)} • Fee {fmt(item.market_sell_estimate?.fee)}</span></div>
         <div><b>Tier upgrade</b><span>{item.tier_upgrade?.can_upgrade ? `Next T${item.tier_upgrade.next_tier} • ${fmt(item.tier_upgrade.credits)} Cr • ${Math.round((item.tier_upgrade.success_odds || 0)*100)}%` : (item.tier_upgrade?.reason || 'Not upgradeable')}</span></div>
@@ -4291,11 +4909,11 @@ function PlanetControl({state,act}) {
       }) : <div className="mutedBlock">{supply.eligible ? 'No eligible raw, refined, or salvage materials are available.' : 'Supply delivery opens on faction-owned planets inside contested or war territory.'}</div>}</div>
     </Panel>
 
-    <Panel title="Control Actions" help="Actions are small nudges. Job-matched actions gain extra influence but still consume energy/fuel/credits.">
+    <Panel title="Control Actions" help="Actions are small nudges. Job-matched actions gain extra influence while fuel and credit costs still matter.">
       <div className="controlActionGrid">{(pc.actions || []).map(a=><div className={`controlActionCard ${a.job_bonus?'matchedControl':''}`} key={a.key}>
-        <div><b>{a.name}</b><em>{a.job_bonus ? 'Career Bonus' : 'Neutral'}</em></div>
+        <div><b>{a.name}</b><em>{a.job_bonus ? 'Skill Bonus' : 'Neutral'}</em></div>
         <p>{a.desc}</p>
-        <span>Energy {fmt(a.energy)} • Fuel {fmt(a.fuel)} • Credits {fmt(a.credits)} • Influence +{fmt(a.influence_preview)}</span>
+        <span>Fuel {fmt(a.fuel)} - Credits {fmt(a.credits)} - Influence +{fmt(a.influence_preview)}</span>
         <small>Security {signed(a.security)} • Stability {signed(a.stability)} • Pirates {signed(a.pirates)} • Market {signed(a.market)} • Conflict {signed(a.conflict)}</small>
         <button onClick={()=>act('planet_control_action',{action_key:a.key})}>Run Action</button>
       </div>)}</div>
@@ -4321,7 +4939,7 @@ function Contracts({state,act}) {
   const basic = currentGalaxyOps.filter(o => o.operation_tier === 'basic');
   const advanced = currentGalaxyOps.filter(o => o.operation_tier !== 'basic');
   const recommended = state.recommended_actions || [];
-  return <Page title="Operations Hub" sub="PvE now uses career rank, skill levels, ship power, fuel/energy cost, local security, stability, pirate pressure, and job fit.">
+  return <Page title="Operations Hub" sub="PvE now uses skill rank, skill levels, ship power, fuel cost, local security, stability, pirate pressure, and job fit.">
     <div className="tabBar">
       <button className={tab==='recommended'?'active':''} onClick={()=>setTab('recommended')}>Recommended</button>
       <button className={tab==='basic'?'active':''} onClick={()=>setTab('basic')}>Basic Work</button>
@@ -4330,10 +4948,10 @@ function Contracts({state,act}) {
     </div>
 
     {tab === 'recommended' && <Panel title="Recommended Action Queue" help="High fit does not mean no risk. It means your current build is better suited for the action.">
-      <div className="opList detailed">{recommended.map(r=><OperationRow key={`${r.kind}-${r.code}`} item={r} actionLabel={r.kind === 'career' ? 'Run Job' : 'Run'} onRun={()=>act(r.kind === 'career' ? 'career_task' : 'pve_operation', r.kind === 'career' ? {task_key:r.code} : {code:r.code})} />)}</div>
+      <div className="opList detailed">{recommended.map(r=><OperationRow key={`${r.kind}-${r.code}`} item={r} actionLabel={r.kind === 'skill' ? 'Run Job' : 'Run'} onRun={()=>act(r.kind === 'skill' ? 'skill_task' : 'pve_operation', r.kind === 'skill' ? {task_key:r.code} : {code:r.code})} />)}</div>
     </Panel>}
 
-    {tab === 'basic' && <Panel title="Basic Money / XP Work" help="Available to all players. Lower reward, higher success rate, low energy cost.">
+    {tab === 'basic' && <Panel title="Basic Contracts & XP Work" help="Available to all players. Lower reward, higher success rate.">
       <div className="opList detailed">{basic.map(o=><OperationRow key={o.code} item={o} actionLabel="Run" onRun={()=>act('pve_operation',{code:o.code})} />)}</div>
     </Panel>}
 
@@ -4343,7 +4961,7 @@ function Contracts({state,act}) {
 
     {tab === 'bounties' && <Panel title="Bounties">
       <div className="opList detailed">{state.bounties.map(b=><div className="operationCard" key={b.id}>
-        <div className="operationMain"><b>{b.name}</b><p>{b.planet_name} fugitive contract.</p><span>Threat {b.threat} • Reward {fmt(b.reward)} Cr • Combat/scanning career fit</span></div>
+        <div className="operationMain"><b>{b.name}</b><p>{b.planet_name} fugitive contract.</p><span>Threat {b.threat} • Reward {fmt(b.reward)} Cr • Combat/scanning skill fit</span></div>
         <button onClick={()=>act('accept_bounty',{bounty_id:b.id})}>Hunt</button>
       </div>)}</div>
     </Panel>}
@@ -4352,13 +4970,7 @@ function Contracts({state,act}) {
 
 function Industry({state,act}) {
   const sites = state.salvage_sites || [];
-  return <Page title="Industry" sub="Mining, battlefield salvage, refining, NPC contracts, and materials for crafting modules and ship parts.">
-    <div className="cards3">
-      <Panel title="Mining"><p>Mine NPC asteroid fields and feed supply chains.</p><button onClick={()=>act('mine')}>Mine Asteroids</button></Panel>
-      <Panel title="General Salvaging"><p>Fallback derelict salvage. Fresh combat wrecks below are better and are tied to real local battles.</p><button onClick={()=>act('salvage')}>Salvage Derelict</button></Panel>
-      <Panel title="Inventory Materials">{state.inventory.filter(i=>['material','component','ammo','salvage'].includes(i.item_type) || i.category==='salvage').slice(0,12).map(i=><div className="itemLine visualLine" key={i.id}><ItemVisual item={i} size="sm"/><b>{i.name}</b><span>x{i.qty}</span></div>)}</Panel>
-    </div>
-
+  return <Page title="Refining/Crafting" sub="Fresh combat wrecks are the primary salvage source. Refining and crafting share one production loop.">
     <Panel title="Fresh Combat Wrecks" help="These are defeated ships in the current area. Player battles, PvE combat, PvP, and occasional NPC-vs-NPC fights can populate this list. Zero available wrecks is valid if the area has been cleaned out.">
       {sites.length ? <div className="salvageSiteGrid">{sites.map(site=><div className="salvageSiteCard" key={site.id}>
         <GameImage src={site.image_url} assetType="ship" category={site.ship_role} alt={site.ship_name} />
@@ -4366,12 +4978,181 @@ function Industry({state,act}) {
           <h3>{site.ship_name}</h3>
           <p>{label(site.source_type)} • {label(site.ship_role)} • T{site.ship_tier} • Difficulty {site.difficulty}</p>
           <div className="tagCloud">{Object.entries(site.materials || {}).map(([k,v])=><span key={k}>{label(k)} x{fmt(v)}</span>)}</div>
-          <small>Energy {fmt(site.energy_cost)} • Value {fmt(site.salvage_value)} • Source {site.source_name}</small>
+          <small>Value {fmt(site.salvage_value)} - Source {site.source_name}</small>
           <button onClick={()=>act('salvage_site',{site_id:site.id})}>Salvage Wreck</button>
         </div>
       </div>)}</div> : <div className="emptyState">No salvageable combat wrecks in this area. New wrecks can appear from player combat, PvE fights, PvP, or occasional NPC skirmishes.</div>}
     </Panel>
   </Page>
+}
+
+function isRefiningRecipe(recipe) {
+  const category = String(recipe?.category || '').toLowerCase();
+  const outputCategory = String(recipe?.output_preview?.category || recipe?.output?.category || '').toLowerCase();
+  return !!recipe?.requires_refinery || category.includes('refining') || category.includes('refined') || outputCategory === 'refined_materials';
+}
+
+function isRefiningJob(job) {
+  return job?.job_kind === 'refining' || isRefiningRecipe(job?.recipe_snapshot || {});
+}
+
+function recipeState(recipe) {
+  if (recipe?.capability_state) return recipe.capability_state;
+  if (recipe?.can_craft) return 'CRAFTABLE';
+  if ((recipe?.missing_materials || recipe?.missing || []).length) return 'MISSING_MATERIALS';
+  return 'LOCKED';
+}
+
+function recipeStateLabel(stateKey) {
+  return stateKey === 'CRAFTABLE' ? 'Craftable' : stateKey === 'MISSING_MATERIALS' ? 'Missing Materials' : 'Locked';
+}
+
+function recipeTierClass(recipeOrItem) {
+  const tier = Number(recipeOrItem?.recipe_tier ?? recipeOrItem?.output_tier ?? recipeOrItem?.current_tier ?? recipeOrItem?.tier ?? 1);
+  return `tierColor${Math.max(1, Math.min(5, tier))}`;
+}
+
+function jobProgress(job, clock) {
+  const started = new Date(job?.started_at).getTime();
+  const ends = new Date(job?.completes_at).getTime();
+  const total = Math.max(1, ends - started);
+  if (!Number.isFinite(started) || !Number.isFinite(ends)) return Number(job?.progress_pct || 0);
+  return Math.max(0, Math.min(100, ((clock - started) / total) * 100));
+}
+
+function RefiningPipelineHUD({state, clock, act, onOpen}) {
+  const jobs = (state?.crafting_queue || []).filter(isRefiningJob);
+  const active = jobs.filter(j => j.status === 'active');
+  const complete = jobs.filter(j => j.status === 'complete' || j.status === 'completed');
+  const visibleJobs = [...active, ...complete].slice(0,5);
+  if (!visibleJobs.length) return <button className="refiningHud empty" onClick={onOpen}><Factory size={16}/><span><b>Refining Pipeline</b><small>No active jobs</small></span></button>;
+  return <section className="refiningHud" onClick={onOpen}>
+    <header><Factory size={16}/><b>Refining Pipeline</b><span>{active.length} active / {complete.length} ready</span></header>
+    <div className="refiningHudJobs">
+      {visibleJobs.map(job => {
+        const pct = job.status === 'active' ? jobProgress(job, clock) : 100;
+        const out = job.output || job.output_preview || {name:job.recipe_name};
+        return <div key={job.id} className={`refiningHudJob ${job.status} ${recipeTierClass(out)}`}>
+          <ItemVisual item={out} size="xs"/>
+          <span><b>{job.recipe_name}</b><small>{job.location_name || 'Remote pipeline'} • {job.status === 'active' ? `${Math.round(pct)}% • ${clockTimeLeft(job.completes_at)}` : 'Complete'}</small><Progress value={pct}/></span>
+          {(job.status === 'complete' || job.status === 'completed') && <button onClick={(e)=>{ e.stopPropagation(); act('claim_crafting'); }}>Collect</button>}
+        </div>;
+      })}
+    </div>
+  </section>;
+}
+
+function RefiningPanelModal({state, clock, act, onClose}) {
+  return <div className="modalBackdrop refiningModalBackdrop" onMouseDown={onClose}>
+    <section className="refiningModal" onMouseDown={e=>e.stopPropagation()}>
+      <button className="modalX" onClick={onClose}>x</button>
+      <RefiningControlSurface state={state} act={act} clock={clock} modal />
+    </section>
+  </div>;
+}
+
+function RefiningControlSurface({state, act, clock, modal=false}) {
+  const recipes = (state.crafting_recipes || []).filter(isRefiningRecipe);
+  const jobs = (state.crafting_queue || []).filter(isRefiningJob);
+  const activeJobs = jobs.filter(j => j.status === 'active');
+  const [tier,setTier] = useState('all');
+  const [category,setCategory] = useState('all');
+  const [selectedCode,setSelectedCode] = useState('');
+  const [targetCode,setTargetCode] = useState('');
+  const selected = recipes.find(r => r.code === selectedCode) || recipes[0] || {};
+  const shown = recipes.filter(r => (tier === 'all' || String(r.recipe_tier || r.output_tier || 1) === tier) && (category === 'all' || String(r.category || '') === category));
+  const cats = ['all', ...Array.from(new Set(recipes.map(r=>r.category).filter(Boolean)))];
+  const tiers = ['all', ...Array.from(new Set(recipes.map(r=>String(r.recipe_tier || r.output_tier || 1))))].sort((a,b)=>a==='all'?-1:b==='all'?1:Number(a)-Number(b));
+  const best = [...recipes].filter(r=>r.can_craft).sort((a,b)=>(Number(b.recipe_tier||0)-Number(a.recipe_tier||0)) || ((Number((b.output_preview||b.output||{}).base_value||0)-Number(b.effective_credits||b.credits||0)) - (Number((a.output_preview||a.output||{}).base_value||0)-Number(a.effective_credits||a.credits||0))))[0];
+  useEffect(() => { if (!selectedCode && recipes[0]) setSelectedCode(recipes[0].code); }, [recipes.length, selectedCode]);
+  const projectTarget = targetCode ? (state.crafting_recipes || []).find(r => r.code === targetCode) : null;
+  return <div className={`refiningSurface ${modal ? 'modalSurface' : ''}`}>
+    <div className="refiningSurfaceHead">
+      <div><span>Global Production</span><h2>Refining Pipeline</h2></div>
+      <div className="buttonRow"><button disabled={!best} onClick={()=>best && act('craft_recipe',{recipe_code:best.code})}>Auto-Fill Best</button><button onClick={()=>act('claim_crafting')}>Collect Complete</button></div>
+    </div>
+    <div className="refiningColumns">
+      <Panel title="Available Recipes">
+        <div className="refiningFilters">
+          <select value={tier} onChange={e=>setTier(e.target.value)}>{tiers.map(t=><option key={t} value={t}>{t === 'all' ? 'All tiers' : `Tier ${t}`}</option>)}</select>
+          <select value={category} onChange={e=>setCategory(e.target.value)}>{cats.map(c=><option key={c} value={c}>{c === 'all' ? 'All categories' : c}</option>)}</select>
+        </div>
+        <div className="refiningRecipeList">{shown.map(recipe => <RefiningRecipeButton key={recipe.code} recipe={recipe} active={selected.code===recipe.code} onClick={()=>setSelectedCode(recipe.code)} />)}</div>
+      </Panel>
+      <Panel title="Selected Recipe Breakdown">
+        <RefiningRecipeDetail recipe={selected} act={act} />
+        <div className="projectMode">
+          <b>Project Mode</b>
+          <select value={targetCode} onChange={e=>setTargetCode(e.target.value)}>
+            <option value="">Select target item</option>
+            {(state.crafting_recipes || []).map(r=><option key={r.code} value={r.code}>{r.name}</option>)}
+          </select>
+          {projectTarget && <ProjectTree recipe={projectTarget} recipes={state.crafting_recipes || []} inventory={state.inventory_summary || state.inventory || []} />}
+        </div>
+      </Panel>
+      <Panel title="Active Jobs Queue">
+        <div className="refiningQueueMeta"><span>Slots <b>{activeJobs.length} / {selected.refining_queue_slots || recipes[0]?.refining_queue_slots || 2}</b></span><span>Queue reorder unlocks with advanced industry training.</span></div>
+        <div className="refiningQueueList">{jobs.length ? jobs.map(job=><RefiningQueueCard key={job.id} job={job} clock={clock} act={act} />) : <div className="emptyState">No refining jobs running.</div>}</div>
+      </Panel>
+    </div>
+  </div>;
+}
+
+function RefiningRecipeButton({recipe, active, onClick}) {
+  const stateKey = recipeState(recipe);
+  const out = recipe.output_preview || recipe.output || {};
+  const missingText = (recipe.missing_materials || recipe.missing || []).map(m => `${label(m.item_code)} -${fmt(m.deficit || Math.max(0, Number(m.required||0)-Number(m.available||0)))}`).join(', ');
+  return <button className={`refiningRecipeButton ${active ? 'active' : ''} ${stateKey.toLowerCase()} ${recipeTierClass(recipe)}`} onClick={onClick}>
+    <ItemVisual item={out} size="sm"/>
+    <span><b>{recipe.name}</b><small>{recipeStateLabel(stateKey)} • {recipe.craft_time_label || secondsLabel(recipe.craft_time_seconds)} • Yield {fmt(recipe.yield_range?.min || out.qty || 1)}-{fmt(recipe.yield_range?.max || out.qty || 1)}</small>{missingText && <em>{missingText}</em>}</span>
+  </button>;
+}
+
+function RefiningRecipeDetail({recipe, act}) {
+  if (!recipe?.code) return <div className="emptyState">Select a recipe.</div>;
+  const out = recipe.output_preview || recipe.output || {};
+  const stateKey = recipeState(recipe);
+  return <div className={`refiningRecipeDetail ${stateKey.toLowerCase()}`}>
+    <div className="selectedRecipeHero">
+      <ItemVisual item={out} size="ship"/>
+      <div><b>{out.name || recipe.name}</b><span>{recipeStateLabel(stateKey)} • Output {fmt(recipe.yield_range?.min || out.qty || 1)}-{fmt(recipe.yield_range?.max || out.qty || 1)}</span><small>Station tier {fmt(recipe.required_station_tier || 0)} required • {recipe.current_station_tier ? `T${recipe.current_station_tier} available` : recipe.requires_refinery ? 'No refinery here' : 'No station required'}</small></div>
+    </div>
+    <div className="recipeReqs refiningReqs">
+      {(recipe.inputs || []).map(i => {
+        const deficit = Math.max(0, Number(i.required || 0) - Number(i.available || 0));
+        return <div key={i.item_code} className={i.met ? 'met' : 'missing'} data-tooltip={!i.met ? `Need ${fmt(deficit)} more ${i.name || label(i.item_code)}` : ''}><span>{i.name}{i.required_tier ? ` • T${i.required_tier}+` : ''}</span><b>{fmt(i.available)} / {fmt(i.required)}</b></div>;
+      })}
+    </div>
+    {!!(recipe.locked_reasons || []).length && <div className="refiningLocks">{recipe.locked_reasons.map((r,i)=><span key={i}>{r.message || r}</span>)}</div>}
+    {!!(recipe.blockers || []).length && <div className="blockerLine">{recipe.blockers.join(' • ')}</div>}
+    <button className={recipe.can_craft ? 'primary' : ''} disabled={!recipe.can_craft} onClick={()=>act('craft_recipe',{recipe_code:recipe.code})}>{recipe.can_craft ? 'Start Refining' : recipeStateLabel(stateKey)}</button>
+  </div>;
+}
+
+function RefiningQueueCard({job, clock, act}) {
+  const pct = job.status === 'active' ? jobProgress(job, clock) : 100;
+  const out = job.output || job.output_preview || {name:job.recipe_name};
+  return <div className={`refiningQueueCard ${job.status} ${recipeTierClass(out)}`}>
+    <ItemVisual item={out} size="sm"/>
+    <div><b>{job.recipe_name}</b><span>{job.location_name || 'Remote pipeline'} • {job.status === 'active' ? `${Math.round(pct)}% • ${clockTimeLeft(job.completes_at)}` : label(job.status)}</span><Progress value={pct}/><small>Total {job.total_label || secondsLabel(job.total_seconds)} • Cancel loses part of inputs</small></div>
+    {job.status === 'active' ? <button onClick={()=>act('cancel_crafting',{job_id:job.id})}>Cancel</button> : (job.status === 'complete' || job.status === 'completed') ? <button onClick={()=>act('claim_crafting')}>Collect</button> : null}
+  </div>;
+}
+
+function ProjectTree({recipe, recipes, inventory}) {
+  const inv = Object.fromEntries((inventory || []).map(i => [i.item_code || i.code, Number(i.available_qty ?? i.qty ?? 0)]));
+  const byOutput = Object.fromEntries((recipes || []).map(r => [((r.output_preview || r.output || {}).item_code || (r.output_preview || r.output || {}).module_code), r]).filter(([k])=>k));
+  const renderNeed = (code, qty, depth=0) => {
+    const maker = byOutput[code];
+    const have = inv[code] || 0;
+    const missing = Math.max(0, Number(qty || 0) - have);
+    return <div className={`projectNeed depth${Math.min(depth,3)} ${missing ? 'missing' : 'met'}`} key={`${code}-${depth}`}>
+      <span>{label(code)}</span><b>{fmt(have)} / {fmt(qty)}</b>
+      {missing > 0 && <em>Missing {fmt(missing)}</em>}
+      {maker && depth < 3 && <div>{(maker.inputs || []).map(i=>renderNeed(i.item_code, i.required * Math.max(1, missing || 1), depth + 1))}</div>}
+    </div>;
+  };
+  return <div className="projectTree"><b>{recipe.name}</b>{(recipe.inputs || []).map(i=>renderNeed(i.item_code, i.required, 0))}</div>;
 }
 
 function Crafting({state,act,clock}) {
@@ -4391,7 +5172,7 @@ function Crafting({state,act,clock}) {
     ['raw_materials','crafting_materials','refined_materials','goods','illicit_goods','consumables'].includes(i.category) ||
     ['material','component','food','medical','contraband','booster','consumable','refined','chemical','ore'].includes(i.item_type)
   );
-  return <Page title="Crafting & Fabrication" sub="Crafting is timed. Raw ore now feeds refinery recipes first, then refined outputs feed higher-end manufacturing. Materials, credits, and energy are committed up front.">
+  return <Page title="Crafting & Fabrication" sub="Crafting is timed. Raw ore now feeds refinery recipes first, then refined outputs feed higher-end manufacturing. Materials and credits are committed up front.">
     <Panel title="Crafting Controls" help="Timed crafting jobs persist through refresh. Completed jobs auto-resolve on state refresh or when you press Claim Completed. Ore refining recipes require refinery access at the current planet or station.">
       <div className="inventoryToolbar">
         <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search recipes" />
@@ -4407,6 +5188,8 @@ function Crafting({state,act,clock}) {
       </div>
     </Panel>
 
+    <RefiningControlSurface state={state} act={act} clock={clock} />
+
     <CraftingQueue queue={queue} act={act} clock={clock} />
 
     <div className="recipeGrid">
@@ -4421,7 +5204,7 @@ function Crafting({state,act,clock}) {
       <Panel title="Crafting History">
         <div className="feedList compactFeed">{(state.crafting_history || []).slice(0,20).map(h=>{
           const output = jsonSafe(h.output_json, {});
-          return <div key={h.id}><b>{label(h.outcome)}: {h.recipe_name}</b><span>{output.name || output.item_code || output.kind || 'Output'} x{output.qty || output.scrap || 1}</span><small>XP {fmt(h.xp_reward)} • Credits {fmt(h.credits_spent)} • Energy {fmt(h.energy_spent)} • {new Date(h.created_at).toLocaleString()}</small></div>
+          return <div key={h.id}><b>{label(h.outcome)}: {h.recipe_name}</b><span>{output.name || output.item_code || output.kind || 'Output'} x{output.qty || output.scrap || 1}</span><small>XP {fmt(h.xp_reward)} - Credits {fmt(h.credits_spent)} - {new Date(h.created_at).toLocaleString()}</small></div>
         })}</div>
       </Panel>
     </div>
@@ -4470,24 +5253,28 @@ function secondsLabel(seconds) {
 function RecipeCard({recipe, act}) {
   const out = recipe.output_preview || recipe.output || {};
   const blockers = recipe.blockers || [];
+  const missingMaterials = recipe.missing_materials || [];
+  const lockedReasons = recipe.locked_reasons || [];
+  const clarityState = recipeState(recipe);
   const success = Math.round((recipe.success_odds || 0) * 100);
   const owned = !!recipe.owned_recipe;
   const unlimited = !!recipe.recipe_unlimited;
   const charges = recipe.recipe_uses_remaining;
   const locked = !owned;
-  return <section className={`recipeCard ${recipe.can_craft ? 'readyRecipe' : 'blockedRecipe'} ${locked ? 'lockedRecipe' : ''}`}>
+  return <section className={`recipeCard ${recipe.can_craft ? 'readyRecipe' : 'blockedRecipe'} ${locked ? 'lockedRecipe' : ''} capability-${clarityState}`}>
     <div className="recipeHead">
       <div><b>{recipe.name}</b><span>{recipe.category} <TierBadge item={{current_tier:recipe.recipe_tier, max_tier:7, tier_display:recipe.tier_display}} /></span></div>
-      <em>{success}%</em>
+      <em className={`capabilityPill ${clarityState}`}>{recipeStateLabel(clarityState)}</em>
     </div>
     <p>{recipe.description}</p>
     <div className="recipeMeta">
       <span>Rank <b>{recipe.recipe_rank_name || 'Basic'}</b></span>
       <span>Credits {fmt(recipe.effective_credits ?? recipe.credits)}</span>
-      <span>Energy {fmt(recipe.energy)}</span>
       <span>Time {recipe.craft_time_label || secondsLabel(recipe.craft_time_seconds || recipe.craft_seconds || recipe.craft_minutes*60)}</span>
       <span>XP {fmt(recipe.xp_reward)}</span>
+      <span>Odds <b>{success}%</b></span>
       {recipe.requires_refinery && <span>Refinery {recipe.refinery_available ? 'online' : 'required'}</span>}
+      {recipe.yield_range && <span>Yield <b>{fmt(recipe.yield_range.min)}-{fmt(recipe.yield_range.max)}</b></span>}
       {recipe.discount_pct > 0 && <span>Discount {recipe.discount_pct}%</span>}
     </div>
     <div className="recipeOwnershipRow">
@@ -4511,7 +5298,9 @@ function RecipeCard({recipe, act}) {
       </div>
     </div>
     {blockers.length > 0 && <div className="blockerLine">{blockers.join(' • ')}</div>}
-    <button disabled={!recipe.can_craft} onClick={()=>act('craft_recipe',{recipe_code:recipe.code})}>{recipe.can_craft ? `Start Craft (${recipe.craft_time_label || secondsLabel(recipe.craft_time_seconds)})` : locked ? 'Recipe Not Owned' : 'Blocked'}</button>
+    {missingMaterials.length > 0 && <div className="blockerLine warningBlocker">Missing: {missingMaterials.map(m=>`${label(m.item_code)} ${fmt(m.missing)}`).join(' - ')}</div>}
+    {lockedReasons.length > 0 && <div className="blockerLine lockedBlocker">{lockedReasons.join(' - ')}</div>}
+    <button disabled={!recipe.can_craft} onClick={()=>act('craft_recipe',{recipe_code:recipe.code})}>{recipe.can_craft ? `Start Craft (${recipe.craft_time_label || secondsLabel(recipe.craft_time_seconds)})` : locked ? 'Recipe Not Owned' : recipeStateLabel(clarityState)}</button>
   </section>
 }
 
@@ -4533,44 +5322,44 @@ function Jobs({state,act}) {
   const req = selectedJob.next_requirement || jsonSafe(selectedJob.next_req_json,{});
   const metrics = jsonSafe(selectedJob.metrics_json,{});
   const tasks = (selectedJob.tasks_json ? jsonSafe(selectedJob.tasks_json,[]) : []).slice(0,4);
-  const careerTasks = state.career_tasks || [];
-  return <Page title="Jobs / Careers" sub="Careers do not lock gameplay. Anyone can mine, craft, trade, fight, smuggle, salvage, explore, or jailbreak. The active career gives stronger bonuses and career XP only for matching action types.">
+  const skillTasks = state.skill_tasks || [];
+  return <Page title="Deprecated Work" sub="Skills do not lock gameplay. Anyone can mine, craft, trade, fight, smuggle, salvage, explore, or jailbreak. XP is universal; your build comes from skill point allocation.">
     <div className="cards3">
-      <Panel title="Active Career">
-        {active ? <div className={`careerSpotlight ${active.style || ''}`}>
-          <div className="careerIcon"><ProgressIcon name={active.icon}/></div>
+      <Panel title="Active Skill">
+        {active ? <div className={`skillSpotlight ${active.style || ''}`}>
+          <div className="skillIcon"><ProgressIcon name={active.icon}/></div>
           <div>
             <b>{active.name}</b>
-            <span>{active.rank_title || `Rank ${active.rank}`} • Rank {active.rank} • XP {fmt(active.xp)}</span>
+            <span>{active.rank_title || `Rank ${active.rank}`} • Rank {active.rank} • Rank score {fmt(active.xp)}</span>
             <p>{active.recommended_loop}</p>
           </div>
-        </div> : <p>No active career selected.</p>}
+        </div> : <p>No active skill selected.</p>}
       </Panel>
       <Panel title="Next Rank">
         {active ? <Stats pairs={{
           Next:req.next_rank || '—',
-          XPNeeded:req.xp_needed ?? '—',
+          RankScoreNeeded:req.xp_needed ?? '—',
           [label(req.primary_metric || 'Primary')]:req.primary_needed ?? '—',
           [label(req.value_metric || 'Value')]:req.value_needed ?? '—'
-        }} /> : <p>Select a career.</p>}
-        {active && <Bar label="Career Rank Progress" value={active.progress_pct || 0} max={100}/>}
+        }} /> : <p>Select a skill.</p>}
+        {active && <Bar label="Skill Rank Progress" value={active.progress_pct || 0} max={100}/>}
       </Panel>
-      <Panel title="Career Rule">
+      <Panel title="Skill Rule">
         <div className="infoStack">
-          <div><b>Open actions</b><span>Non-career actions stay available.</span></div>
-          <div><b>Career bonus</b><span>Matching actions get better rewards, odds, ranks, and career XP.</span></div>
-          <div><b>Skills stay separate</b><span>Skills level from action use even outside the matching career.</span></div>
+          <div><b>Open actions</b><span>Non-skill actions stay available.</span></div>
+          <div><b>Skill bonus</b><span>Matching actions get better rewards and odds.</span></div>
+          <div><b>Universal XP</b><span>All valid actions feed the same character XP pool.</span></div>
         </div>
       </Panel>
     </div>
 
-    <Panel title="Career-Specific Actions">
-      <div className="opList detailed">{careerTasks.length ? careerTasks.map(task=><OperationRow key={task.key} item={task} actionLabel="Run Career Job" onRun={()=>act('career_task',{task_key:task.key})} />) : <p>No active career jobs. Set an active career below.</p>}</div>
+    <Panel title="Skill-Specific Actions">
+      <div className="opList detailed">{skillTasks.length ? skillTasks.map(task=><OperationRow key={task.key} item={task} actionLabel="Run Skill Job" onRun={()=>act('skill_task',{task_key:task.key})} />) : <p>No active skill jobs. Set an active skill below.</p>}</div>
     </Panel>
 
     <div className="jobsLayout">
-      <Panel title="Available Careers">
-        <div className="careerGrid">{state.jobs.map(j=><button key={j.code} className={`careerTile ${j.active?'activeCareerCard':''} ${selected===j.code?'selected':''}`} onClick={()=>setSelected(j.code)}>
+      <Panel title="Unavailable">
+        <div className="skillGrid">{state.jobs.map(j=><button key={j.code} className={`skillTile ${j.active?'activeSkillCard':''} ${selected===j.code?'selected':''}`} onClick={()=>setSelected(j.code)}>
           <ProgressIcon name={j.icon}/>
           <b>{j.name}</b>
           <span>{j.rank_title || `Rank ${j.rank}`} • {j.risk_profile || j.side}</span>
@@ -4578,31 +5367,109 @@ function Jobs({state,act}) {
         </button>)}</div>
       </Panel>
 
-      <Panel title={`${selectedJob.name || 'Career'} Details`}>
-        <div className="careerDetailHeader">
-          <div className="careerIcon large"><ProgressIcon name={selectedJob.icon} size={26}/></div>
+      <Panel title={`${selectedJob.name || 'Skill'} Details`}>
+        <div className="skillDetailHeader">
+          <div className="skillIcon large"><ProgressIcon name={selectedJob.icon} size={26}/></div>
           <div><b>{selectedJob.name}</b><span>{selectedJob.rank_title || `Rank ${selectedJob.rank || 1}`} • {selectedJob.risk_profile}</span><p>{selectedJob.description}</p></div>
         </div>
         <div className="tagCloud">
           {(selectedJob.preferred_skills || []).map(x=><span key={x}>Skill: {label(x)}</span>)}
           {(selectedJob.preferred_ships || []).map(x=><span key={x}>Ship: {x}</span>)}
-          {(selectedJob.career_actions || []).map(x=><span key={x}>Action: {label(x)}</span>)}
+          {(selectedJob.skill_actions || []).map(x=><span key={x}>Action: {label(x)}</span>)}
         </div>
         <div className="bonusGrid">
           <div><b>Current Job Bonuses</b>{(selectedJob.current_bonuses || []).map((b,i)=><span key={i}>{b}</span>)}</div>
           <div><b>Next Rank Bonuses</b>{(selectedJob.next_rank_bonuses || []).map((b,i)=><span key={i}>{b}</span>)}</div>
           <div><b>Metrics</b>{Object.entries(metrics).map(([k,v])=><span key={k}>{label(k)}: {fmt(v)}</span>)}{Object.keys(metrics).length===0 && <span>No metrics yet.</span>}</div>
         </div>
-        <Panel title="Career Task Preview">
-          <div className="miniStack">{tasks.map(t=><button key={t.key} onClick={()=>selectedJob.active ? act('career_task',{task_key:t.key}) : null} disabled={!selectedJob.active}><b>{t.name}</b><small>{t.desc || t.description} • Energy {t.energy}</small></button>)}</div>
+        <Panel title="Skill Task Preview">
+          <div className="miniStack">{tasks.map(t=><button key={t.key} onClick={()=>selectedJob.active ? act('skill_task',{task_key:t.key}) : null} disabled={!selectedJob.active}><b>{t.name}</b><small>{t.desc || t.description}</small></button>)}</div>
         </Panel>
-        <button disabled={selectedJob.active} onClick={()=>act('switch_job',{job_code:selectedJob.code})}>{selectedJob.active ? 'Current Career' : 'Set Active Career'}</button>
+        <button disabled={selectedJob.active} onClick={()=>act('switch_job',{job_code:selectedJob.code})}>{selectedJob.active ? 'Current Skill' : 'Set Active Skill'}</button>
       </Panel>
     </div>
   </Page>
 }
 
-function Skills({state,act}) {
+function SpecializationTree({state, token, refreshState}) {
+  const skills = state.specialization || {};
+  const trees = skills.trees || [];
+  const [selectedTree, setSelectedTree] = useState(trees[0]?.key || 'combat');
+  const [busyNode, setBusyNode] = useState('');
+  const [status, setStatus] = useState('');
+  const current = trees.find(t => t.key === selectedTree) || trees[0] || {};
+  const spend = async (nodeKey) => {
+    if (!token || !nodeKey) return;
+    setBusyNode(nodeKey);
+    setStatus('');
+    try {
+      const res = await fetch(`${API}/api/progression/spend`, {method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify({node_key:nodeKey, ranks:1})});
+      const data = await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error(data.detail || 'Spend failed');
+      setStatus(data.message || 'SP spent.');
+      await refreshState?.({silent:true, force:true, maps:false, skipDuringAction:false});
+    } catch (err) {
+      setStatus(err.message || 'Spend failed');
+    } finally {
+      setBusyNode('');
+    }
+  };
+  const respec = async () => {
+    if (!token) return;
+    setBusyNode('respec');
+    setStatus('');
+    try {
+      const res = await fetch(`${API}/api/progression/respec`, {method:'POST', headers:{'Content-Type':'application/json', Authorization:`Bearer ${token}`}, body:JSON.stringify({})});
+      const data = await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error(data.detail || 'Respec failed');
+      setStatus(data.message || 'Respec complete.');
+      await refreshState?.({silent:true, force:true, maps:false, skipDuringAction:false});
+    } catch (err) {
+      setStatus(err.message || 'Respec failed');
+    } finally {
+      setBusyNode('');
+    }
+  };
+  return <Panel title="Role Specialization" help="Server-enforced allocation tree. Ship tier requirements, one-T4 limit, respec costs, and module role compatibility are enforced by the backend.">
+    <div className="specializationShell">
+      <div className="specializationSummary">
+        <Stats pairs={{TotalSP:skills.totalSP || 0, UnspentSP:skills.unspentSP || 0, SpentSP:skills.spentSP || 0, Respec:skills.respec?.firstFree ? 'First Free' : `${fmt(skills.respec?.nextCost || 0)} Cr`}} />
+        {!!skills.wouldCreateInvalidT4Warning && <div className="jailBanner"><AlertTriangle size={16}/>Only one tree can remain at T4.</div>}
+        {status && <div className={`skillsStatus ${status.toLowerCase().includes('failed') || status.toLowerCase().includes('requires') || status.toLowerCase().includes('not enough') ? 'bad' : ''}`}>{status}</div>}
+      </div>
+      <div className="specializationTabs">
+        {trees.map(t => <button key={t.key} className={selectedTree===t.key?'active':''} onClick={()=>setSelectedTree(t.key)}>
+          <b>{t.name}</b><span>{t.allocationPct || 0}% / T{t.tier || 1}</span>
+        </button>)}
+      </div>
+      <div className="specializationTreeDetail">
+        <div className="specializationTreeHead">
+          <div><b>{current.name || 'Tree'}</b><span>{current.purpose}</span></div>
+          <button disabled={busyNode === 'respec'} onClick={respec}>{busyNode === 'respec' ? 'Working...' : `Respec ${skills.respec?.firstFree ? 'Free' : fmt(skills.respec?.nextCost || 0)}`}</button>
+        </div>
+        {current.lowInvestmentActive && <div className="warningStack">{(current.lowInvestmentPenalties || []).map(x=><span key={x}><AlertTriangle size={14}/>{x}</span>)}</div>}
+        <div className="specializationBranches">
+          {(current.branches || []).map(branch => <section className="specializationBranch" key={branch.key}>
+            <div className="branchHeader"><b>{branch.name}</b><span>{branch.keystoneName}</span></div>
+            <small>{branch.keystoneDescription}</small>
+            <div className="tagCloud">{(branch.bonuses || []).map(b=><span key={b}>{b}</span>)}</div>
+            <div className="skillsNodeGrid">{(branch.nodes || []).map(node => <button key={node.key} className={`skillsNode ${node.isKeystone ? 'keystone' : ''}`} disabled={!node.canRank || !!busyNode} onClick={()=>spend(node.key)}>
+              <b>{node.name}</b>
+              <span>Rank {fmt(node.rank)} / {fmt(node.maxRank)} {node.isKeystone ? 'Keystone' : ''}</span>
+              <small>{node.description}</small>
+              <em>{busyNode === node.key ? 'Spending...' : node.canRank ? `Spend ${fmt(node.spCost)} SP` : 'Locked or maxed'}</em>
+            </button>)}</div>
+          </section>)}
+        </div>
+      </div>
+      <div className="specializationFooter">
+        {(skills.explanations || []).map(x=><span key={x}>{x}</span>)}
+      </div>
+    </div>
+  </Panel>;
+}
+
+function Skills({state,act,token,refreshState}) {
   const [cat,setCat] = useState('All');
   const [q,setQ] = useState('');
   const skills = state.skills || [];
@@ -4610,7 +5477,9 @@ function Skills({state,act}) {
   const filtered = skills.filter(s => (cat==='All' || s.category===cat) && (`${s.name} ${s.description} ${(s.affects||[]).join(' ')} ${(s.trained_by||[]).join(' ')}`.toLowerCase().includes(q.toLowerCase())));
   const strongest = [...skills].sort((a,b)=>(b.level||0)-(a.level||0)).slice(0,5);
   const selected = filtered[0] || skills[0] || {};
-  return <Page title="Skills" sub="Skills level by doing related actions. Progress is intentionally grindy. Careers add focused bonuses, but skills keep improving regardless of active career.">
+  const tierLimits = state.skill_tree_limits?.tiers || {};
+  return <Page title="Skill Tree Progress" sub="XP is universal. Skill points from the character XP pool define your Combat, Industry, Market, and Exploration build.">
+    <SpecializationTree state={state} token={token} refreshState={refreshState} />
     <div className="cards3">
       <Panel title="Strongest Skills">
         <div className="skillTopList">{strongest.map(s=><div key={s.key}><ProgressIcon name={s.icon}/><b>{s.name}</b><span>Lv {s.level} • {s.progress_pct}%</span></div>)}</div>
@@ -4619,22 +5488,28 @@ function Skills({state,act}) {
         <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search skills, bonuses, trained by..." />
         <div className="tabs">{cats.map(c=><button key={c} className={cat===c?'active':''} onClick={()=>setCat(c)}>{c}</button>)}</div>
       </Panel>
-      <Panel title="Progression Caps">
+      <Panel title="Skill Point Pool">
         <div className="infoStack">
-          <div><b>Breakout cap</b><span>Final chance can never exceed 80%.</span></div>
-          <div><b>Illicit risk floor</b><span>Smuggling skill reduces risk but does not erase it.</span></div>
-          <div><b>Market cap</b><span>Trading bonuses cannot create infinite buy/sell loops.</span></div>
+          <div><b>Available</b><span>{fmt(state.player.skill_points)} skill points</span></div>
+          <div><b>Current XP</b><span>{fmt(state.player.xp)} / {fmt(state.next_level_xp)} XP</span></div>
+          <div><b>Next skill point</b><span>{fmt(state.xp_needed_next_skill_point)} XP needed</span></div>
         </div>
       </Panel>
     </div>
+    <Panel title="Tree Investment Limits">
+      <div className="adminHintGrid">
+        {[1,2,3,4].map(t=><div key={t}><b>Tier {t}{t===4 ? '+' : ''}</b><span>Up to {fmt(tierLimits[t]?.maxTrees || (t===1?4:t===2?3:t===3?2:1))} tree{(tierLimits[t]?.maxTrees || 1) === 1 ? '' : 's'}: {(tierLimits[t]?.activeTrees || []).join(', ') || 'none yet'}</span></div>)}
+      </div>
+    </Panel>
 
     <div className="skillsLayout">
       <Panel title="Skill Cards">
         <div className="skillGrid">{filtered.map(s=><div key={s.key} className={`skillCard ${s.category?.toLowerCase() || ''}`}>
           <div className="skillCardHead"><ProgressIcon name={s.icon}/><div><b>{s.name}</b><span>{s.category} • Level {s.level}/{s.max_level}</span></div></div>
           <p>{s.summary}</p>
-          <Bar label={`${fmt(s.xp)} XP`} value={s.progress_pct || 0} max={100}/>
-          <small>Next level: {s.xp_needed ? fmt(s.xp_needed) + ' XP needed' : 'Maxed'}</small>
+          <Bar label="Skill Tree Progress" value={s.progress_pct || 0} max={100}/>
+          <small>{s.blocked_reason || `Next level costs ${fmt(s.skill_point_cost)} skill point(s).`}</small>
+          <button disabled={!s.can_unlock} onClick={()=>act('unlock_skill',{skill_key:s.key})}>{s.can_unlock ? 'Spend Skill Point' : 'Locked'}</button>
           <details>
             <summary>What it does</summary>
             <p>{s.description}</p>
@@ -4644,13 +5519,13 @@ function Skills({state,act}) {
       </Panel>
 
       <Panel title={`${selected.name || 'Skill'} Detail`}>
-        <div className="careerDetailHeader">
-          <div className="careerIcon large"><ProgressIcon name={selected.icon} size={26}/></div>
+        <div className="skillDetailHeader">
+          <div className="skillIcon large"><ProgressIcon name={selected.icon} size={26}/></div>
           <div><b>{selected.name}</b><span>{selected.category} • Level {selected.level}</span><p>{selected.description}</p></div>
         </div>
         <Bar label="Current Level Progress" value={selected.progress_pct || 0} max={100}/>
         <div className="bonusGrid">
-          <div><b>Trained By</b>{(selected.trained_by || []).map((x,i)=><span key={i}>{x}</span>)}</div>
+          <div><b>XP Sources</b>{(selected.trained_by || []).map((x,i)=><span key={i}>{x}</span>)}</div>
           <div><b>Affects</b>{(selected.affects || []).map((x,i)=><span key={i}>{x}</span>)}</div>
           <div><b>Passive Bonuses</b>{(selected.passive_bonuses || []).map((x,i)=><span key={i}>{x}</span>)}</div>
           <div><b>Current Effects</b>{(selected.current_effects || []).map((x,i)=><span key={i}>{x}</span>)}</div>
@@ -4725,8 +5600,7 @@ function Fight({state, act, loading}) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [escapeResult, setEscapeResult] = useState(null);
   const selected = targets.find(t => t.id === selectedId) || targets[0] || null;
-  const selectedEnergyCost = Number(selected?.energyCost || selected?.rewardProfile?.energyCost || 0);
-  const battleBlockedReason = fight.blockedReason || (!selected?.attackable ? (selected?.blockedReason || 'Target unavailable') : null) || (!state.user?.god_mode && selectedEnergyCost > Number(state.player?.energy || 0) ? `Need ${selectedEnergyCost} energy` : null);
+  const battleBlockedReason = fight.blockedReason || (!selected?.attackable ? (selected?.blockedReason || 'Target unavailable') : null);
   const filtered = targets.filter(t => kindFilter === 'all' || t.kind === kindFilter || String(t.role || '').toLowerCase().includes(kindFilter));
   const log = battle?.log || [];
   const visibleLog = log.slice(0, activeIndex + 1);
@@ -4777,7 +5651,7 @@ function Fight({state, act, loading}) {
     }
   }
 
-  return <Page title="Fight" sub="Same-location PvE/PvP combat. Ship loadout, combat skills, career, legality, heat, and rewards all matter.">
+  return <Page title="Fight" sub="Same-location PvE/PvP combat. Ship loadout, combat skills, skill, legality, heat, and rewards all matter.">
     <div className="fightTop">
       <Panel title="Current Combat Zone" help="Combat targets are limited to your current planet or station. Travel and jail block combat.">
         <Stats pairs={{
@@ -4831,7 +5705,6 @@ function Fight({state, act, loading}) {
             Role:label(selected.role),
             Danger:selected.danger,
             Reward:fmt(selected.rewardEstimate),
-            Energy:selectedEnergyCost || '—',
             Tier:`T${selected.rewardProfile?.tier || selected.ship?.tier || 1}`,
             Difficulty:selected.rewardProfile?.difficulty || '—',
             LootChance:selected.rewardProfile?.lootChance ? `${Math.round(selected.rewardProfile.lootChance*100)}%` : '—',
@@ -4914,6 +5787,12 @@ function Ships({state, act, loading}) {
   });
   const compareRows = ['hull','shield','armor','cargo_capacity','fuel_capacity','drive_speed','combat_rating','mining_efficiency','scan_strength','stealth'];
   const statHelp = h.statHelp || {};
+  const shipRequirementText = (ship) => {
+    const req = ship?.specialization_eligibility;
+    if (!req) return '';
+    if (!req.requirements?.length) return 'T1 role ship: no tree requirement';
+    return req.requirements.map(r => `${label(r.tree)} ${fmt(r.havePct)}% / ${fmt(r.requiredPct)}%`).join(' + ');
+  };
   return <Page title="Ships & Hangar" sub="Active ship, owned ships, ship market, modules, slots, compatibility, stats, repairs, and gameplay impact.">
     <div className="hangarHero">
       <div className="hangarHeroImage"><GameImage src="" assetType="ship" category={active.role || active.class_name || active.template_name || active.name} alt={active.name || 'Active ship'} /></div>
@@ -4931,8 +5810,7 @@ function Ships({state, act, loading}) {
         <MiniMeter label="Hull" value={active.hull} max={active.max_hull} />
         <MiniMeter label="Shield" value={active.shield} max={active.max_shield} />
         <MiniMeter label="Cargo" value={h.cargoSummary?.total} max={h.cargoSummary?.max} danger={h.cargoSummary?.pct >= 80} />
-        <MiniMeter label="Fuel" value={h.fuelSummary?.value ?? state.player.fuel} max={h.fuelSummary?.max ?? state.player.max_fuel} />
-        <MiniMeter label="Energy" value={h.energySummary?.value ?? state.player.energy} max={h.energySummary?.max ?? state.player.max_energy} />
+        <MiniMeter label="Fuel" value={h.fuelSummary?.value ?? state.player.fuel} max={h.fuelSummary?.max ?? state.player.max_fuel} />
       </div>
     </div>
 
@@ -4950,6 +5828,7 @@ function Ships({state, act, loading}) {
             <span>{ship.class_name || ship.template_name} • {label(ship.role || 'ship')} • Size {ship.speed_profile?.size_class || ship.size_class || 'M'}</span>
             <small><TierBadge item={ship} /> Hull {fmt(ship.max_hull)} • Cargo {fmt(ship.derived_stats?.cargo_capacity ?? ship.cargo_capacity)} • Speed {fmt(ship.speed_profile?.effective_map_speed || ship.drive_speed)}</small>
             <small className="insuranceMini">Insurance {ship.insurance?.coveragePct ?? 15}% • Payout {fmt(ship.insurance?.estimatedPayout || 0)}</small>
+            <small className={`shipReqLine ${ship.specialization_eligibility?.eligible === false ? 'blocked' : ''}`}>{shipRequirementText(ship)}</small>
             {ship.active ? <em>ACTIVE</em> : <em>{ship.activation_blocked_reason || 'READY'}</em>}
           </button>)}
         </div>
@@ -4962,6 +5841,7 @@ function Ships({state, act, loading}) {
             <h3>{selected.name || 'No ship selected'}</h3>
             <p>{selected.class_name || selected.template_name} • {label(selected.role || 'general')} • Size {selected.speed_profile?.size_class || selected.size_class || 'M'} • Mass {fmt(selected.speed_profile?.mass || selected.mass || 0)} • Map speed {fmt(selected.speed_profile?.effective_map_speed || selected.drive_speed || 0)} • <TierBadge item={selected} /></p>
             <div className="tagCloud">{(selectedStats.best_for || []).map(x=><span key={x}>{x}</span>)}</div>
+            {shipRequirementText(selected) && <div className={`shipReqLine detail ${selected.specialization_eligibility?.eligible === false ? 'blocked' : ''}`}>{shipRequirementText(selected)}</div>}
           </div>
         </div>
         <InsuranceBox ship={selected} act={act} loading={loading} />
@@ -5026,6 +5906,7 @@ function Ships({state, act, loading}) {
             <h3>{ship.name}</h3>
             <p>{ship.class_name} • {label(ship.role)} • <TierBadge item={ship} /></p>
             <Stats pairs={{Price:ship.price, Hull:ship.hull, Shield:ship.shield, Armor:ship.armor, Cargo:ship.cargo_capacity, Fuel:ship.fuel_capacity, Drive:ship.drive_speed}} />
+            <div className={`shipReqLine detail ${ship.specialization_eligibility?.eligible === false ? 'blocked' : ''}`}>{shipRequirementText(ship)}</div>
             <button onClick={()=>act('buy_ship',{code:ship.code})} disabled={loading || ship.owned || !ship.can_buy}>{ship.owned ? 'Owned' : ship.blocked_reason || 'Buy Ship'}</button>
           </div>
         </div>)}
@@ -5068,11 +5949,13 @@ function slotIcon(type) {
 
 function ScanBlipIcon({type}) {
   const key = String(type || 'contact').toLowerCase();
-  const Icon = key.includes('ship') ? Rocket
-    : key.includes('ore') || key.includes('salvage') ? Package
+  const Icon = key.includes('hostile') ? Crosshair
+    : key.includes('ship') ? Rocket
+    : key.includes('ore') ? Hammer
+    : key.includes('salvage') ? Package
     : key.includes('station') || key.includes('base') ? Building2
-    : key.includes('event') || key.includes('hostile') ? Crosshair
-    : key.includes('exploration') || key.includes('signal') ? Globe2
+    : key.includes('event') ? CalendarDays
+    : key.includes('exploration') || key.includes('signal') ? Search
     : Shield;
   return <Icon size={18} strokeWidth={2.4} />;
 }
@@ -5113,6 +5996,376 @@ function eventMeta(e) {
   try { return typeof e.meta_json === 'string' ? JSON.parse(e.meta_json) : e.meta_json; } catch { return {}; }
 }
 
+const FORUM_BOARDS = [
+  {key:'general', label:'General', deck:'Game talk, notices, help, and server chatter.'},
+  {key:'off-topic', label:'Off Topic', deck:'Everything that does not need a flight plan.'},
+];
+
+function forumSeed() {
+  const now = Date.now();
+  return [
+    {
+      id:'seed-bug-bounty',
+      board:'general',
+      title:'Bug Bounty',
+      author:'Nova Ops',
+      role:'Admin',
+      createdAt:new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      lastActivity:new Date(now - 3 * 60 * 60 * 1000).toISOString(),
+      pinned:true,
+      locked:false,
+      complete:false,
+      votes:5,
+      views:91,
+      tags:['bugs','rewards'],
+      body:'Post reproducible bugs here with steps, screenshots, and your pilot name. Confirmed reports earn credits and forum rep.',
+      replies:[
+        {id:'seed-r1', author:'Josh', role:'Pilot', createdAt:new Date(now - 4 * 60 * 60 * 1000).toISOString(), body:'Found a market display edge case after selling a full cargo hold. Adding notes tonight.', votes:1},
+      ],
+    },
+    {
+      id:'seed-dice',
+      board:'general',
+      title:'Nova Dice Game (Intro)',
+      author:'Jamie',
+      role:'Moderator',
+      createdAt:new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      lastActivity:new Date(now - 30 * 60 * 1000).toISOString(),
+      pinned:true,
+      locked:false,
+      complete:false,
+      votes:4,
+      views:74,
+      tags:['event','casino'],
+      body:'A lightweight forum dice game for station downtime. Reply with your wager and a number from 1-6.',
+      replies:[],
+    },
+    {
+      id:'seed-welcome',
+      board:'general',
+      title:'Welcome to Nova Frontiers Forums',
+      author:'Josh',
+      role:'Admin',
+      createdAt:new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      lastActivity:new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      pinned:true,
+      locked:false,
+      complete:false,
+      votes:3,
+      views:43,
+      tags:['welcome'],
+      body:'Use General for mechanics, trades, crews, questions, and server announcements. Keep spoilers marked and keep faction salt readable.',
+      replies:[],
+    },
+    {
+      id:'seed-complete',
+      board:'general',
+      title:'Nova Frontiers Dice',
+      author:'Jamie',
+      role:'Moderator',
+      createdAt:new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      lastActivity:new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(),
+      pinned:false,
+      locked:true,
+      complete:true,
+      votes:0,
+      views:147,
+      tags:['complete'],
+      body:'The first dice event has paid out. Archive kept for results and receipts.',
+      replies:[
+        {id:'seed-r2', author:'Nova Ops', role:'Admin', createdAt:new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString(), body:'Complete. Payouts delivered.', votes:2},
+      ],
+    },
+    {
+      id:'seed-update',
+      board:'general',
+      title:'Update 1.1.7',
+      author:'Mr_Wednesday',
+      role:'Developer',
+      createdAt:new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      lastActivity:new Date(now - 14 * 24 * 60 * 60 * 1000).toISOString(),
+      pinned:false,
+      locked:false,
+      complete:false,
+      votes:2,
+      views:62,
+      tags:['patch'],
+      body:'Patch thread for balance notes, small UI fixes, and reports from live testing.',
+      replies:[
+        {id:'seed-r3', author:'Reclaimer', role:'Pilot', createdAt:new Date(now - 13 * 24 * 60 * 60 * 1000).toISOString(), body:'The new hangar detail view is much easier to scan.', votes:1},
+        {id:'seed-r4', author:'Varn Relay', role:'Pilot', createdAt:new Date(now - 12 * 24 * 60 * 60 * 1000).toISOString(), body:'Fuel warnings are showing up correctly on my route now.', votes:1},
+        {id:'seed-r5', author:'Kite', role:'Pilot', createdAt:new Date(now - 11 * 24 * 60 * 60 * 1000).toISOString(), body:'Can confirm the repair timer looks fixed.', votes:0},
+        {id:'seed-r6', author:'Mira', role:'Pilot', createdAt:new Date(now - 10 * 24 * 60 * 60 * 1000).toISOString(), body:'Market restock feels steadier.', votes:0},
+        {id:'seed-r7', author:'Ash', role:'Pilot', createdAt:new Date(now - 9 * 24 * 60 * 60 * 1000).toISOString(), body:'No regression on cargo listings here.', votes:0},
+        {id:'seed-r8', author:'Mr_Wednesday', role:'Developer', createdAt:new Date(now - 8 * 24 * 60 * 60 * 1000).toISOString(), body:'Thanks, keeping this open for one more pass.', votes:1},
+      ],
+    },
+    {
+      id:'seed-off-topic',
+      board:'off-topic',
+      title:'Station Lounge',
+      author:'Helios Courier',
+      role:'Pilot',
+      createdAt:new Date(now - 2 * 24 * 60 * 60 * 1000).toISOString(),
+      lastActivity:new Date(now - 90 * 60 * 1000).toISOString(),
+      pinned:false,
+      locked:false,
+      complete:false,
+      votes:1,
+      views:28,
+      tags:['lounge'],
+      body:'Off-duty chatter goes here. Screenshots, builds, music, victory laps, and mild nonsense.',
+      replies:[],
+    },
+  ];
+}
+
+function loadForumThreads() {
+  if (typeof window === 'undefined') return forumSeed();
+  try {
+    const parsed = JSON.parse(localStorage.getItem('nova_forum_threads') || 'null');
+    return Array.isArray(parsed) && parsed.length ? parsed : forumSeed();
+  } catch {
+    return forumSeed();
+  }
+}
+
+function forumTimeAgo(value) {
+  const ms = Date.now() - new Date(value || Date.now()).getTime();
+  const min = Math.max(1, Math.floor(ms / 60000));
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 14) return `${day} day${day === 1 ? '' : 's'} ago`;
+  const wk = Math.floor(day / 7);
+  return `${wk} week${wk === 1 ? '' : 's'} ago`;
+}
+
+function Forum({state}) {
+  const isAdmin = !!state.user?.god_mode || String(state.user?.role || '').toLowerCase() === 'admin';
+  const authorName = state.profile?.displayName || state.player?.callsign || state.user?.username || 'Pilot';
+  const authorRole = isAdmin ? 'Admin' : 'Pilot';
+  const [threads,setThreads] = useState(loadForumThreads);
+  const [activeBoard,setActiveBoard] = useState('general');
+  const [selectedThreadId,setSelectedThreadId] = useState('');
+  const [query,setQuery] = useState('');
+  const [sort,setSort] = useState('latest');
+  const [composerOpen,setComposerOpen] = useState(false);
+  const [draft,setDraft] = useState({title:'', body:'', tags:''});
+  const [replyDraft,setReplyDraft] = useState('');
+  const [adminTitle,setAdminTitle] = useState('');
+  const selectedThread = threads.find(t => t.id === selectedThreadId) || null;
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') localStorage.setItem('nova_forum_threads', JSON.stringify(threads));
+  }, [threads]);
+
+  useEffect(() => {
+    if (selectedThread) setAdminTitle(selectedThread.title || '');
+  }, [selectedThread?.id, selectedThread?.title]);
+
+  const visibleThreads = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const filtered = threads.filter(t => t.board === activeBoard && (!q ||
+      String(t.title || '').toLowerCase().includes(q) ||
+      String(t.body || '').toLowerCase().includes(q) ||
+      (t.tags || []).some(tag => String(tag).toLowerCase().includes(q))
+    ));
+    const sorted = [...filtered].sort((a,b) => {
+      if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+      if (sort === 'popular') return Number(b.votes || 0) - Number(a.votes || 0) || Number(b.views || 0) - Number(a.views || 0);
+      if (sort === 'unanswered') return (a.replies || []).length - (b.replies || []).length || new Date(b.lastActivity) - new Date(a.lastActivity);
+      return new Date(b.lastActivity || b.createdAt) - new Date(a.lastActivity || a.createdAt);
+    });
+    return sorted;
+  }, [threads, activeBoard, query, sort]);
+
+  const boardCounts = useMemo(() => Object.fromEntries(FORUM_BOARDS.map(board => [
+    board.key,
+    threads.filter(t => t.board === board.key).length,
+  ])), [threads]);
+
+  const updateThread = useCallback((id, updater) => {
+    setThreads(prev => prev.map(t => t.id === id ? (typeof updater === 'function' ? updater(t) : {...t, ...updater}) : t));
+  }, []);
+
+  const openThread = (thread) => {
+    setSelectedThreadId(thread.id);
+    updateThread(thread.id, t => ({...t, views:Number(t.views || 0) + 1}));
+  };
+
+  const createThread = () => {
+    const title = draft.title.trim();
+    const body = draft.body.trim();
+    if (!title || !body) return;
+    const now = new Date().toISOString();
+    const tags = draft.tags.split(',').map(t => t.trim()).filter(Boolean).slice(0, 4);
+    const thread = {
+      id:uid(),
+      board:activeBoard,
+      title,
+      body,
+      tags,
+      author:authorName,
+      role:authorRole,
+      createdAt:now,
+      lastActivity:now,
+      pinned:false,
+      locked:false,
+      complete:false,
+      votes:0,
+      views:0,
+      replies:[],
+    };
+    setThreads(prev => [thread, ...prev]);
+    setDraft({title:'', body:'', tags:''});
+    setComposerOpen(false);
+    setSelectedThreadId(thread.id);
+  };
+
+  const addReply = () => {
+    const body = replyDraft.trim();
+    if (!selectedThread || selectedThread.locked || !body) return;
+    const now = new Date().toISOString();
+    updateThread(selectedThread.id, t => ({
+      ...t,
+      lastActivity:now,
+      replies:[...(t.replies || []), {id:uid(), author:authorName, role:authorRole, createdAt:now, body, votes:0}],
+    }));
+    setReplyDraft('');
+  };
+
+  const voteThread = (id, delta) => updateThread(id, t => ({...t, votes:Number(t.votes || 0) + delta}));
+  const voteReply = (replyId, delta) => {
+    if (!selectedThread) return;
+    updateThread(selectedThread.id, t => ({
+      ...t,
+      replies:(t.replies || []).map(r => r.id === replyId ? {...r, votes:Number(r.votes || 0) + delta} : r),
+    }));
+  };
+
+  const adminDelete = (id) => {
+    setThreads(prev => prev.filter(t => t.id !== id));
+    if (selectedThreadId === id) setSelectedThreadId('');
+  };
+
+  const adminApplyTitle = () => {
+    if (selectedThread && adminTitle.trim()) updateThread(selectedThread.id, {title:adminTitle.trim()});
+  };
+
+  return <Page title="Forum" sub="Threaded boards with replies, pinned topics, votes, search, board tabs, and admin moderation controls.">
+    <div className="forumShell">
+      <section className="forumMain">
+        <div className="forumBoardTabs">
+          {FORUM_BOARDS.map(board => <button key={board.key} className={activeBoard === board.key ? 'active' : ''} onClick={()=>{ setActiveBoard(board.key); setSelectedThreadId(''); }}>
+            {board.label}<span>{fmt(boardCounts[board.key] || 0)}</span>
+          </button>)}
+        </div>
+
+        {!selectedThread && <Panel title="Discussions">
+          <div className="forumToolbar">
+            <label className="forumSearch"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search threads" /></label>
+            <select value={sort} onChange={e=>setSort(e.target.value)} aria-label="Sort forum threads">
+              <option value="latest">Latest activity</option>
+              <option value="popular">Most popular</option>
+              <option value="unanswered">Unanswered</option>
+            </select>
+            <button className="primary forumNewThread" onClick={()=>setComposerOpen(v=>!v)}><Plus size={16}/>New Thread</button>
+          </div>
+          {composerOpen && <div className="forumComposer">
+            <input value={draft.title} onChange={e=>setDraft(d=>({...d,title:e.target.value}))} placeholder="Thread title" />
+            <textarea value={draft.body} onChange={e=>setDraft(d=>({...d,body:e.target.value}))} placeholder="What do you want to discuss?" />
+            <input value={draft.tags} onChange={e=>setDraft(d=>({...d,tags:e.target.value}))} placeholder="Tags, comma separated" />
+            <div className="forumComposerActions"><button onClick={createThread}>Post Thread</button><button onClick={()=>setComposerOpen(false)}>Cancel</button></div>
+          </div>}
+          <div className="forumThreadList">
+            {visibleThreads.map(thread => <div key={thread.id} className={`forumThreadRow ${thread.pinned ? 'pinned' : ''} ${thread.locked ? 'locked' : ''}`}>
+              <button className="forumThreadOpen" onClick={()=>openThread(thread)}>
+                <span className="forumThreadIcon">{thread.pinned ? <Pin size={15}/> : thread.locked ? <Lock size={15}/> : <MessageCircle size={15}/>}</span>
+                <span className="forumThreadText">
+                  <b>{thread.title}{thread.complete && <em>Complete</em>}</b>
+                  <small>{thread.author} - {forumTimeAgo(thread.createdAt)} - {(thread.replies || []).length} replies - <Eye size={12}/> {fmt(thread.views || 0)}</small>
+                </span>
+                <span className="forumScore"><ArrowUp size={13}/>{signed(thread.votes || 0)}</span>
+              </button>
+              {isAdmin && <div className="forumInlineAdmin">
+                <button onClick={()=>updateThread(thread.id, t => ({...t, pinned:!t.pinned}))}>{thread.pinned ? 'Unpin' : 'Pin'}</button>
+                <button onClick={()=>updateThread(thread.id, t => ({...t, locked:!t.locked}))}>{thread.locked ? 'Unlock' : 'Lock'}</button>
+              </div>}
+            </div>)}
+            {!visibleThreads.length && <div className="forumEmpty">No matching threads yet.</div>}
+          </div>
+        </Panel>}
+
+        {selectedThread && <Panel title={selectedThread.title}>
+          <div className="forumDetailHead">
+            <button onClick={()=>setSelectedThreadId('')}>Back</button>
+            <div>
+              <span>{selectedThread.author} - {forumTimeAgo(selectedThread.createdAt)} - {label(selectedThread.board)}</span>
+              <div className="forumTagRow">
+                {selectedThread.pinned && <em><Pin size={12}/>Pinned</em>}
+                {selectedThread.locked && <em><Lock size={12}/>Locked</em>}
+                {selectedThread.complete && <em>Complete</em>}
+                {(selectedThread.tags || []).map(tag => <em key={tag}>{tag}</em>)}
+              </div>
+            </div>
+            <div className="forumVoteBox">
+              <button aria-label="Upvote thread" onClick={()=>voteThread(selectedThread.id, 1)}><ArrowUp size={15}/></button>
+              <b>{signed(selectedThread.votes || 0)}</b>
+              <button aria-label="Downvote thread" onClick={()=>voteThread(selectedThread.id, -1)}><ArrowDown size={15}/></button>
+            </div>
+          </div>
+          <article className="forumPost">
+            <div className="forumAuthor"><ProfileAvatar profile={state.profile} size="sm" /><b>{selectedThread.author}</b><span>{selectedThread.role || 'Pilot'}</span></div>
+            <p>{selectedThread.body}</p>
+          </article>
+          <div className="forumReplies">
+            {(selectedThread.replies || []).map(reply => <article className="forumReply" key={reply.id}>
+              <div className="forumAuthor"><ProfileAvatar profile={{displayName:reply.author}} size="sm" /><b>{reply.author}</b><span>{reply.role || 'Pilot'}</span><small>{forumTimeAgo(reply.createdAt)}</small></div>
+              <p>{reply.body}</p>
+              <div className="forumReplyVote"><button onClick={()=>voteReply(reply.id, 1)}><ArrowUp size={13}/></button><b>{signed(reply.votes || 0)}</b><button onClick={()=>voteReply(reply.id, -1)}><ArrowDown size={13}/></button></div>
+            </article>)}
+          </div>
+          {selectedThread.locked ? <div className="forumEmpty">This thread is locked.</div> : <div className="forumComposer replyComposer">
+            <textarea value={replyDraft} onChange={e=>setReplyDraft(e.target.value)} placeholder="Write a reply" />
+            <div className="forumComposerActions"><button onClick={addReply}><Send size={15}/>Reply</button></div>
+          </div>}
+        </Panel>}
+      </section>
+
+      <aside className="forumSide">
+        <Panel title="Board Stats">
+          <div className="forumStats">
+            <span>Threads <b>{fmt(threads.length)}</b></span>
+            <span>Replies <b>{fmt(threads.reduce((sum,t)=>sum + (t.replies || []).length, 0))}</b></span>
+            <span>Pinned <b>{fmt(threads.filter(t => t.pinned).length)}</b></span>
+            <span>Locked <b>{fmt(threads.filter(t => t.locked).length)}</b></span>
+          </div>
+        </Panel>
+
+        {selectedThread && isAdmin && <Panel title="Admin Controls">
+          <div className="forumAdminPanel">
+            <label>Title<input value={adminTitle} onChange={e=>setAdminTitle(e.target.value)} /></label>
+            <button onClick={adminApplyTitle}>Save Title</button>
+            <label>Board<select value={selectedThread.board} onChange={e=>updateThread(selectedThread.id, {board:e.target.value})}>{FORUM_BOARDS.map(board => <option key={board.key} value={board.key}>{board.label}</option>)}</select></label>
+            <button onClick={()=>updateThread(selectedThread.id, t => ({...t, pinned:!t.pinned}))}>{selectedThread.pinned ? 'Unpin Thread' : 'Pin Thread'}</button>
+            <button onClick={()=>updateThread(selectedThread.id, t => ({...t, locked:!t.locked}))}>{selectedThread.locked ? 'Unlock Thread' : 'Lock Thread'}</button>
+            <button onClick={()=>updateThread(selectedThread.id, t => ({...t, complete:!t.complete, locked:t.complete ? t.locked : true}))}>{selectedThread.complete ? 'Reopen Complete' : 'Mark Complete'}</button>
+            <button className="dangerBtn" onClick={()=>adminDelete(selectedThread.id)}>Delete Thread</button>
+          </div>
+        </Panel>}
+
+        {isAdmin && !selectedThread && <Panel title="Admin Queue">
+          <div className="forumAdminQueue">
+            {threads.filter(t => !t.locked).slice(0,5).map(t => <button key={t.id} onClick={()=>openThread(t)}><b>{t.title}</b><span>{fmt((t.replies || []).length)} replies - {signed(t.votes || 0)}</span></button>)}
+          </div>
+        </Panel>}
+      </aside>
+    </div>
+  </Page>;
+}
+
 function Messages({state,setPage,setTradeModalId,openServerEventOnMap}) {
   const serverEventLookup = useMemo(() => {
     const events = [
@@ -5135,7 +6388,7 @@ function Messages({state,setPage,setTradeModalId,openServerEventOnMap}) {
   const eventMessage = (e) => {
     if (e.category !== 'server_event' || !openServerEventOnMap) return e.message;
     const meta = eventMeta(e);
-    const match = String(e.message || '').match(/^(.+?)(\s+(?:starts soon|is active|ended)\.?)$/i);
+    const match = String(e.message || '').match(/^Event\s+(.+?)\s+(begins in 2 hours|has started)$/i);
     if (!match) return e.message;
     const linked = serverEventLookup.get(String(meta.eventId)) || normalizeServerEvent({
       id: meta.eventId,
@@ -5145,11 +6398,11 @@ function Messages({state,setPage,setTradeModalId,openServerEventOnMap}) {
     });
     return <>
       <button type="button" className="eventNameLink" onClick={()=>openServerEventOnMap({...linked, name:match[1]})}>{match[1]}</button>
-      {match[2]}
+      {` ${match[2]}`}
     </>;
   };
-  return <Page title="Messages" sub="Actionable invites and requests persist here even after toast notifications disappear.">
-    <Panel title="System Events">
+  return <Page title="Messages" sub="Actionable messages and filtered player-relevant events.">
+    <Panel title="System Events Log">
       {(state.events || []).map(e=><div className="event actionableEvent" key={e.id}><b>{e.category}</b><span>{eventMessage(e)}</span><small>{new Date(e.created_at).toLocaleString()}</small>{actionButton(e)}</div>)}
       <button onClick={()=>setPage('Chat')}>Open Chat</button>
     </Panel>
@@ -5166,7 +6419,7 @@ function Admin({state,act,token}) {
   const worldConfig = groups.find(g => g.key === 'WORLD_PROGRESSION_BALANCE');
   const serverConfig = groups.find(g => g.key === 'WORLD_SERVER_BALANCE');
   const missionConfig = groups.find(g => g.key === 'WORLD_MISSION_BALANCE');
-  const progressionConfig = groups.find(g => g.key === 'PROGRESSION_BALANCE');
+  const skillsConfig = groups.find(g => g.key === 'PROGRESSION_BALANCE');
   const ecosystemConfig = groups.find(g => g.key === 'ECOSYSTEM_BALANCE');
   const economyConfig = groups.find(g => g.key === 'ECONOMY_BALANCE');
   const craftingConfig = groups.find(g => g.key === 'CRAFTING_BALANCE');
@@ -5228,7 +6481,7 @@ function Admin({state,act,token}) {
   return <Page title="Admin Game Tuning">
     <Panel title="Runtime Balance Controls" help="Godmode/dev admin only. Values persist in SQLite game_settings and apply immediately without rebuilding. Edit JSON carefully.">
       <div className="adminHeroGrid">
-        <div><b>Live tuning</b><span>NPC life, radar, traffic, ticks, economy, combat, crafting, travel, cargo, and progression variables.</span></div>
+        <div><b>Live tuning</b><span>NPC life, radar, traffic, ticks, economy, combat, crafting, travel, cargo, and skills variables.</span></div>
         <div><b>Refresh</b><span>{fmt(tuning.client_runtime?.state_refresh_seconds || 10)}s client state polling</span></div>
         <div><b>Groups</b><span>{fmt(groups.length)} editable config groups</span></div>
       </div>
@@ -5242,7 +6495,7 @@ function Admin({state,act,token}) {
       </div>
       <div className="adminTabBar">
         <button className={adminTab==='console'?'active':''} onClick={()=>setAdminTab('console')}>Actors + Action Log</button>
-        <button className={adminTab==='world'?'active':''} onClick={()=>setAdminTab('world')}>World Progression</button>
+        <button className={adminTab==='world'?'active':''} onClick={()=>setAdminTab('world')}>World Skills</button>
         <button className={adminTab==='server'?'active':''} onClick={()=>setAdminTab('server')}>Server World Control</button>
         <button className={adminTab==='missions'?'active':''} onClick={()=>setAdminTab('missions')}>Planet Missions</button>
         <button className={adminTab==='economy'?'active':''} onClick={()=>setAdminTab('economy')}>Economy Balance</button>
@@ -5253,10 +6506,10 @@ function Admin({state,act,token}) {
 
     {adminTab === 'console' && <AdminConsoleTables actors={adminConsole.actors || []} actions={adminConsole.actions || []} onRefresh={refreshAdminTables} />}
 
-    {adminTab === 'world' && <AdminWorldProgressionTab
+    {adminTab === 'world' && <AdminWorldSkillsTab
       group={worldConfig}
       onSave={saveWorldConfig}
-      onApply={()=>act('admin_apply_world_progression', {})}
+      onApply={()=>act('admin_apply_world_skills', {})}
     />}
 
     {adminTab === 'server' && <AdminServerWorldControlTab
@@ -5275,7 +6528,7 @@ function Admin({state,act,token}) {
     {adminTab === 'economy' && <AdminEconomyBalanceTab
       state={state}
       groups={{
-        PROGRESSION_BALANCE: progressionConfig,
+        PROGRESSION_BALANCE: skillsConfig,
         ECOSYSTEM_BALANCE: ecosystemConfig,
         ECONOMY_BALANCE: economyConfig,
         CRAFTING_BALANCE: craftingConfig,
@@ -5330,7 +6583,7 @@ function Admin({state,act,token}) {
 
       <Panel title="NPC Life Quick Targets">
         <div className="adminHintGrid">
-          <div><b>World progression</b><code>WORLD_PROGRESSION_BALANCE</code><span>Galaxy expansion, planets per galaxy, resource bands, and NPC level bands.</span></div>
+          <div><b>World skills</b><code>WORLD_PROGRESSION_BALANCE</code><span>Galaxy expansion, planets per galaxy, resource bands, and NPC level bands.</span></div>
           <div><b>NPC objective behavior</b><code>NPC_OBJECTIVE_BALANCE</code><span>Adjust role weights, bad/good thresholds, radar contact bonuses, and search behavior.</span></div>
           <div><b>Radar ranges</b><code>RADAR_BALANCE</code><span>Adjust base/final radar ranges, tier scaling, NPC role radar ranges.</span></div>
           <div><b>Map traffic / ore / sites</b><code>OPEN_WORLD_BALANCE</code><span>Adjust NPC traffic count, ore/site counts, map timers, open-world behavior.</span></div>
@@ -5339,7 +6592,7 @@ function Admin({state,act,token}) {
       </Panel>
 
       <Panel title="Recent NPC Actions">{(state.npc_activity || []).slice(0,20).map(a=><div className="itemLine" key={a.id}><b>{label(a.action_type)}</b><span>{a.message}</span></div>)}</Panel>
-      <Panel title="Local NPC Roster">{(state.npc_agents||[]).slice(0,35).map(n=><div className="itemLine" key={n.id}><b>{n.name}</b><span>{label(n.career_code || n.role)} • Rank {n.job_rank} • Lvl {n.level} • {n.ship_class} • {n.disposition}</span></div>)}</Panel>
+      <Panel title="Local NPC Roster">{(state.npc_agents||[]).slice(0,35).map(n=><div className="itemLine" key={n.id}><b>{n.name}</b><span>{label(n.skill_code || n.role)} • Rank {n.job_rank} • Lvl {n.level} • {n.ship_class} • {n.disposition}</span></div>)}</Panel>
       <Panel title="Accounts"><code>jon / K3ri223!</code><code>cleo / i$G@y</code><code>jeff / i$G@y</code></Panel>
     </>}
   </Page>
@@ -5486,7 +6739,7 @@ function AdminSecurityTab({state, token}) {
   </>;
 }
 
-function AdminWorldProgressionTab({group,onSave,onApply}) {
+function AdminWorldSkillsTab({group,onSave,onApply}) {
   const current = group?.value || group?.default || {};
   const [draft,setDraft] = useState(JSON.stringify(current, null, 2));
   const [error,setError] = useState('');
@@ -5511,14 +6764,14 @@ function AdminWorldProgressionTab({group,onSave,onApply}) {
   };
 
   return <div className="adminConsoleStack">
-    <Panel title="World Progression Control" help="Controls galaxy count, planets per galaxy, faction balance, resource tier distribution, and NPC level bands from each faction home toward center space.">
+    <Panel title="World Skills Control" help="Controls galaxy count, planets per galaxy, faction balance, resource tier distribution, and NPC level bands from each faction home toward center space.">
       <div className="adminHeroGrid">
         <div><b>Target planets / galaxy</b><span>{fmt(parsed.target_planets_per_galaxy || 8)}</span></div>
         <div><b>Galaxy multiplier</b><span>{fmt(parsed.target_galaxy_multiplier || 1.5)}x</span></div>
         <div><b>Faction expansion</b><span>{fmt(parsed.extra_galaxies_per_faction || 2)} extra per faction</span></div>
       </div>
       <div className="buttonRow">
-        <button className="primary" onClick={save}>Save World Progression JSON</button>
+        <button className="primary" onClick={save}>Save World Skills JSON</button>
         <button onClick={onApply}>Apply Expansion + Regenerate Resource Nodes</button>
         <button onClick={()=>setDraft(JSON.stringify(group?.default || {}, null, 2))}>Load Defaults</button>
       </div>
@@ -5541,7 +6794,7 @@ function AdminWorldProgressionTab({group,onSave,onApply}) {
       </div>
     </Panel>
 
-    <Panel title="Raw World Progression JSON">
+    <Panel title="Raw World Skills JSON">
       <div className="adminJsonEditor">
         <textarea value={draft} onChange={e=>setDraft(e.target.value)} spellCheck={false} />
       </div>
@@ -6279,7 +7532,7 @@ function AdminServerWorldControlTab({group,onSave,onRun}) {
         <div><b>NPC pass</b><code>{fmt(parsed.npc_check_min_seconds || 60)}-{fmt(parsed.npc_check_max_seconds || 120)} sec</code><span>Each galaxy rolls a target between {fmt(parsed.npcs_per_galaxy_min || 15)} and {fmt(parsed.npcs_per_galaxy_max || 30)}. If short, the server spawns one NPC. If over target, it trims one.</span></div>
         <div><b>Faction patrol pass</b><code>{fmt(parsed.patrol_check_min_seconds || 60)}-{fmt(parsed.patrol_check_max_seconds || 120)} sec</code><span>Each galaxy rolls {fmt(parsed.patrols_per_galaxy_min || 4)}-{fmt(parsed.patrols_per_galaxy_max || 6)} own-faction patrols. Missing patrols spawn one at a time, away from existing patrols, and avoid grouping while navigating.</span></div>
         <div><b>Resource pass</b><code>{fmt(Math.round((parsed.resource_check_min_seconds || 900)/60))}-{fmt(Math.round((parsed.resource_check_max_seconds || 1800)/60))} min</code><span>Each galaxy independently rolls mining, exploration, and pirate-base targets. It spawns one of each missing category per due pass.</span></div>
-        <div><b>Pirate bases</b><code>{fmt(Math.round(Number(parsed.pirate_base_strength_mult || 1.25) * 100))}% strength</code><span>Base tier and defender power are derived from the galaxy progression level band, then multiplied stronger than normal local pirates.</span></div>
+        <div><b>Pirate bases</b><code>{fmt(Math.round(Number(parsed.pirate_base_strength_mult || 1.25) * 100))}% strength</code><span>Base tier and defender power are derived from the galaxy skills level band, then multiplied stronger than normal local pirates.</span></div>
         <div><b>Faction patrol behavior</b><code>{fmt(Math.round(Number(parsed.patrol_strength_mult || 2.0) * 100))}% top pirate</code><span>Patrols belong to their galaxy faction, ignore same-faction traffic, attack other-faction contacts on sight, and only patrol their own galaxy.</span></div>
         <div><b>Server authority</b><code>Request-triggered throttle</code><span>The check runs during state/action processing, but each galaxy has its own next-run timestamp so normal player polling does not spam spawns.</span></div>
       </div>
@@ -6317,14 +7570,15 @@ function AdminEconomyBalanceTab({state,groups,onSave,onRecalc}) {
   };
 
   const quickGroups = [
-    ['PROGRESSION_BALANCE','Progression curve + sim'],
+    ['PROGRESSION_BALANCE','Skills curve + sim'],
     ['ECOSYSTEM_BALANCE','Top-level ecosystem'],
     ['ECONOMY_BALANCE','Direct vendor / market spread'],
-    ['PLAYER_MARKET_BALANCE','Player market fees'],
+    ['PLAYER_MARKET_BALANCE','Auction fees'],
     ['CRAFTING_BALANCE','Crafting cost/time'],
     ['TIER_BALANCE','Tier/upgrade curve'],
     ['PVE_BALANCE','Rewards + success'],
-    ['SKILL_XP_BALANCE','Skill XP curve'],
+    ['UNIVERSAL_XP_BALANCE','Universal XP tuning'],
+    ['SKILL_XP_BALANCE','Deprecated skill display curve'],
     ['WORLD_MISSION_BALANCE','Planet mission rewards'],
   ];
 
@@ -6340,10 +7594,10 @@ function AdminEconomyBalanceTab({state,groups,onSave,onRecalc}) {
         <div><b>1000-run Sim</b><span>25% {fmt(summary.simulation?.first_quarter_days || 0)}d • 75% {fmt(summary.simulation?.third_quarter_days || 0)}d • max {fmt(summary.simulation?.median_days || 0)}d median</span></div>
       </div>
       <div className="adminHintGrid ecosystemSimGrid">
-        <div><b>First Quarter</b><code>{fmt(summary.simulation?.first_quarter_days || 0)}d avg</code><span>Starter progression reaches the first quarter near the one-month target.</span></div>
+        <div><b>First Quarter</b><code>{fmt(summary.simulation?.first_quarter_days || 0)}d avg</code><span>Starter skills reaches the first quarter near the one-month target.</span></div>
         <div><b>Middle Band</b><code>{fmt(summary.simulation?.third_quarter_days || 0)}d avg</code><span>Mid game and early late game sit in the several-month band.</span></div>
         <div><b>Skills</b><code>{fmt(summary.simulation?.component_mean_days?.skills || 0)}d avg</code><span>Skill level 75-100 is the intended completion wall.</span></div>
-        <div><b>Career Ranks</b><code>{fmt(summary.simulation?.component_mean_days?.career_ranks || 0)}d avg</code><span>All career rank-10 paths form the long-term grind.</span></div>
+        <div><b>Skill Ranks</b><code>{fmt(summary.simulation?.component_mean_days?.skill_ranks || 0)}d avg</code><span>All skill rank-10 paths form the long-term grind.</span></div>
         <div><b>Completion</b><code>{fmt(summary.simulation?.component_mean_days?.completion_wall || summary.simulation?.median_days || 0)}d avg</code><span>Max-everything median from the latest 1000-run report.</span></div>
         <div><b>Baseline</b><code>{fmt(summary.simulation?.active_hours_per_day || 12)}h/day</code><span>{summary.simulation?.note || 'Simulation report loaded from backend balance tooling.'}</span></div>
       </div>
@@ -6382,8 +7636,8 @@ function AdminEconomyBalanceTab({state,groups,onSave,onRecalc}) {
       <div className="adminHintGrid">
         <div><b>Recipes</b><code>CRAFTING_BALANCE + ECOSYSTEM_BALANCE</code><span>Recipe credit cost and craft time scale upward for modules, weapons, armor, ships, and higher tiers.</span></div>
         <div><b>Crafting mats</b><code>ECOSYSTEM_BALANCE commodity/direct vendor maps</code><span>Raw mats sell low to vendors, refined mats sell better, mission-only mats sell poorly to vendors but matter in recipes.</span></div>
-        <div><b>Vendor sales</b><code>direct_vendor_sell_mult_by_category</code><span>Direct selling is the emergency floor. Player market and planet markets should beat vendor dumps.</span></div>
-        <div><b>Ships/modules</b><code>progression_cost_mult</code><span>Purchase prices are multiplied live at buy time so mid-game and late-game purchases remain meaningful sinks.</span></div>
+        <div><b>Vendor sales</b><code>direct_vendor_sell_mult_by_category</code><span>Direct selling is the emergency floor. Auction and planet markets should beat vendor dumps.</span></div>
+        <div><b>Ships/modules</b><code>skills_cost_mult</code><span>Purchase prices are multiplied live at buy time so mid-game and late-game purchases remain meaningful sinks.</span></div>
         <div><b>Rewards</b><code>PVE_BALANCE / WORLD_MISSION_BALANCE</code><span>Credits are restrained; XP/materials remain useful. Planet missions avoid direct credits.</span></div>
         <div><b>XP</b><code>PROGRESSION_BALANCE + SKILL_XP_BALANCE</code><span>First quarter is quick, the middle spans months, and the final quarter is the long wall.</span></div>
       </div>
@@ -6524,7 +7778,7 @@ function AdminActorProfileModal({actor,onClose}) {
           <h3>Profile</h3>
           <Stats pairs={{
             Username: actor.username || '—',
-            Role: profile.role || profile.career || actor.actorType,
+            Role: profile.role || profile.skill || actor.actorType,
             Status: actor.status || '—',
             Level: fmt(actor.level || 0),
             XP: fmt(actor.xp || 0),
@@ -6551,7 +7805,6 @@ function AdminActorProfileModal({actor,onClose}) {
           <Stats pairs={{
             Credits: fmt(stats.credits || 0),
             Fuel: stats.maxFuel ? `${fmt(stats.fuel || 0)} / ${fmt(stats.maxFuel)}` : fmt(stats.fuel || 0),
-            Energy: stats.maxEnergy ? `${fmt(stats.energy || 0)} / ${fmt(stats.maxEnergy)}` : fmt(stats.energy || 0),
             Cargo: stats.maxCargo ? `${fmt(stats.cargo || 0)} / ${fmt(stats.maxCargo)}` : fmt(stats.cargo || 0),
             Health: stats.maxHealth ? `${fmt(stats.health || 0)} / ${fmt(stats.maxHealth)}` : fmt(stats.health || 0),
             Heat: fmt(stats.heat || 0),
@@ -6629,7 +7882,7 @@ function PirateStation({state,act,clock,setPage}) {
     <div className="pirateStationLayout">
       <Panel title="Station Assault Status" help="The station resource is the shared defender pool. Defeated enemies stay defeated. Damaged enemies keep their damage for everyone in the station.">
         <div className="stationStatusHead">
-          <GameImage src={ps.station?.image_url} assetType="station" category="pirate station" alt={ps.station?.name || 'Pirate station'} />
+          <GameImage src={ps.station?.image_url} assetType="station" category={`pirate base tier ${ps.station?.tier || 2}`} alt={ps.station?.name || 'Pirate base'} />
           <div>
             <b>{ps.station?.name}</b>
             <span>Tier T{fmt(ps.station?.tier)} - Difficulty {fmt(ps.station?.difficulty)} - {fmt(ps.remaining)} / {fmt(ps.total)} defenders - doubled station strength</span>
@@ -6822,11 +8075,212 @@ function AdminSpawnModal({context, onSpawn, onClose}) {
   </div>;
 }
 
-function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanObject, onScanSite, onInvestigate, onEnterPirateStation, onPlaceBase, onAdminSpawn, onDockBase, onMissionTravel, currentId, clock, mapMode, onMapModeChange, onViewGalaxy, focusTarget=null, onPilotTrade=null, onPilotParty=null, onPilotBlock=null, party=null, publicProfiles=[], missionCooldown=null, autoExploreMode='', autoExploreLastMode='pirate', autoExploreStatus='', onToggleAutoExploreMode=null}) {
-  const MAP_W = 24000;
-  const MAP_H = 15600;
-  const MAP_MIN_ZOOM = 0.18;
+const GATHERING_MINIGAME_IDLE_MS = 15000;
+
+function minigameSeededPoint(seed) {
+  let h = 2166136261;
+  for (const ch of String(seed || 'nova')) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 16777619);
+  }
+  return {x:18 + ((h >>> 4) % 65), y:18 + ((h >>> 13) % 65)};
+}
+
+function normalizedAngleDelta(a, b) {
+  return Math.abs((((a - b) % 360) + 540) % 360 - 180);
+}
+
+function fractureZonesForAction(actionId) {
+  const p = minigameSeededPoint(`${actionId}:fractures`);
+  const first = (p.x * 3 + p.y) % 360;
+  return [
+    {start:first, size:42},
+    {start:(first + 142 + (p.y % 30)) % 360, size:30},
+  ];
+}
+
+function GatheringMinigameOverlay({action, playerEntry, zoom=1, onEvent}) {
+  const actionType = String(action?.actionType || '').toLowerCase();
+  const isMining = actionType === 'mining';
+  const [minimized,setMinimized] = useState(!!playerEntry?.minimized);
+  const [locked,setLocked] = useState(!!playerEntry?.bonusActive);
+  const [lastInputAt,setLastInputAt] = useState(() => Date.now());
+  const point = {x:clampPct(action?.x_pct ?? action?.x), y:clampPct(action?.y_pct ?? action?.y)};
+  const counterScale = Math.max(1.0, Math.min(3.0, 1 / Math.max(.18, Number(zoom || 1))));
+  const actionPayload = {
+    action_id: action?.actionId,
+    node_id: action?.nodeId,
+    action_type: isMining ? 'mining' : actionType === 'anomaly' ? 'anomaly' : 'scanning',
+  };
+  const reportPresence = useCallback((active, nextMinimized) => {
+    onEvent?.('presence', {...actionPayload, active:!!active, minimized:!!nextMinimized});
+  }, [onEvent, action?.actionId, action?.nodeId, actionType]);
+  const earnBonus = useCallback(() => {
+    if (locked || playerEntry?.bonusActive) return;
+    setLocked(true);
+    setMinimized(true);
+    onEvent?.('bonus', actionPayload);
+  }, [locked, playerEntry?.bonusActive, onEvent, action?.actionId, action?.nodeId, actionType]);
+  const touch = useCallback(() => {
+    setLastInputAt(Date.now());
+    if (minimized) setMinimized(false);
+    if (!locked && !playerEntry?.bonusActive) reportPresence(true, false);
+  }, [minimized, locked, playerEntry?.bonusActive, reportPresence]);
+  useEffect(() => {
+    setMinimized(!!playerEntry?.minimized);
+    setLocked(!!playerEntry?.bonusActive);
+    setLastInputAt(Date.now());
+  }, [action?.actionId]);
+  useEffect(() => {
+    if (minimized || locked || playerEntry?.bonusActive) return;
+    reportPresence(true, false);
+    const id = window.setInterval(() => {
+      if (Date.now() - lastInputAt >= GATHERING_MINIGAME_IDLE_MS) {
+        setMinimized(true);
+        reportPresence(false, true);
+      }
+    }, 750);
+    return () => window.clearInterval(id);
+  }, [minimized, locked, playerEntry?.bonusActive, lastInputAt, reportPresence]);
+  const reopen = (e) => {
+    e.stopPropagation();
+    setMinimized(false);
+    setLastInputAt(Date.now());
+    if (!locked && !playerEntry?.bonusActive) reportPresence(false, false);
+  };
+  if (minimized || locked || playerEntry?.bonusActive) {
+    return <button type="button" className={`gatherMinigameIcon ${isMining ? 'mining' : 'signal'} ${(locked || playerEntry?.bonusActive) ? 'locked' : ''}`} style={{left:`${point.x}%`, top:`${point.y}%`, transform:`translate(30px,-50%) scale(${counterScale})`}} onMouseDown={e=>e.stopPropagation()} onMouseUp={e=>e.stopPropagation()} onClick={reopen} aria-label={isMining ? 'Open mining minigame' : 'Open signal tuning minigame'}>
+      {isMining ? <Hammer size={15}/> : <Radar size={15}/>}
+      <span />
+    </button>;
+  }
+  return <div className={`gatherMinigamePanel ${isMining ? 'mining' : 'signal'}`} style={{left:`${point.x}%`, top:`${point.y}%`, transform:`translate(38px,-50%) scale(${counterScale})`}} onMouseDown={e=>{ e.stopPropagation(); touch(); }} onMouseUp={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}>
+    {isMining ? <MiningPulseMinigame action={action} onInput={touch} onSuccess={earnBonus} /> : <SignalTuningMinigame action={action} onInput={touch} onSuccess={earnBonus} />}
+  </div>;
+}
+
+function SignalTuningMinigame({action,onInput,onSuccess}) {
+  const target = useMemo(() => minigameSeededPoint(`${action?.actionId}:signal`), [action?.actionId]);
+  const [freq,setFreq] = useState(50);
+  const [phase,setPhase] = useState(50);
+  const dx = Math.abs(freq - target.x);
+  const dy = Math.abs(phase - target.y);
+  const distance = Math.hypot(dx, dy);
+  const strength = Math.max(0, Math.min(100, Math.round(100 - distance * 1.35)));
+  const band = strength >= 86 ? 'strong' : strength >= 52 ? 'medium' : 'weak';
+  useEffect(() => {
+    if (dx <= 7 && dy <= 7) onSuccess?.();
+  }, [dx, dy, onSuccess]);
+  const setSlider = (setter) => (e) => {
+    setter(Number(e.target.value));
+    onInput?.();
+  };
+  return <>
+    <div className="minigameHeader"><Radar size={15}/><b>Signal Tuning</b><span>{strength}%</span></div>
+    <div className={`signalScope ${band}`}>
+      <input className="signalPhaseSlider" type="range" min="0" max="100" value={phase} onChange={setSlider(setPhase)} aria-label="Signal phase" />
+      <div className="signalWave"><i /><em>{band === 'strong' ? 'Signal Locked' : band === 'medium' ? 'Unstable Signal' : 'Weak Signal'}</em></div>
+      <input className="signalFrequencySlider" type="range" min="0" max="100" value={freq} onChange={setSlider(setFreq)} aria-label="Frequency" />
+    </div>
+    <div className="minigameMeter"><span style={{width:`${strength}%`}} /></div>
+  </>;
+}
+
+function MiningPulseMinigame({action,onInput,onSuccess}) {
+  const zones = useMemo(() => fractureZonesForAction(action?.actionId), [action?.actionId]);
+  const [angle,setAngle] = useState(0);
+  const [progress,setProgress] = useState(0);
+  useEffect(() => {
+    let frame = 0;
+    const start = performance.now();
+    const tick = (now) => {
+      setAngle(((now - start) / 1000 * 138) % 360);
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [action?.actionId]);
+  useEffect(() => {
+    if (progress >= 100) onSuccess?.();
+  }, [progress, onSuccess]);
+  const pulse = () => {
+    onInput?.();
+    const best = Math.min(...zones.map(z => normalizedAngleDelta(angle, (z.start + z.size / 2) % 360)));
+    const gain = best <= 22 ? 34 : best <= 38 ? 14 : 3;
+    setProgress(v => Math.min(100, v + gain));
+  };
+  const gradientStops = zones.map(z => `rgba(255,210,122,.86) ${z.start}deg ${z.start + z.size}deg`).join(',');
+  return <>
+    <div className="minigameHeader"><Hammer size={15}/><b>Pulse Fracture</b><span>{Math.round(progress)}%</span></div>
+    <div className="fractureDial" style={{'--needle-angle':`${angle}deg`, '--fracture-zones':gradientStops}}>
+      <i /><b />
+    </div>
+    <button type="button" className="pulseButton" onClick={pulse}><Zap size={15}/>Pulse</button>
+    <div className="minigameMeter"><span style={{width:`${progress}%`}} /></div>
+  </>;
+}
+
+function formatMissionMinutes(minutes=0) {
+  const total = Math.max(0, Math.round(Number(minutes || 0)));
+  const hours = Math.floor(total / 60);
+  const mins = total % 60;
+  if (hours && mins) return `${hours}h ${mins}m`;
+  if (hours) return `${hours}h`;
+  return `${mins}m`;
+}
+
+function PlanetMissionInspectDetails({selected,onMissionTravel,travelBlocked}) {
+  if (!isUninhabitableMapNode(selected, 'system')) return null;
+  const mission = (selected.mission_contracts || [])[0];
+  if (!mission) return <div className="planetMissionInspect"><b>Planet Mission</b><span>No mission assigned to this uninhabitable planet yet.</span></div>;
+  const outcome = mission.outcomeChances || {};
+  const rewardRows = mission.rewardChances || [];
+  return <div className="planetMissionInspect">
+    <div className="planetMissionInspectHead">
+      <div>
+        <span>Only Mission Here</span>
+        <b>{mission.name}</b>
+        <small>{mission.description}</small>
+      </div>
+      <em>{mission.tierLabel || `Lvl ${fmt(mission.level)}`}</em>
+    </div>
+    <div className="missionInspectStats">
+      <span>Level <b>{fmt(mission.level)}</b></span>
+      <span>XP <b>{fmt(mission.xpThisLevel || 0)} / {fmt((mission.xpThisLevel || 0) + (mission.xpToNext || 0))}</b></span>
+      <span>Progress <b>{fmt(mission.xpProgressPct || 0)}%</b></span>
+      <span>Time Spent <b>{formatMissionMinutes(mission.timeSpentMinutes || 0)}</b></span>
+      <span>Runs <b>{fmt(mission.completed || 0)}</b></span>
+      <span>Total Finds <b>{fmt(mission.totalRewardValue || 0)}</b></span>
+      <span>Duration <b>{formatMissionMinutes(mission.minutes || 0)}</b></span>
+      <span>Difficulty <b>{fmt(mission.difficulty || 0)}</b></span>
+    </div>
+    <Progress value={mission.xpProgressPct || 0} />
+    <div className="missionOutcomeOdds">
+      <span>Success <b>{fmt(outcome.success || 0)}%</b></span>
+      <span>Critical <b>{fmt(outcome.critical_success || 0)}%</b></span>
+      <span>Failure <b>{fmt((outcome.failure || 0) + (outcome.critical_failure || 0))}%</b></span>
+    </div>
+    <div className="missionRewardOdds">
+      {rewardRows.map(r => <div key={r.code || r.name}>
+        <b>{r.name}</b>
+        <span>{fmt(r.chancePct)}% chance • {label(r.rarity)} • Qty {fmt(r.qtyMin)}-{fmt(r.qtyMax)}</span>
+        <small>{r.description || label(r.category)}</small>
+      </div>)}
+    </div>
+    <div className="buttonRow">
+      <button disabled={travelBlocked || !onMissionTravel || !mission.canStart} onClick={()=>onMissionTravel && onMissionTravel(selected, mission)}>{mission.canStart ? 'Land & Start Mission' : (mission.blockedReason || 'Unavailable')}</button>
+    </div>
+  </div>;
+}
+
+function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onIntercept, onResolveIntercept, onMine, onSalvage, onGoHere, onScanArea, onScanObject, onScanSite, onInvestigate, onEnterPirateStation, onPlaceBase, onAdminSpawn, onDockBase, onMissionTravel, currentId, clock, mapMode, onMapModeChange, onViewGalaxy, focusTarget=null, onPilotTrade=null, onPilotParty=null, onPilotBlock=null, party=null, publicProfiles=[], missionCooldown=null, autoExploreMode='', autoExploreLastMode='pirate', autoExploreStatus='', onToggleAutoExploreMode=null, onGatheringMinigame=null}) {
+  const MAP_W = 48000;
+  const MAP_H = 31200;
+  const MAP_MIN_ZOOM = type === 'system' ? 0.045 : 0.09;
   const MAP_MAX_ZOOM = 1.75;
+  const MAP_BASE_DEFAULT_ZOOM = 0.32;
+  const mapDefaultZoom = type === 'galaxy' ? MAP_BASE_DEFAULT_ZOOM * 2 : MAP_BASE_DEFAULT_ZOOM * 1.5;
+  const mapRecenterZoom = Math.max(MAP_MIN_ZOOM, mapDefaultZoom / 2);
   const nodes = map.nodes || [];
   const lanes = map.lanes || [];
   const traffic = map.traffic || [];
@@ -6840,7 +8294,26 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const scanBlips = map.scan_blips || [];
   const scanPings = map.scan_pings || [];
   const summary = map.summary || {};
-  const [zoom,setZoom] = useState(0.32);
+  const refiningMapIndex = useMemo(() => {
+    const byGalaxy = new Map();
+    const byPlanet = new Map();
+    const push = (target, key, complete) => {
+      if (key === undefined || key === null || key === '') return;
+      const k = String(key);
+      const prev = target.get(k) || {count:0, complete:false};
+      target.set(k, {count:prev.count + 1, complete:prev.complete || complete});
+    };
+    (state?.crafting_queue || []).filter(isRefiningJob).forEach(job => {
+      const complete = job.status === 'completed' || (job.status === 'active' && new Date(job.completes_at).getTime() <= clock);
+      push(byPlanet, job.location_planet_id || job.planet_id, complete);
+      push(byGalaxy, job.location_galaxy_id || job.galaxy_id, complete);
+    });
+    return {byGalaxy, byPlanet};
+  }, [state?.crafting_queue, clock]);
+  const refiningMarkerForNode = (node) => type === 'galaxy'
+    ? refiningMapIndex.byGalaxy.get(String(node.id))
+    : refiningMapIndex.byPlanet.get(String(node.id));
+  const [zoom,setZoom] = useState(mapDefaultZoom);
   const [pan,setPan] = useState({x:20,y:18});
   const [selectedObject,setSelectedObject] = useState(null);
   const [mobileSheetObject,setMobileSheetObject] = useState(null);
@@ -6849,6 +8322,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const [context,setContext] = useState(null);
   const [spawnContext,setSpawnContext] = useState(null);
   const [layers,setLayers] = useState({ships:true, hostiles:true, patrols:true, ore:true, wrecks:true, exploration:true, pirates:true, bases:true, events:true, routes:true, danger:true, market:true, territory:true});
+  const [filtersOpen,setFiltersOpen] = useState(false);
   const mapShellRef = useRef(null);
   const viewportRef = useRef(null);
   const mapWorldRef = useRef(null);
@@ -6862,38 +8336,62 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const progress = travelProgress(travel || {}, clock);
   const zoomClass = zoom < .9 ? 'zoomFar' : zoom > 1.72 ? 'zoomNear' : 'zoomMid';
   const activeTravelMode = String(travel?.mode || '').toLowerCase();
-  const travelBlocked = !!travel?.active && ['galaxy','galaxy_route'].includes(activeTravelMode);
+  const activeTravelMapType = String(travel?.map_type || travel?.mapType || '').toLowerCase();
+  const activeRoutePhase = String(travel?.route_phase || '').toLowerCase();
+  const galaxyTravelActive = !!travel?.active && (['galaxy','galaxy_route'].includes(activeTravelMode) || activeTravelMapType === 'galaxy');
+  const activeTravelBelongsToView = !!travel?.active && (activeTravelMapType ? activeTravelMapType === type : (type === 'galaxy' ? galaxyTravelActive : !galaxyTravelActive));
+  const travelBlocked = !!travel?.active && ['galaxy','galaxy_route','gate_approach'].includes(activeTravelMode);
+  const gateNodeCountdown = (node) => {
+    if (type !== 'system' || !travel?.active || !node) return '';
+    const nodeId = String(node.id ?? '');
+    if (activeTravelMode === 'gate_approach' && nodeId === String(travel.destination_planet_id ?? '')) {
+      return `Approaching ${clockTimeLeft(travel.arrival_at)}`;
+    }
+    if (activeTravelMode === 'galaxy_route' && activeRoutePhase === 'wait' && (nodeId === String(travel.origin_planet_id ?? '') || nodeId === String(travel.destination_planet_id ?? ''))) {
+      return `Jump in ${clockTimeLeft(travel.arrival_at)}`;
+    }
+    return '';
+  };
   const activeOriginKey = type === 'galaxy' ? travel?.origin_galaxy_id : travel?.origin_planet_id;
-  const activeCoordinateOrigin = travel?.active && travel?.origin_x_pct != null && travel?.origin_y_pct != null
+  const activeCoordinateOrigin = activeTravelBelongsToView && travel?.origin_x_pct != null && travel?.origin_y_pct != null
     ? {x_pct:Number(travel.origin_x_pct), y_pct:Number(travel.origin_y_pct)}
     : null;
-  const activeCoordinateDest = travel?.active && travel?.destination_x_pct != null && travel?.destination_y_pct != null
+  const activeCoordinateDest = activeTravelBelongsToView && travel?.destination_x_pct != null && travel?.destination_y_pct != null
     ? {x_pct:Number(travel.destination_x_pct), y_pct:Number(travel.destination_y_pct)}
     : null;
   const activeWaypointOrigin = activeCoordinateOrigin || byId[activeOriginKey];
   const activeWaypointPoint = activeCoordinateOrigin && activeCoordinateDest
     ? lerpPoint(activeCoordinateOrigin, activeCoordinateDest, progress)
     : null;
-  const openSpacePoint = !travel?.active && travel?.open_space && (!travel.open_space_map_type || travel.open_space_map_type === type)
+  const activeGalaxyOrigin = type === 'galaxy' && galaxyTravelActive ? byId[travel?.origin_galaxy_id] : null;
+  const activeGalaxyDest = type === 'galaxy' && galaxyTravelActive ? byId[travel?.destination_galaxy_id] : null;
+  const activeGalaxyPoint = activeGalaxyOrigin && activeGalaxyDest
+    ? lerpPoint(activeGalaxyOrigin, activeGalaxyDest, progress)
+    : null;
+  const openSpacePoint = type === 'system' && !travel?.active && travel?.open_space && (!travel.open_space_map_type || travel.open_space_map_type === type)
     ? {x:Number(travel.open_space_x_pct || 50), y:Number(travel.open_space_y_pct || 50)}
     : null;
-  const shipPoint = activeWaypointPoint || (activeLane && byId[activeLane.from] && byId[activeLane.to]
+  const shipPoint = activeWaypointPoint || (activeTravelBelongsToView && activeLane && byId[activeLane.from] && byId[activeLane.to]
     ? lerpPoint(byId[activeLane.from], byId[activeLane.to], progress)
-    : openSpacePoint);
+    : activeGalaxyPoint || openSpacePoint);
   const hasCoordinateTravelLine = !!(activeCoordinateOrigin && activeCoordinateDest);
-  const fallbackRadarPoint = shipPoint || nodes.find(n => n.current || n.id === currentId) || {x_pct:50, y_pct:50};
+  const fallbackRadarPoint = nodes.find(n => n.current || n.id === currentId) || {x_pct:50, y_pct:50};
+  const liveRadarPoint = shipPoint || fallbackRadarPoint;
   const summaryRadarX = Number(summary.radar_center_x_pct);
   const summaryRadarY = Number(summary.radar_center_y_pct);
+  const liveRadarX = Number(liveRadarPoint?.x_pct ?? liveRadarPoint?.x);
+  const liveRadarY = Number(liveRadarPoint?.y_pct ?? liveRadarPoint?.y);
   const radarCenter = {
-    x: clampNum(Number.isFinite(summaryRadarX) && summaryRadarX > 0 ? summaryRadarX : Number(fallbackRadarPoint?.x_pct ?? fallbackRadarPoint?.x ?? 50), 1, 99),
-    y: clampNum(Number.isFinite(summaryRadarY) && summaryRadarY > 0 ? summaryRadarY : Number(fallbackRadarPoint?.y_pct ?? fallbackRadarPoint?.y ?? 50), 1, 99),
+    x: clampNum(Number.isFinite(liveRadarX) && liveRadarX > 0 ? liveRadarX : (Number.isFinite(summaryRadarX) && summaryRadarX > 0 ? summaryRadarX : 50), 1, 99),
+    y: clampNum(Number.isFinite(liveRadarY) && liveRadarY > 0 ? liveRadarY : (Number.isFinite(summaryRadarY) && summaryRadarY > 0 ? summaryRadarY : 50), 1, 99),
   };
   const summaryRadarRange = Number(summary.radar_range_pct);
-  const baselineRadarRange = map.remote ? 0 : (type === 'galaxy' ? 7.5 : 12);
-  const radarRange = Math.max(0, Number.isFinite(summaryRadarRange) && summaryRadarRange > 0 ? summaryRadarRange : baselineRadarRange);
+  const baselineRadarRange = map.remote ? 0 : 12;
+  const radarRange = type === 'galaxy' || galaxyTravelActive ? 0 : Math.max(0, Number.isFinite(summaryRadarRange) ? summaryRadarRange : baselineRadarRange);
   const radarDiameterPx = Math.max(0, (radarRange / 100) * MAP_W * 2);
-  const markerScale = Math.max(1.0, Math.min(3.4, 1 / Math.max(zoom, 0.1)));
-  const nodeScale = Math.max(0.95, Math.min(2.35, 1 / Math.max(zoom, 0.1)));
+  const counterZoomScale = 1 / Math.max(zoom, 0.1);
+  const markerScale = counterZoomScale;
+  const nodeScale = counterZoomScale;
   const iconTransform = `translate(-50%,-50%) scale(${markerScale})`;
   const nodeTransform = `translate(-50%,-50%) scale(${nodeScale})`;
   const renderBounds = useMemo(() => {
@@ -6923,8 +8421,50 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     window.__novaActiveMapType = type || 'all';
   }, [type]);
 
-  const objectDisplayName = (obj) => obj?.realName || obj?.name || obj?.label || obj?.ship_name || 'Map target';
-  const isUninhabitableNode = (obj) => type === 'system' && !!obj && (obj.isUninhabitable || obj.is_uninhabitable || /uninhab|barren|toxic|frozen|volcanic|irradiated|gas giant|desert tomb/i.test(String(obj.type || '')));
+  const objectDisplayName = (obj) => mapObjectDisplayName(obj);
+  const galaxyIntelFor = (obj) => type === 'galaxy'
+    ? state?.galaxy_war_intel?.by_galaxy?.[String(obj?.id ?? obj?.galaxy_id)] || null
+    : null;
+  const galaxyControlBreakdown = (obj) => {
+    const intel = galaxyIntelFor(obj);
+    return intel?.control_breakdown || obj?.control_breakdown || [];
+  };
+  const galaxyWarActive = (obj) => {
+    const intel = galaxyIntelFor(obj);
+    const breakdown = galaxyControlBreakdown(obj).filter(entry => Number(entry?.planets || 0) > 0);
+    return !!(intel?.war_state === 'active_war' || intel?.security_state?.war_active || Number(intel?.war_planets || obj?.territory_war_count || 0) > 0 || breakdown.length > 1);
+  };
+  const galaxyStatusPayload = (node) => {
+    const intel = galaxyIntelFor(node) || {};
+    const breakdown = galaxyControlBreakdown(node);
+    const totalPlanets = Number(intel.planet_count ?? node?.planet_count ?? 0);
+    const owner = intel.owner_faction || {};
+    const ownerName = owner.name || node?.faction_name || 'Neutral';
+    const warActive = galaxyWarActive(node);
+    const topOwners = breakdown.length
+      ? breakdown.map(entry => `${entry?.faction?.name || 'Unknown'} ${fmt(entry?.percent || 0)}% (${fmt(entry?.planets || 0)})`).join(' / ')
+      : `${ownerName} controls the registered galaxy capital.`;
+    const statusText = warActive ? 'War Active' : (intel.war_label || label(node?.territory_status || 'peace'));
+    return {
+      ...node,
+      kind:'node',
+      scanUnlocked:true,
+      warActive,
+      statusText,
+      rewardHint:`Bonus ${fmt(node?.control_bonus_pct || 0)}%`,
+      riskBand:warActive ? 'War Active' : label(node?.territory_status || 'Stable'),
+      controlBreakdown:breakdown,
+      galaxyIntel:intel,
+      selectedSummary:`${statusText}. ${fmt(totalPlanets)} planets tracked. Ownership: ${topOwners}. Secure ${fmt(intel.secure_planets ?? 0)}, contested ${fmt(intel.contested_planets ?? node?.contested_zone_count ?? 0)}, war ${fmt(intel.war_planets ?? node?.territory_war_count ?? 0)}.`
+    };
+  };
+  const isUninhabitableNode = (obj) => isUninhabitableMapNode(obj, type);
+  const mapPlanetAssetCategory = (node, isGateNode = false) => {
+    if (isGateNode) return 'gate galaxy station';
+    if (type === 'galaxy') return `${node.name || ''} ${node.sector || ''} ${node.faction_name || ''}`;
+    const text = `${node.economy_type || ''} ${node.type || ''} ${node.kind || ''} ${node.name || ''} ${node.details_label || ''}`;
+    return `${isUninhabitableNode(node) ? 'uninhabitable nonhabitable' : 'habitable'} ${text}`.trim();
+  };
   const clientActionRangeAllows = (obj) => {
     if (!obj || !shipPoint) return false;
     const tx = Number(obj.x_pct ?? obj.x);
@@ -6954,10 +8494,10 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     const pt = approachPointFor(obj);
     return {x_pct:pt.x_pct, y_pct:pt.y_pct, label:objectDisplayName(obj), map_type:type};
   };
-  const isSystemDockTarget = (obj) => type === 'system' && ['node','planet','station'].includes(String(obj?.kind || '').toLowerCase()) && !isUninhabitableNode(obj);
+  const isSystemDockTarget = (obj) => type === 'system' && ['node','planet'].includes(String(obj?.kind || '').toLowerCase()) && !isGalaxyGateMapNode(obj) && !isUninhabitableNode(obj);
   const baseTrafficForView = useMemo(
-    () => traffic.filter(t => t?.id !== 'player:self' && t?.kind !== 'self' && !t?.self),
-    [traffic]
+    () => type === 'galaxy' ? [] : traffic.filter(t => t?.id !== 'player:self' && t?.kind !== 'self' && !t?.self),
+    [traffic, type]
   );
   const trafficForView = useMemo(() => {
     const clockMs = Number(clock || Date.now());
@@ -7033,8 +8573,20 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     e.stopPropagation();
     dragRef.current = null;
     const anchor = mapLocalPoint(e);
-    const next = {...obj, objectKey:objectKey(obj), screenX:anchor.x, screenY:anchor.y, clientX:e.clientX, clientY:e.clientY, anchorX:anchor.x, anchorY:anchor.y};
+    const detailedObj = type === 'galaxy' && ['node','galaxy',''].includes(String(obj?.kind || '').toLowerCase())
+      ? galaxyStatusPayload(obj)
+      : obj;
+    const next = {...detailedObj, objectKey:objectKey(detailedObj), screenX:anchor.x, screenY:anchor.y, clientX:e.clientX, clientY:e.clientY, anchorX:anchor.x, anchorY:anchor.y};
     setContext(next);
+  };
+  const inspectGalaxyNode = (e, node) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragRef.current = null;
+    const anchor = mapLocalPoint(e);
+    const payload = galaxyStatusPayload(node);
+    setContext(null);
+    setSelectedObject({...payload, objectKey:objectKey(payload), screenX:anchor.x, screenY:anchor.y, clientX:e.clientX, clientY:e.clientY, anchorX:anchor.x, anchorY:anchor.y});
   };
   const openBlankContext = (e) => {
     if (dragRef.current?.moved) return;
@@ -7056,7 +8608,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     kind: obj?.kind,
     map_type:type
   });
-  const canShowInspect = (obj) => !!obj && (obj.kind === 'self' || obj.kind === 'server_event' || obj.scanUnlocked || obj.scanResult?.success);
+  const canShowInspect = (obj) => !!obj && (obj.kind === 'self' || obj.kind === 'server_event' || isUninhabitableNode(obj) || obj.scanUnlocked || obj.scanResult?.success);
   const scanAndOpen = async (obj) => {
     closeContext();
     if (!onScanObject || !obj) return;
@@ -7074,8 +8626,10 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const mobileObjectType = (obj) => {
     const kind = String(obj?.kind || obj?.type || '').toLowerCase();
     const role = String(obj?.role || '').toLowerCase();
+    if (isGalaxyGateMapNode(obj)) return 'gate';
     if (type === 'galaxy' && (kind === 'node' || kind === 'galaxy')) return 'galaxy';
-    if (kind === 'node') return type === 'galaxy' ? 'galaxy' : (String(obj?.type || '').toLowerCase().includes('station') ? 'station' : 'planet');
+    if (kind === 'node') return type === 'galaxy' ? 'galaxy' : (isUninhabitableNode(obj) ? 'uninhabitable' : 'planet');
+    if (kind === 'planet') return isUninhabitableNode(obj) ? 'uninhabitable' : 'planet';
     if (kind === 'npc' || role.includes('npc')) return 'npc';
     if (kind === 'player') return 'ship';
     if (kind === 'ore') return 'ore';
@@ -7103,7 +8657,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
         if (mobileFilter === 'all') return true;
         if (mobileFilter === 'hostile') return mobileIsHostile(obj);
         if (mobileFilter === 'ships') return ['ship','npc'].includes(obj.mobileType);
-        if (mobileFilter === 'planets') return ['planet','station','gate','galaxy'].includes(obj.mobileType);
+        if (mobileFilter === 'planets') return ['planet','uninhabitable','gate','galaxy'].includes(obj.mobileType);
         if (mobileFilter === 'npcs') return obj.mobileType === 'npc';
         if (mobileFilter === 'salvage') return obj.mobileType === 'salvage';
         return obj.mobileType === mobileFilter;
@@ -7112,7 +8666,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     return accepted.slice(0, 96);
   }, [allObjects, mobileFilter, type, mobileOriginPoint?.x_pct, mobileOriginPoint?.x, mobileOriginPoint?.y_pct, mobileOriginPoint?.y]);
   const mobileFilters = type === 'galaxy'
-    ? [['all','All'], ['planets','Systems'], ['ships','Ships'], ['hostile','Hostile']]
+    ? [['all','All'], ['planets','Galaxies']]
     : [['all','All'], ['ships','Ships'], ['planets','Planets'], ['npcs','NPCs'], ['salvage','Salvage'], ['hostile','Hostile']];
   const openMobileSheet = (obj) => {
     setMobileSheetObject(obj);
@@ -7137,7 +8691,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     x: clampNum(candidate.x, -(MAP_W * nextZoom) + 340, 260),
     y: clampNum(candidate.y, -(MAP_H * nextZoom) + 260, 220)
   });
-  const resetView = () => { setZoom(0.32); setPan({x:20,y:18}); };
+  const resetView = () => { setZoom(mapDefaultZoom); setPan({x:20,y:18}); };
   const zoomToAnchor = (nextZoom, clientX, clientY) => {
     const rect = viewportRef.current?.getBoundingClientRect();
     const ax = Number.isFinite(clientX) && rect ? clientX - rect.left : (rect?.width || 1200) / 2;
@@ -7154,31 +8708,78 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     const cy = anchor === 'mouse' && event ? event.clientY : (rect ? rect.top + rect.height / 2 : undefined);
     zoomToAnchor(zoom + delta, cx, cy);
   };
+  const normalizedMapPoint = (pt, fallback = null) => {
+    const x = Number(pt?.x_pct ?? pt?.x);
+    const y = Number(pt?.y_pct ?? pt?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return fallback;
+    return {x_pct:clampNum(x, 1, 99), y_pct:clampNum(y, 1, 99)};
+  };
   const centerOnPct = (pt, nextZoom = 1.0) => {
     const rect = viewportRef.current?.getBoundingClientRect();
     const vw = rect?.width || 1200;
     const vh = rect?.height || 760;
-    const x = (Number(pt?.x_pct ?? pt?.x ?? 50) / 100) * MAP_W;
-    const y = (Number(pt?.y_pct ?? pt?.y ?? 50) / 100) * MAP_H;
+    const point = normalizedMapPoint(pt, {x_pct:50, y_pct:50});
+    const x = (point.x_pct / 100) * MAP_W;
+    const y = (point.y_pct / 100) * MAP_H;
     setZoom(nextZoom);
     setPan(clampPanForZoom({
       x: vw / 2 - x * nextZoom,
       y: vh / 2 - y * nextZoom
     }, nextZoom));
   };
-  const centerMyShip = (select = false) => {
-    if (shipPoint) {
-      centerOnPct({x_pct: shipPoint.x, y_pct: shipPoint.y}, 1.05);
-      if (select) setSelectedObject({kind:'self', name: travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label: travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : 'In open space', x_pct: shipPoint.x, y_pct: shipPoint.y});
+  const dockedMapTarget = () => {
+    if (type !== 'system' || travel?.active || travel?.open_space || travel?.docked === false) return null;
+    const baseId = travel?.dock_base_id ?? travel?.docked_base_id;
+    if (baseId != null) {
+      const dockedBase = playerBases.find(base =>
+        String(base.baseId ?? base.id).replace(/^base:/, '') === String(baseId)
+      );
+      if (dockedBase) return {...dockedBase, kind:'player_base', scanUnlocked:true};
+    }
+    const planetId = travel?.dock_planet_id ?? currentId ?? map.current_planet_id ?? state?.location?.planet_id;
+    const dockedNode = nodes.find(node =>
+      node.current ||
+      String(node.id) === String(planetId) ||
+      String(node.planet_id) === String(planetId)
+    );
+    return dockedNode ? {...dockedNode, kind:dockedNode.kind || 'node', scanUnlocked:true} : null;
+  };
+  const centerMyShip = (select = false, zoomOverride = null) => {
+    const myShipZoom = Number.isFinite(Number(zoomOverride)) ? Number(zoomOverride) : 1.05;
+    const liveShipPoint = normalizedMapPoint(shipPoint);
+    if (liveShipPoint) {
+      centerOnPct(liveShipPoint, myShipZoom);
+      if (select) setSelectedObject({kind:'self', name: travel?.mode === 'intercept' ? 'Your Ship - Intercept Course' : 'Your Ship', label: travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : 'In open space', ...liveShipPoint});
+      return;
+    }
+    const dockedTarget = dockedMapTarget();
+    if (dockedTarget) {
+      setSelectedObject(null);
+      setContext(null);
+      setMobileSheetObject(null);
+      centerOnPct(dockedTarget, myShipZoom);
       return;
     }
     const current = nodes.find(n => n.current || n.id === currentId) || nodes[0];
     if (current) {
-      centerOnPct(current, 0.95);
-      if (select) setSelectedObject({...current, kind:'node', selectedSummary:'You are docked here. Your ship is inside the planet/station and is not visible as a separate map object until launch/travel.'});
+      const dockedFallback = type === 'system' && !travel?.active && !travel?.open_space && travel?.docked !== false;
+      centerOnPct(current, myShipZoom);
+      if (dockedFallback) {
+        setSelectedObject(null);
+        setContext(null);
+        setMobileSheetObject(null);
+      } else if (select) setSelectedObject({...current, kind:'node', selectedSummary:'You are docked here. Your ship is inside the planet/station and is not visible as a separate map object until launch/travel.'});
     }
   };
-  const findMyShip = () => centerMyShip(true);
+  const findMyShip = () => {
+    setContext(null);
+    setMobileSheetObject(null);
+    if (type === 'galaxy' && !galaxyTravelActive && onMapModeChange) {
+      onMapModeChange('system');
+      return;
+    }
+    requestAnimationFrame(() => centerMyShip(false, mapRecenterZoom));
+  };
   const focusMatchesObject = (obj) => {
     if (!focusTarget || !obj) return false;
     const eventId = String(focusTarget.eventId || focusTarget.id || '');
@@ -7219,11 +8820,15 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     }
     return null;
   }, [focusTarget?.nonce, focusTarget?.id, focusTarget?.eventId, focusTarget?.eventType, focusTarget?.objectKey, focusTarget?.x_pct, focusTarget?.y_pct, type, allObjects, eventSites, nodes]);
+  const appliedFocusNonceRef = useRef('');
   useEffect(() => {
     if (!focusedMapObject) return;
+    const nonce = String(focusTarget?.nonce || focusTarget?.id || focusTarget?.eventId || focusTarget?.objectKey || '');
+    if (nonce && appliedFocusNonceRef.current === nonce) return;
+    appliedFocusNonceRef.current = nonce;
     centerOnPct(focusedMapObject, 1.12);
     setSelectedObject({...focusedMapObject, scanUnlocked:true, anchorX:Math.round((viewportSize.width || 1200) / 2), anchorY:120});
-  }, [focusTarget?.nonce, focusedMapObject]);
+  }, [focusTarget?.nonce, focusTarget?.id, focusTarget?.eventId, focusTarget?.objectKey, focusedMapObject]);
   const autoCenterKeyRef = useRef('');
   useEffect(() => {
     const key = [
@@ -7231,13 +8836,15 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
       currentId || '',
       map.current_planet_id || '',
       map.current_galaxy_id || '',
+      travel?.dock_planet_id || '',
+      travel?.dock_base_id || travel?.docked_base_id || '',
       nodes.length
     ].join('|');
     if (autoCenterKeyRef.current === key) return;
     if (!viewportRef.current) return;
     autoCenterKeyRef.current = key;
-    requestAnimationFrame(() => centerMyShip(false));
-  }, [type, currentId, map.current_planet_id, map.current_galaxy_id, nodes.length]);
+    requestAnimationFrame(() => centerMyShip(false, mapRecenterZoom));
+  }, [type, currentId, map.current_planet_id, map.current_galaxy_id, travel?.dock_planet_id, travel?.dock_base_id, travel?.docked_base_id, nodes.length, mapRecenterZoom]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -7295,7 +8902,27 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   };
 
   const isPatrol = (t) => !!t?.securityDefense || ['patrol','security_pilot','marshal','turret','gate_turret'].includes(String(t.role || '').toLowerCase());
-  const layerButton = (key,name) => <button type="button" aria-pressed={!!layers[key]} className={layers[key] ? 'active' : ''} onClick={()=>toggleLayer(key)}>{name}</button>;
+  const layerFilterOptions = [
+    ['ships','Ships'],
+    ['hostiles','Hostiles'],
+    ['patrols','Patrols'],
+    ['ore','Ore'],
+    ['wrecks','Wrecks'],
+    ['exploration','Ancient Sites'],
+    ['pirates','Pirate Stations'],
+    ['bases','Bases'],
+    ['events','Events'],
+    ['routes','Routes'],
+    ['territory','Territory']
+  ];
+  const activeLayerFilterCount = layerFilterOptions.filter(([key]) => layers[key]).length;
+  const allLayerFiltersActive = activeLayerFilterCount === layerFilterOptions.length;
+  const setAllLayerFilters = (checked) => setLayers(v => {
+    const next = {...v};
+    layerFilterOptions.forEach(([key]) => { next[key] = checked; });
+    return next;
+  });
+  const BulkLayerIcon = allLayerFiltersActive ? Square : CheckSquare;
   const shellWidth = viewportSize.width || window.innerWidth;
   const shellHeight = viewportSize.height || window.innerHeight;
   const popupX = context ? clampNum((context.anchorX ?? context.screenX) + 14, 8, shellWidth - 276) : 0;
@@ -7310,6 +8937,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     : (travel?.active ? `Current ${label(travel.mode || 'travel')} route will be interrupted.` : '');
   const regionSummary = summary.readable_hint || `${summary.risk_band || 'Unknown'} route risk. Watch hostile traffic, salvage depletion, ore depletion, and ancient signals.`;
   const pointInRadar = (obj) => {
+    if (type === 'galaxy') return true;
     if (!radarRange || !obj) return false;
     const x = Number(obj.x_pct ?? obj.x);
     const y = Number(obj.y_pct ?? obj.y);
@@ -7320,14 +8948,15 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   };
   const radarAllowsObject = (obj) => {
     if (!radarRange || !obj) return false;
-    if (obj.radarVisible === false) return false;
     return pointInRadar(obj);
   };
   const isAlwaysVisibleNavNode = (obj) => {
     if (type === 'galaxy') return true;
     const kind = String(obj?.kind || '').toLowerCase();
     const typeText = String(obj?.type || obj?.economy_type || '').toLowerCase();
-    return kind === 'gate' || kind === 'planet' || (!kind && !typeText.includes('station') && !typeText.includes('freeport'));
+    const nameText = String(obj?.name || obj?.label || '').toLowerCase();
+    const gateLike = kind === 'gate' || /gate|jump/.test(typeText) || /gate|jump/.test(nameText);
+    return gateLike || kind === 'planet';
   };
   const scanPingDiameterPx = (ping) => Math.max(0, (Number(ping?.radius_pct || 0) / 100) * MAP_W * 2);
   const isHostile = (t) => !!(t?.hostile || t?.attackable || ['pirate','raider','alien','bounty'].includes(String(t?.role || '').toLowerCase()));
@@ -7341,14 +8970,77 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const radarBases = radarRange > 0 ? playerBases.filter(pointInRadar) : [];
   const radarEvents = radarRange > 0 ? eventSites.filter(pointInRadar) : [];
   const radarLocationLabel = type === 'galaxy' ? 'galaxies' : 'places';
-  const radarSummaryLabel = radarRange > 0
-    ? `Radar ${fmt(radarRange)}% view: ${fmt(radarNodes.length)} ${radarLocationLabel}, ${fmt(radarShips.length)} ships, ${fmt(radarHostiles.length)} hostile, ${fmt(radarOre.length)} ore, ${fmt(radarWrecks.length)} wrecks, ${fmt(radarAncient.length)} ancient, ${fmt(radarPirates.length)} pirate, ${fmt(radarBases.length)} bases, ${fmt(radarEvents.length)} events`
-    : 'Radar inactive: no local contacts in view';
-  const radarSummaryTooltip = `${regionSummary} Hidden outside radar: ${fmt(summary.hidden_by_radar || 0)}. Activity: ${label(travel?.active ? travel.mode : 'idle')}${travel?.active ? `, ${clockTimeLeft(travel.arrival_at)} remaining` : ''}.`;
+  const systemGalaxyId = Math.abs(Number(map.current_galaxy_id || state?.location?.galaxy_id || 1) || 1);
+  const systemSunIndex = celestialSunAssets.length ? (Math.max(1, systemGalaxyId) - 1) % celestialSunAssets.length : 0;
+  const systemSunAsset = type === 'system' ? celestialSunAssets[systemSunIndex] : '';
+  const clientHiddenOutsideRadar = type === 'system'
+    ? trafficForView.filter(t => !pointInRadar(t)).length
+      + oreSites.filter(o => !pointInRadar(o)).length
+      + salvageIcons.filter(w => !pointInRadar(w)).length
+      + explorationSites.filter(site => !pointInRadar(site)).length
+      + pirateStations.filter(st => !pointInRadar(st)).length
+      + playerBases.filter(b => !pointInRadar(b)).length
+      + eventSites.filter(ev => !pointInRadar(ev)).length
+      + warZones.filter(w => !pointInRadar(w)).length
+      + scanBlips.filter(b => !pointInRadar(b)).length
+      + nodes.filter(n => !isAlwaysVisibleNavNode(n) && !pointInRadar(n)).length
+    : 0;
+  const radarSummaryLabel = type === 'galaxy'
+    ? `Command map: ${fmt(nodes.length)} galaxies, ${fmt(lanes.length)} lanes, ${fmt(nodes.filter(galaxyWarActive).length)} war fronts`
+    : radarRange > 0
+      ? `Radar ${fmt(radarRange)}% view: ${fmt(radarNodes.length)} ${radarLocationLabel}, ${fmt(radarShips.length)} ships, ${fmt(radarHostiles.length)} hostile, ${fmt(radarOre.length)} ore, ${fmt(radarWrecks.length)} wrecks, ${fmt(radarAncient.length)} ancient, ${fmt(radarPirates.length)} pirate, ${fmt(radarBases.length)} bases, ${fmt(radarEvents.length)} events`
+      : 'Radar inactive: no local contacts in view';
+  const radarSummaryTooltip = type === 'galaxy'
+    ? 'Strategic galaxy command view. Local radar, local ship traffic, and system travel markers are hidden here.'
+    : `${regionSummary} Hidden outside radar: ${fmt(clientHiddenOutsideRadar || summary.hidden_by_radar || 0)}. Activity: ${label(travel?.active ? travel.mode : 'idle')}${travel?.active ? `, ${clockTimeLeft(travel.arrival_at)} remaining` : ''}.`;
+  const galaxyTerritoryGroups = useMemo(() => {
+    if (type !== 'galaxy') return [];
+    const groups = new Map();
+    nodes.forEach(node => {
+      const intel = state?.galaxy_war_intel?.by_galaxy?.[String(node?.id ?? node?.galaxy_id)] || null;
+      const owner = intel?.owner_faction || {};
+      const key = String(owner.id || node.faction_id || node.faction_name || node.color || 'neutral');
+      const color = factionCssColor(owner.color || node.faction_color || node.color);
+      const point = {
+        id:node.id,
+        x:Number(node.x_pct ?? 50),
+        y:Number(node.y_pct ?? 50),
+        node,
+      };
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+      if (!groups.has(key)) groups.set(key, {key, color, points:[], war:false});
+      const group = groups.get(key);
+      group.points.push(point);
+      group.war ||= galaxyWarActive(node);
+    });
+    const makeLinks = (points) => {
+      if (points.length < 2) return [];
+      const visited = new Set([0]);
+      const links = [];
+      while (visited.size < points.length) {
+        let best = null;
+        for (const fromIndex of visited) {
+          points.forEach((candidate, toIndex) => {
+            if (visited.has(toIndex)) return;
+            const from = points[fromIndex];
+            const distance = Math.hypot(from.x - candidate.x, from.y - candidate.y);
+            if (!best || distance < best.distance) best = {from, to:candidate, toIndex, distance};
+          });
+        }
+        if (!best) break;
+        visited.add(best.toIndex);
+        links.push(best);
+      }
+      return links;
+    };
+    return Array.from(groups.values())
+      .filter(group => group.points.length > 1)
+      .map(group => ({...group, links:makeLinks(group.points)}));
+  }, [type, nodes, state?.galaxy_war_intel]);
   const missionCooldownActive = !!missionCooldown?.active;
   const missionCooldownLabel = missionCooldownActive
-    ? `Planet Mission CD: ${fmt(missionCooldown?.minutesRemaining || 0)}m`
-    : 'Planet Mission CD: Ready';
+    ? `Planet Mission: ${fmt(missionCooldown?.minutesRemaining || 0)}m`
+    : 'Planet Mission: Ready';
   const missionCooldownDetail = missionCooldownActive
     ? (missionCooldown?.reason || 'Planet mission recovery active.')
     : 'No active planet mission cooldown.';
@@ -7364,18 +9056,35 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
     : 100;
   const scanChargePct = Math.max(0, Math.min(100, Math.floor(scanChargeRaw)));
   const scanChargeState = scanChargePct >= 100 ? 'ready' : scanChargePct >= 50 ? 'chargingMid' : 'chargingLow';
-  const scanStatusLabel = `Scan ${scanChargePct}%`;
+  const scanCooldownSeconds = Math.max(0, Math.ceil(scanCooldownMs / 1000));
+  const scanStatusLabel = scanCooldownActive ? `${scanCooldownSeconds}s Probe` : 'Probe Ready';
   const scanStatusDetail = scanCooldownActive
-    ? `Area scan recharging. Ready at 100%. Radius ${fmt(scanArea.radius_pct || 0)}%.`
-    : `Area scan ready. Reveals class-only blips outside radar for ${fmt(scanArea.duration_seconds || 30)}s.`;
+    ? `Probe launcher recharging. Global cooldown is ${fmt(scanArea.cooldown_seconds || 10)}s. Radius ${fmt(scanArea.radius_pct || 0)}%.`
+    : `Probe launcher ready. Sends a probe to mark class-only contacts for ${fmt(scanArea.duration_seconds || 30)}s; radar still controls what renders.`;
   const playerFactionColor = factionCssColor(summary?.player_faction?.color);
   const visibleTraffic = useMemo(
     () => trafficForView.filter(t => layers.ships && radarAllowsObject(t) && (layers.hostiles || !t.hostile) && (layers.patrols || !isPatrol(t)) && inRenderBounds(t)),
     [trafficForView, layers.ships, layers.hostiles, layers.patrols, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]
   );
-  const visibleOreSites = useMemo(() => layers.ore ? oreSites.filter(o => radarAllowsObject(o) && inRenderBounds(o)) : [], [layers.ore, oreSites, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
-  const visibleSalvageIcons = useMemo(() => layers.wrecks ? salvageIcons.filter(w => radarAllowsObject(w) && inRenderBounds(w)) : [], [layers.wrecks, salvageIcons, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
-  const visibleExplorationSites = useMemo(() => layers.exploration ? explorationSites.filter(site => radarAllowsObject(site) && inRenderBounds(site)) : [], [layers.exploration, explorationSites, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
+  const visibleOreSites = useMemo(() => layers.ore ? oreSites
+    .filter(o => radarAllowsObject(o) && inRenderBounds(o))
+    .map(o => {
+      const tier = o.tier || o.rewardTier || 1;
+      const hint = `ore ${o.oreCode || o.code || o.resource_type || ''} ${o.name || o.label || ''} tier ${tier}`;
+      return {...o, resource_type:hint};
+    }) : [], [layers.ore, oreSites, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
+  const visibleSalvageIcons = useMemo(() => layers.wrecks ? salvageIcons
+    .filter(w => radarAllowsObject(w) && inRenderBounds(w))
+    .map(w => {
+      const tier = w.ship_tier || w.tier || 1;
+      return {...w, visualCategory:`salvage wreck ${w.code || ''} ${w.ship_name || w.label || ''} tier ${tier}`};
+    }) : [], [layers.wrecks, salvageIcons, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
+  const visibleExplorationSites = useMemo(() => layers.exploration ? explorationSites
+    .filter(site => radarAllowsObject(site) && inRenderBounds(site))
+    .map(site => {
+      const tier = site.rewardTier || site.tier || 1;
+      return {...site, visualCategory:`anomaly exploration ${site.siteCode || site.code || ''} ${site.signalState || ''} ${site.realName || site.name || site.label || ''} tier ${tier}`};
+    }) : [], [layers.exploration, explorationSites, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visiblePlayerBases = useMemo(() => layers.bases ? playerBases.filter(b => radarAllowsObject(b) && inRenderBounds(b)) : [], [layers.bases, playerBases, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visiblePirateStations = useMemo(() => layers.pirates ? pirateStations.filter(st => radarAllowsObject(st) && inRenderBounds(st)) : [], [layers.pirates, pirateStations, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visibleEventSites = useMemo(() => layers.events ? eventSites.filter(ev => radarAllowsObject(ev) && inRenderBounds(ev)) : [], [layers.events, eventSites, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
@@ -7383,13 +9092,13 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   const visibleScanBlips = useMemo(() => scanBlips.filter(b => {
     const expires = b.expiresAt || b.expires_at;
     if (expires && new Date(expires).getTime() <= Number(clock || Date.now())) return false;
-    return !pointInRadar(b) && inRenderBounds(b);
+    return inRenderBounds(b);
   }), [scanBlips, clock, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visibleScanPings = useMemo(() => scanPings.filter(p => {
     const expires = p.expires_at || p.expiresAt;
     if (expires && new Date(expires).getTime() <= Number(clock || Date.now())) return false;
     return inRenderBounds(p);
-  }), [scanPings, clock, inRenderBounds]);
+  }), [scanPings, clock, inRenderBounds, radarRange, radarCenter.x, radarCenter.y]);
   const visibleRouteLanes = useMemo(() => lanes.filter(l => {
     const a = byId[l.from], b = byId[l.to];
     return !!(a && b && pointInRadar(a) && pointInRadar(b));
@@ -7410,11 +9119,22 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
   };
   const pctOf = (value,max) => Math.max(0, Math.min(100, Number(value || 0) / Math.max(1, Number(max || 1)) * 100));
   const showAutoExploreControls = type === 'system' && !!onToggleAutoExploreMode;
-  const activeAutoExploreConfig = AUTO_EXPLORE_MODE_BY_KEY[autoExploreMode || autoExploreLastMode] || AUTO_EXPLORE_MODE_BY_KEY.pirate;
-  const showAutoExploreStatus = showAutoExploreControls && (autoExploreMode || !!autoExploreStatus);
-  const reserveFuel = Math.ceil(Number(state?.player?.max_fuel || 0) * 0.2);
   const mobileSheetType = mobileSheetObject ? mobileObjectType(mobileSheetObject) : '';
   const mobileSheetHostile = mobileSheetObject ? mobileIsHostile(mobileSheetObject) : false;
+  const gatheringActions = state?.gathering_state?.actions || [];
+  const currentGatheringPlayerId = Number(state?.gathering_state?.currentPlayerId || state?.player?.id || state?.user?.player_id || 0);
+  const visibleGatheringActions = useMemo(() => gatheringActions.filter(a => {
+    const x = Number(a?.x_pct ?? a?.x);
+    const y = Number(a?.y_pct ?? a?.y);
+    return Number.isFinite(x) && Number.isFinite(y) && inRenderBounds({x_pct:x, y_pct:y});
+  }), [gatheringActions, inRenderBounds]);
+  const currentGatheringAction = useMemo(() => visibleGatheringActions.find(a => (a.players || []).some(p => Number(p.playerId) === currentGatheringPlayerId)), [visibleGatheringActions, currentGatheringPlayerId]);
+  const currentGatheringPlayer = currentGatheringAction ? (currentGatheringAction.players || []).find(p => Number(p.playerId) === currentGatheringPlayerId) : null;
+  const gatheringSourcePoint = shipPoint || radarCenter || {x:50, y:50};
+  const gatheringSourceX = Number(gatheringSourcePoint.x ?? gatheringSourcePoint.x_pct ?? 50);
+  const gatheringSourceY = Number(gatheringSourcePoint.y ?? gatheringSourcePoint.y_pct ?? 50);
+  const selfMarkerPoint = normalizedMapPoint(shipPoint);
+  const radarVisualCenter = selfMarkerPoint || normalizedMapPoint(radarCenter, {x_pct:radarCenter.x, y_pct:radarCenter.y});
 
   return <div className="mapShell phase23bMapShell" ref={mapShellRef}>
     <div className="mobileProximityMap">
@@ -7437,8 +9157,8 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
         {mobileMapObjects.map(obj => {
           const objType = obj.mobileType || mobileObjectType(obj);
           const hostile = mobileIsHostile(obj);
-          const factionColor = mapNodeFactionColor(obj);
-          return <button key={obj.objectKey || objectKey(obj)} className={`mobileObjectCard ${hostile ? 'hostile' : ''} type-${objType}`} onClick={()=>openMobileSheet(obj)} style={{'--faction-accent':factionColor}} role="listitem">
+          const nodeAccentColor = mapNodeAccentColor(obj, type);
+          return <button key={obj.objectKey || objectKey(obj)} className={`mobileObjectCard ${hostile ? 'hostile' : ''} type-${objType}`} onClick={()=>openMobileSheet(obj)} style={{'--faction-accent':nodeAccentColor}} role="listitem">
             <span className="mobileObjectIcon">{objType.slice(0,2).toUpperCase()}</span>
             <span className="mobileObjectMain">
               <b>{objectDisplayName(obj)}</b>
@@ -7467,9 +9187,9 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
         <div className="mobileObjectSheetActions">
           {mobileSheetType === 'galaxy' && <button disabled={travelBlocked || mobileSheetObject.current} onClick={()=>runMobileAction(onTravel,mobileSheetObject)}>Travel</button>}
           {mobileSheetType === 'galaxy' && <button onClick={()=>runMobileAction(onViewGalaxy,mobileSheetObject)}>View Local</button>}
-          {['planet','station','gate'].includes(mobileSheetType) && isSystemDockTarget(mobileSheetObject) && <button disabled={travelBlocked || (mobileSheetObject.current && !travel?.open_space)} onClick={()=>runMobileAction(onTravel,{...mobileSheetObject, kind:mobileSheetObject.kind || 'planet'})}>{mobileSheetObject.current && !travel?.open_space ? 'Docked Here' : 'Travel / Dock'}</button>}
+          {mobileSheetType === 'planet' && isSystemDockTarget(mobileSheetObject) && <button disabled={travelBlocked || (mobileSheetObject.current && !travel?.open_space)} onClick={()=>runMobileAction(onTravel,{...mobileSheetObject, kind:mobileSheetObject.kind || 'planet'})}>{mobileSheetObject.current && !travel?.open_space ? 'Docked Here' : 'Travel / Dock'}</button>}
           {mobileSheetObject.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>runMobileAction(onTravel,mobileSheetObject)}>Jump Gate</button>}
-          {isUninhabitableNode(mobileSheetObject) && (mobileSheetObject.mission_contracts || []).slice(0,3).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>runMobileAction(()=>onMissionTravel && onMissionTravel(mobileSheetObject,m))}>{m.name}</button>)}
+          {isUninhabitableNode(mobileSheetObject) && (mobileSheetObject.mission_contracts || []).slice(0,1).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>runMobileAction(()=>onMissionTravel && onMissionTravel(mobileSheetObject,m))}>{m.name}</button>)}
           {(mobileSheetType === 'ship' || mobileSheetType === 'npc' || mobileSheetObject.attackable) && <button onClick={()=>inspectMobileObject(mobileSheetObject)}>{canShowInspect(mobileSheetObject) ? 'Inspect' : 'Scan / Inspect'}</button>}
           {(mobileSheetType === 'ship' || mobileSheetType === 'npc' || mobileSheetObject.attackable) && <button className="dangerBtn" disabled={!mobileSheetObject.attackable || mobileSheetObject.canAttack === false || mobileSheetObject.inActionRange === false} onClick={()=>runMobileAction(onIntercept,mobileSheetObject)}>Attack</button>}
           {(mobileSheetType === 'ship' || mobileSheetType === 'npc' || mobileSheetObject.attackable) && <button disabled={!onGoHere} onClick={()=>runMobileAction(onGoHere,targetPayload(mobileSheetObject))}>Track</button>}
@@ -7488,21 +9208,31 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
           <button type="button" className={type==='system' ? 'active' : ''} aria-pressed={type==='system'} onClick={()=>onMapModeChange && onMapModeChange('system')}>System</button>
           <button type="button" className={type==='galaxy' ? 'active' : ''} aria-pressed={type==='galaxy'} onClick={()=>onMapModeChange && onMapModeChange('galaxy')}>Galaxy</button>
         </div>
+        <button type="button" className="mapMyShipButton hasHoverTooltip" aria-label="Center my ship" data-tooltip="Center your ship at mid zoom" onClick={findMyShip}><LocateFixed size={15}/><span>My Ship</span></button>
         <div className="mapZoomCluster" role="group" aria-label="Map zoom controls">
           <button type="button" className="mapIconButton hasHoverTooltip" aria-label="Zoom out" data-tooltip="Zoom out" onClick={()=>zoomBy(-0.075, 'center')}><Minus size={16}/><span className="srOnly">Zoom out</span></button>
           <button type="button" className="mapIconButton hasHoverTooltip" aria-label="Reset map view" data-tooltip="Reset view" onClick={resetView}><RotateCcw size={16}/><span className="srOnly">Reset view</span></button>
-          <button type="button" className="mapIconButton findShipBtn hasHoverTooltip" aria-label="Find my ship" data-tooltip="Find my ship" onClick={findMyShip}><LocateFixed size={16}/><span className="srOnly">Find my ship</span></button>
           <button type="button" className="mapIconButton hasHoverTooltip" aria-label="Zoom in" data-tooltip="Zoom in" onClick={()=>zoomBy(0.075, 'center')}><Plus size={16}/><span className="srOnly">Zoom in</span></button>
         </div>
         <span className="mapRadarSummary mapStatusChip hasHoverTooltip" tabIndex={0} data-tooltip={radarSummaryTooltip}><Radar size={15}/><span>{radarSummaryLabel}</span></span>
-        <span className={`mapScanSummary mapStatusChip hasHoverTooltip ${scanChargeState}`} tabIndex={0} data-tooltip={scanStatusDetail} style={{'--scan-charge-pct':`${scanChargePct}%`}}><Zap size={15}/><span>{scanStatusLabel}</span></span>
       </div>
       <div className="mapToolbarRight">
         <div className="mapLayerPanel">
-          <span className="mapLayerLabel"><Layers size={14}/> Layers</span>
-          <div className="mapLayerToggles phase23bLayers inlineMapLayerToggles">{layerButton('ships','Ships')}{layerButton('hostiles','Hostiles')}{layerButton('patrols','Patrols')}{layerButton('ore','Ore')}{layerButton('wrecks','Wrecks')}{layerButton('exploration','Ancient Sites')}{layerButton('pirates','Pirate Stations')}{layerButton('bases','Bases')}{layerButton('events','Events')}{layerButton('routes','Routes')}{layerButton('territory','Territory')}</div>
+          <button type="button" className={`mapLayerLabel mapFilterMenuButton ${filtersOpen ? 'active' : ''}`} aria-expanded={filtersOpen} onClick={()=>setFiltersOpen(v => !v)}><Filter size={14}/> Filters <span>{activeLayerFilterCount}/{layerFilterOptions.length}</span></button>
+          {filtersOpen && <div className="mapLayerChecklist" role="group" aria-label="Map filters">
+            <button type="button" className="mapLayerBulkToggle" onClick={()=>setAllLayerFilters(!allLayerFiltersActive)} aria-label={allLayerFiltersActive ? 'Uncheck all map filters' : 'Check all map filters'}>
+              <BulkLayerIcon size={14}/>
+              <span>{allLayerFiltersActive ? 'Uncheck All' : 'Check All'}</span>
+            </button>
+            {layerFilterOptions.map(([key,name]) => <label key={key} className={layers[key] ? 'active' : ''}>
+              <input type="checkbox" checked={!!layers[key]} onChange={()=>toggleLayer(key)} />
+              <span>{name}</span>
+            </label>)}
+          </div>}
         </div>
-        <span className={`mapToolbarMissionCooldown hasHoverTooltip ${missionCooldownActive ? 'active' : 'ready'}`} tabIndex={0} data-tooltip={missionCooldownActive ? missionCooldownDetail : 'You can start a planet mission right now.'}>
+        <span className={`mapScanSummary mapStatusChip hasHoverTooltip ${scanChargeState}`} tabIndex={0} data-tooltip={scanStatusDetail} style={{'--scan-charge-pct':`${scanChargePct}%`}}><Zap size={15}/><span>{scanStatusLabel}</span></span>
+        <span className={`mapToolbarMissionCooldown mapStatusChip mapPlanetMissionSummary hasHoverTooltip ${missionCooldownActive ? 'active' : 'ready'}`} tabIndex={0} data-tooltip={missionCooldownActive ? missionCooldownDetail : 'You can start a planet mission right now.'}>
+          <Globe2 size={14}/>
           <b>{missionCooldownLabel}</b>
           <small>{missionCooldownActive ? missionCooldownDetail : 'You can start a planet mission right now.'}</small>
         </span>
@@ -7517,38 +9247,67 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
             return <button key={mode.key} type="button" className={`mapAutoExploreButton hasHoverTooltip ${active ? 'active' : ''}`} aria-pressed={active} data-tooltip={mode.tooltip} onClick={()=>onToggleAutoExploreMode(mode.key)}><Icon size={15}/><span>{active ? mode.activeLabel : mode.label}</span></button>;
           })}
         </div>
-        {showAutoExploreStatus && <div className={`autoExploreStrip ${autoExploreMode ? 'active' : 'paused'}`}>
-          <b>{autoExploreMode ? activeAutoExploreConfig.statusActive : activeAutoExploreConfig.statusPaused}</b>
-          <span>{autoExploreStatus || activeAutoExploreConfig.idle}</span>
-          <small>Targets {activeAutoExploreConfig.target}. Fuel reserve {fmt(reserveFuel)}.</small>
-        </div>}
       </div>}
       {!!partyMembersForHud.length && <div className="partyMapHud" onMouseDown={stopMapBubble} onMouseUp={stopMapBubble} onClick={stopMapBubble}>{partyMembersForHud.map(m=><button key={m.playerId} type="button" className={`partyHudCard ${m.isLeader ? 'leader' : ''}`} onClick={()=>focusPartyMember(m)}><ProfileAvatar profile={{avatarUrl:m.avatarUrl, displayName:m.displayName}} size="tiny"/><span><b>{m.displayName || m.username}</b><i><em style={{width:`${pctOf(m.ship?.shield,m.ship?.maxShield)}%`}} /></i><i><em style={{width:`${pctOf(m.ship?.hull,m.ship?.maxHull)}%`}} /></i></span></button>)}</div>}
       <div ref={mapWorldRef} className={`infoMap ${type}Map openWorldMap mapWorld`} style={{width:MAP_W, height:MAP_H, minWidth:MAP_W, minHeight:MAP_H, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin:'0 0'}}>
+        {systemSunAsset && <img className="systemSunArt" src={systemSunAsset} alt="" aria-hidden="true" />}
+        {type === 'system' && radarRange > 0 && radarVisualCenter && <span className="playerRadarRing mapRadarRangeRing" aria-hidden="true" style={{left:`${radarVisualCenter.x_pct}%`, top:`${radarVisualCenter.y_pct}%`, width:`${radarDiameterPx}px`, height:`${radarDiameterPx}px`}} />}
         {type === 'system' && layers.danger && nodes.map(n => pointInRadar(n) && Number(n.risk_level || 0) >= 45 ? <span key={`danger-${n.id}`} className={`dangerZone ${Number(n.risk_level || 0) >= 70 ? 'extreme' : 'high'}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} /> : null)}
         {type === 'system' && layers.market && nodes.map(n => pointInRadar(n) ? <span key={`market-${n.id}`} className="marketPulse hasHoverTooltip" style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`}} data-tooltip={`Market pressure here: legal ${n.legal_market_strength || 0}, illicit ${n.illicit_market_strength || 0}.`} /> : null)}
         {visibleScanPings.map(p => {
           const diameter = scanPingDiameterPx(p);
           return <span key={p.id} className="scanAreaPing" style={{left:`${p.x_pct}%`, top:`${p.y_pct}%`, width:`${diameter}px`, height:`${diameter}px`, '--scan-ping-duration':`${Number(p.animation_seconds || 2)}s`}} />;
         })}
+        {!!visibleGatheringActions.length && <svg className="gatheringTethers" viewBox="0 0 100 100" preserveAspectRatio="none">
+          {visibleGatheringActions.flatMap((a, ai) => (a.players || []).map((p, pi) => {
+            const active = !!(p.activeMinigame || p.bonusActive);
+            const ox = ((pi % 3) - 1) * 0.45;
+            const oy = (Math.floor(pi / 3) - 0.5) * 0.34;
+            return <line key={`${a.actionId || a.nodeId}:${p.playerId}:${pi}`} x1={gatheringSourceX + ox} y1={gatheringSourceY + oy} x2={Number(a.x_pct ?? a.x)} y2={Number(a.y_pct ?? a.y)} className={`${a.actionType || 'gather'} ${active ? 'active' : 'passive'} ${p.bonusActive ? 'bonus' : ''}`} />;
+          }))}
+        </svg>}
+        {visibleGatheringActions.map(a => {
+          const active = (a.players || []).some(p => p.activeMinigame || p.bonusActive);
+          return <span key={`gather-fx-${a.actionId || a.nodeId}`} className={`gatheringNodeFx ${a.actionType || 'gather'} ${active ? 'active' : 'passive'}`} style={{left:`${a.x_pct}%`, top:`${a.y_pct}%`, '--gather-count':Math.max(1, Number(a.gatheringCount || 1))}} />;
+        })}
         {partyMembersForHud.map(m => { const pt = partyPointFor(m); const same = type === 'galaxy' || Number(m.position?.galaxy_id || 0) === Number(map.current_galaxy_id || 0); return same && pointInRadar(pt) ? <span key={`party-radar-${m.playerId}`} className="partyRadarRing hasHoverTooltip" style={{left:`${pt.x_pct}%`, top:`${pt.y_pct}%`}} data-tooltip={`${m.displayName || 'Party member'} is sharing radar from here.`} /> : null; })}
         {visibleScanBlips.map(b => {
           const blipClass = b.blipClass || b.category || 'contact';
           return <button key={b.id || b.objectKey} type="button" className={`scanBlipMarker hasHoverTooltip ${blipClass}`} style={{left:`${b.x_pct}%`, top:`${b.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,b)} data-tooltip={`${label(blipClass)} blip. Scan it to resolve details.`}><ScanBlipIcon type={blipClass} /></button>;
+        })}
+        {layers.territory && type === 'galaxy' && !!galaxyTerritoryGroups.length && <svg className="galaxyTerritoryFabric" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          {galaxyTerritoryGroups.flatMap(group => group.links.map((link, index) => <line key={`${group.key}-fabric-${index}`} x1={link.from.x} y1={link.from.y} x2={link.to.x} y2={link.to.y} className={group.war ? 'war' : ''} style={{'--territory-color':group.color}} />))}
+        </svg>}
+        {layers.territory && type === 'galaxy' && nodes.map(n => {
+          const intel = galaxyIntelFor(n);
+          const zoneColor = factionCssColor(intel?.owner_faction?.color || n.faction_color || n.color);
+          const zoneState = galaxyWarActive(n) ? 'war' : (intel?.war_state || n.territory_status || 'secure');
+          const zoneScale = Math.max(1, Math.min(1.75, Number(n.planet_count || 1) / 4));
+          const galaxyVisual = galaxyVisualFor(n);
+          return <span key={`galaxy-zone-${n.id}`} className={`galaxyControlZone ${galaxyVisual.visualClass} ${zoneState} ${n.current ? 'current' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, '--territory-color': zoneColor, '--zone-scale':zoneScale, ...galaxyVisual.cssVars}}><GameImage className="galaxyZoneArt" src={n.image_url} assetType="galaxy" category={`${n.name || ''} ${n.sector || ''} ${n.faction_name || ''}`} alt="" /></span>;
         })}
         {layers.territory && type === 'system' && nodes.filter(n => n.kind !== 'gate' && pointInRadar(n)).map(n => <span key={`territory-${n.id}`} className={`territoryOverlay ${n.territory_status || 'secure'} ${n.is_border_system ? 'border' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, '--territory-color': mapNodeFactionColor(n)}} />)}
         {visibleWarZones.map(w => <span key={w.id} className={`galaxyWarRing planetWarRing hasHoverTooltip ${w.territory_status || ''}`} style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, width:`${w.radius_pct*2}%`, height:`${w.radius_pct*2}%`}} data-tooltip={`${w.name}: ${w.status === 'contested' ? 'contested territory' : 'capture ring'}. Hold this area to push the war.`} />)}
         {visibleWarZones.map(w => <button key={`${w.id}:station`} className="captureStationMarker hasHoverTooltip" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} data-tooltip={`${w.name}: war objective. Scan it before opening full details.`}>⚔</button>)}
         {layers.routes && <svg className="mapLines" viewBox="0 0 100 100" preserveAspectRatio="none">{visibleRouteLanes.map(l => { const a = byId[l.from], b = byId[l.to]; if (!a || !b) return null; return <line key={l.key} x1={a.x_pct} y1={a.y_pct} x2={b.x_pct} y2={b.y_pct} className={l.active && !hasCoordinateTravelLine ? 'lane active' : l.visited ? 'lane visited' : 'lane planned'} />; })}{showActiveCoordinateLine && <line x1={activeCoordinateOrigin.x_pct} y1={activeCoordinateOrigin.y_pct} x2={activeCoordinateDest.x_pct} y2={activeCoordinateDest.y_pct} className="lane active mapCoordinateTravelLine" />}</svg>}
         {nodes.filter(n => isAlwaysVisibleNavNode(n) || pointInRadar(n)).map(n => {
+          const isGateNode = isGalaxyGateMapNode(n);
+          const displayName = objectDisplayName(n);
+          n = {...n, name:displayName, kind:isGateNode ? 'gate' : (n.kind || 'planet')};
           const isCurrentNode = !!(n.current || n.id===currentId);
           const isDockedNode = isCurrentNode && !travel?.active && !travel?.open_space;
           const territoryLabel = n.territory_status === 'war' ? 'WAR' : n.territory_status === 'contested' ? 'CONTESTED' : n.is_border_system ? 'BORDER' : '';
-          return <button key={n.id} className={`mapNode hasHoverTooltip ${n.kind === 'gate' ? 'gateNode' : ''} ${isUninhabitableNode(n) ? 'uninhabitableNode' : ''} ${isCurrentNode ? 'current' : ''} ${isDockedNode ? 'dockedCurrent' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''} ${n.territory_status === 'war' ? 'territoryWarNode' : ''} ${n.territory_status === 'contested' || n.is_border_system ? 'contestedNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform, '--faction-color': mapNodeFactionColor(n)}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} data-tooltip={type === 'galaxy' ? `${n.name}: ${n.faction_name || 'Neutral'} influence here. ${n.territory_status === 'war' ? 'Active territory war in this galaxy. ' : n.territory_status === 'contested' ? 'Contested territory pressure in this galaxy. ' : ''}Open it when you want the safety, trade, and conflict readout.` : n.kind === 'gate' ? `${n.name}: this is your route to a neighboring galaxy. Dock here before jumping.` : `${n.name}: ${territoryLabel ? `${territoryLabel}. ` : ''}risk ${n.risk_level ?? '—'}, security ${n.security_level ?? '—'}, stability ${n.stability_level ?? '—'}. Good quick check before docking or taking jobs.`}><GameImage src={n.image_url} assetType={n.kind === 'gate' ? 'item' : type === 'galaxy' ? 'galaxy' : (String(n.type || '').toLowerCase().includes('station') || String(n.type || '').toLowerCase().includes('freeport') ? 'station' : 'planet')} category={n.economy_type || n.type || n.kind} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • {n.territory_status === 'war' ? `${n.territory_war_count || 0} WAR • ` : n.territory_status === 'contested' ? `${n.contested_zone_count || 0} CONTESTED • ` : ''}Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : n.kind === 'gate' ? <span>Jump lane • adjacent galaxy</span> : isUninhabitableNode(n) ? <span>{territoryLabel ? `${territoryLabel} • ` : ''}Uninhabitable planet • Missions only • RISK {n.risk_level}</span> : <span>{territoryLabel ? `${territoryLabel} • ` : ''}SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>
+          const galaxyStatus = type === 'galaxy' ? galaxyStatusPayload(n) : null;
+          const galaxyMeta = galaxyStatus?.warActive ? 'WAR ACTIVE' : galaxyStatus?.statusText || label(n.territory_status || 'Stable');
+          const gateCountdown = isGateNode ? gateNodeCountdown(n) : '';
+          return <button key={n.id} className={`mapNode hasHoverTooltip ${isGateNode ? 'gateNode' : ''} ${isUninhabitableNode(n) ? 'uninhabitableNode' : ''} ${isCurrentNode ? 'current' : ''} ${isDockedNode ? 'dockedCurrent' : ''} ${n.visited ? 'visited' : ''} ${Number(n.risk_level || 0) >= 65 ? 'riskyNode' : ''} ${n.capturable===false ? 'homeGalaxyNode' : ''} ${n.territory_status === 'war' ? 'territoryWarNode' : ''} ${n.territory_status === 'contested' || n.is_border_system ? 'contestedNode' : ''}`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:nodeTransform, '--faction-color': mapNodeAccentColor(n, type)}} onMouseUp={(e)=>openContext(e,{...n,kind:n.kind || 'node'})} data-tooltip={type === 'galaxy' ? `${n.name}: ${n.faction_name || 'Neutral'} influence here. ${n.territory_status === 'war' ? 'Active territory war in this galaxy. ' : n.territory_status === 'contested' ? 'Contested territory pressure in this galaxy. ' : ''}Open it when you want the safety, trade, and conflict readout.` : isGateNode ? `${n.name}: this is your route to a neighboring galaxy. Dock here before jumping.` : `${n.name}: ${territoryLabel ? `${territoryLabel}. ` : ''}risk ${n.risk_level ?? '—'}, security ${n.security_level ?? '—'}, stability ${n.stability_level ?? '—'}. Good quick check before docking or taking jobs.`}><GameImage src={isGateNode ? '' : n.image_url} assetType={isGateNode ? 'station' : type === 'galaxy' ? 'galaxy' : (String(n.type || '').toLowerCase().includes('station') || String(n.type || '').toLowerCase().includes('freeport') ? 'station' : 'planet')} category={mapPlanetAssetCategory(n, isGateNode)} hint={isGateNode ? 'station gate galaxy jump gate' : mapPlanetAssetCategory(n, isGateNode)} alt={n.name} /><b>{n.name}</b>{type === 'galaxy' ? <span>{n.faction_name || 'Neutral'} • {n.territory_status === 'war' ? `${n.territory_war_count || 0} WAR • ` : n.territory_status === 'contested' ? `${n.contested_zone_count || 0} CONTESTED • ` : ''}Bonus {n.control_bonus_pct || 0}% • {n.capturable ? 'Capturable' : 'Home Safe'}</span> : isGateNode ? <><span>Jump lane • adjacent galaxy</span>{gateCountdown && <em className="gateNodeCountdown">{gateCountdown}</em>}</> : isUninhabitableNode(n) ? <span>{territoryLabel ? `${territoryLabel} • ` : ''}Uninhabitable planet • Missions only • RISK {n.risk_level}</span> : <span>{territoryLabel ? `${territoryLabel} • ` : ''}SEC {n.security_level} • STAB {n.stability_level} • RISK {n.risk_level}</span>}</button>
         })}
-        {shipPoint && <button className={`shipMarker selfShip ${travel?.mode === 'intercept' ? 'intercepting' : ''} ${!travel?.active && travel?.open_space ? 'parkedOpenSpace' : ''}`} style={{left:`${shipPoint.x}%`, top:`${shipPoint.y}%`, transform:iconTransform, '--ship-faction-color': playerFactionColor}} onMouseUp={(e)=>openContext(e,{kind:'self', name:travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label:travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : (travel?.open_space ? 'Holding position in open space.' : 'You are traveling in open space.'), progress:Math.round(progress*100)})}>
-          {radarRange > 0 && <span className="playerRadarRing shipAttachedRadarRing" aria-hidden="true" style={{width:`${radarDiameterPx / Math.max(markerScale, 0.001)}px`, height:`${radarDiameterPx / Math.max(markerScale, 0.001)}px`}} />}
-          <GameImage className="selfShipImg" src={state?.active_ship?.image_url} assetType="ship" category={`${summary?.player_faction?.name || ''} ${state?.active_ship?.role || state?.active_ship?.class_name || state?.active_ship?.template_name || state?.active_ship?.name || (travel?.mode === 'intercept' ? 'interceptor combat' : 'player explorer')}`} alt="Your ship" /><span>{travel?.active ? `${Math.round(progress*100)}%` : 'YOU'}</span><small className="mapShipLevel">Lv {fmt(state?.player?.level || 1)}</small></button>}
+        {nodes.filter(n => isAlwaysVisibleNavNode(n) || pointInRadar(n)).map(n => {
+          const marker = refiningMarkerForNode(n);
+          return marker ? <span key={`refining-${type}-${n.id}`} className={`refiningMapBadge ${marker.complete ? 'complete' : 'active'} hasHoverTooltip`} style={{left:`${n.x_pct}%`, top:`${n.y_pct}%`, transform:iconTransform}} data-tooltip={marker.complete ? `${n.name}: refining output ready to claim.` : `${n.name}: ${marker.count} refining job(s) active.`}><Hammer size={11}/><em>{marker.complete ? 'Ready' : fmt(marker.count)}</em></span> : null;
+        })}
+        {selfMarkerPoint && <button className={`shipMarker selfShip ${travel?.mode === 'intercept' ? 'intercepting' : ''} ${!travel?.active && travel?.open_space ? 'parkedOpenSpace' : ''}`} style={{left:`${selfMarkerPoint.x_pct}%`, top:`${selfMarkerPoint.y_pct}%`, transform:iconTransform, '--ship-faction-color': playerFactionColor}} onMouseUp={(e)=>openContext(e,{kind:'self', name:travel?.mode === 'intercept' ? 'Your Ship — Intercept Course' : 'Your Ship', label:travel?.intercept_target_name ? `Intercepting ${travel.intercept_target_name}` : (travel?.open_space ? 'Holding position in open space.' : 'You are traveling in open space.'), progress:Math.round(progress*100)})}>
+          <span className="selfShipVisual" aria-hidden="true"><GameImage className="selfShipImg" src={state?.active_ship?.image_url} assetType="ship" category={`${summary?.player_faction?.name || ''} ${state?.active_ship?.role || state?.active_ship?.class_name || state?.active_ship?.template_name || state?.active_ship?.name || (travel?.mode === 'intercept' ? 'interceptor combat' : 'player explorer')}`} alt="" /></span><span className="selfShipName">{travel?.active ? `${Math.round(progress*100)}%` : 'YOU'}</span><small className="mapShipLevel">Lv {fmt(state?.player?.level || 1)}</small></button>}
         {visibleTraffic.map(t => {
           const trafficLevel = t.npcLevel || t.npc_level || t.level || t.playerLevel || t.player_level || t.ship_level || 1;
           const atWar = !!(t.atWar || t.at_war || t.guildWar || t.guild_war || t.warTarget || t.war_target || String(t.hostileReason || t.statusText || t.label || '').toLowerCase().includes('war'));
@@ -7557,36 +9316,37 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
           const markerLabel = t.securityDefense ? (securityType === 'turret' ? 'TUR' : 'SEC') : (t.partyMember ? 'PARTY' : t.npcObjective ? label(t.npcObjective).slice(0,7) : `${Math.round(t.progress || 0)}%`);
           const securityClass = t.securityDefense ? `securityDefense ${securityType}` : '';
           if (t.securityDefense) {
-            const securityTooltip = `${t.name || 'Security defender'} - Lv ${fmt(trafficLevel)}. ${securityType === 'turret' ? 'Gate turret. It fires on wanted or opposing-faction pilots.' : 'Security patrol. It roams the local map and can join battles.'}`;
+            const securityTooltip = `${t.name || 'Security defender'} - Lv ${fmt(trafficLevel)}. ${securityType === 'turret' ? 'Gate turret. It fires on wanted or opposing-faction pilots.' : 'Security patrol. It roams the map and can join battles.'}`;
             return <button key={t.id} className={`trafficShip hasHoverTooltip ${t.kind || 'npc'} ${t.hostile ? 'hostile' : ''} patrol ${securityClass} ${atWar ? 'atWar' : ''}`} style={{left:`${t.x_pct}%`, top:`${t.y_pct}%`, transform:iconTransform, '--ship-faction-color': shipFactionColor(t, summary)}} onMouseUp={(e)=>openContext(e,t)} data-tooltip={securityTooltip}><GameImage src={t.image_url} assetType="ship" category={shipHint} hint={shipHint} alt={t.name || t.label || 'Security defender'} /><em>{markerLabel}</em><small className="mapShipLevel">Lv {fmt(trafficLevel)}</small>{atWar && <i className="warSwords" aria-label="War target">âš”</i>}</button>;
           }
           const tooltip = t.securityDefense
-            ? `${t.name || 'Security defender'} - Lv ${fmt(trafficLevel)}. ${securityType === 'turret' ? 'Gate turret. It fires on wanted or opposing-faction pilots.' : 'Security patrol. It roams the local map and can join battles.'}`
+            ? `${t.name || 'Security defender'} - Lv ${fmt(trafficLevel)}. ${securityType === 'turret' ? 'Gate turret. It fires on wanted or opposing-faction pilots.' : 'Security patrol. It roams the map and can join battles.'}`
             : `${t.name || t.label || 'Ship'} - Lv ${fmt(trafficLevel)}. ${atWar ? 'War target: fighting them does not use normal bounty/jail rules.' : t.hostile ? 'Hostile contact. Scan before committing if you are not sure.' : 'Local traffic. Scan to open full details.'}`;
           return <button key={t.id} className={`trafficShip hasHoverTooltip ${t.kind || 'npc'} ${t.hostile ? 'hostile' : ''} ${isPatrol(t) ? 'patrol' : ''} ${t.partyMember ? 'partyMember' : ''} ${atWar ? 'atWar' : ''} ${t.scanUnlocked ? 'scanUnlocked' : ''}`} style={{left:`${t.x_pct}%`, top:`${t.y_pct}%`, transform:iconTransform, '--ship-faction-color': shipFactionColor(t, summary)}} onMouseUp={(e)=>openContext(e,t)} data-tooltip={`${t.name || t.label || 'Ship'} • Lv ${fmt(trafficLevel)}. ${atWar ? 'War target: fighting them does not use normal bounty/jail rules.' : t.hostile ? 'Hostile contact. Scan before committing if you are not sure.' : 'Local traffic. Scan to open full details.'}`}><GameImage src={t.image_url} assetType="ship" category={shipHint} hint={shipHint} alt={t.name || t.label || 'Transit ship'} /><em>{t.partyMember ? 'PARTY' : t.npcObjective ? label(t.npcObjective).slice(0,7) : `${Math.round(t.progress || 0)}%`}</em><small className="mapShipLevel">Lv {fmt(trafficLevel)}</small>{atWar && <i className="warSwords" aria-label="War target">⚔</i>}</button>;
         })}
-        {visibleOreSites.map(o => <button key={o.id} className="resourceNode oreNode hasHoverTooltip" style={{left:`${o.x_pct}%`, top:`${o.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,o)} data-tooltip={`${o.name || o.label || 'Ore signature'} • Tier ${o.tier || '—'}. Approach it if you want to mine this site.`}><GameImage src={o.image_url} assetType="material" category={o.kind || o.resource_type || 'ore'} alt={o.name || 'Ore signature'} /><em>T{o.tier}</em></button>)}
-        {visibleSalvageIcons.map(w => <button key={w.id} className="resourceNode salvageNode hasHoverTooltip" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} data-tooltip={`${w.ship_name || w.label || 'Wreck'} • Tier ${w.ship_tier || '—'}. This is real salvage from a destroyed ship.`}><GameImage src={w.image_url} assetType="material" category={w.kind || 'salvage wreck'} alt={w.ship_name || 'Wreck'} /><em>T{w.ship_tier}</em></button>)}
-        {visibleExplorationSites.map(site => <button key={site.id} className={`resourceNode explorationNode hasHoverTooltip ${site.signalState || 'unknown'} ${Number(site.signalQuality || 0) >= 70 ? 'highQuality' : ''}`} style={{left:`${site.x_pct}%`, top:`${site.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,site)} data-tooltip={`${site.realName || site.name || site.label || 'Exploration site'} • Signal quality ${fmt(site.signalQuality ?? site.rewardTier)}. Scan or approach to learn what is really here.`}><GameImage src={site.image_url} assetType="material" category={site.kind || 'ancient exploration'} alt={site.realName || site.name || 'Ancient site'} /><em>Q{fmt(site.signalQuality ?? site.rewardTier)}</em></button>)}
+        {visibleOreSites.map(o => <button key={o.id} className="resourceNode oreNode hasHoverTooltip" style={{left:`${o.x_pct}%`, top:`${o.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,o)} data-tooltip={`${o.name || o.label || 'Ore signature'} • Tier ${o.tier || '—'}. Approach it if you want to mine this site.`}><GameImage src={o.image_url} assetType="material" category={o.resource_type || o.kind || 'ore'} alt={o.name || 'Ore signature'} /><em>T{o.tier}</em></button>)}
+        {visibleSalvageIcons.map(w => <button key={w.id} className="resourceNode salvageNode hasHoverTooltip" style={{left:`${w.x_pct}%`, top:`${w.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,w)} data-tooltip={`${w.ship_name || w.label || 'Wreck'} • Tier ${w.ship_tier || '—'}. This is real salvage from a destroyed ship.`}><GameImage src={w.image_url} assetType="material" category={w.visualCategory || w.kind || 'salvage wreck'} alt={w.ship_name || 'Wreck'} /><em>T{w.ship_tier}</em></button>)}
+        {visibleExplorationSites.map(site => <button key={site.id} className={`resourceNode explorationNode hasHoverTooltip ${site.signalState || 'unknown'} ${Number(site.signalQuality || 0) >= 70 ? 'highQuality' : ''}`} style={{left:`${site.x_pct}%`, top:`${site.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,site)} data-tooltip={`${site.realName || site.name || site.label || 'Exploration site'} • Signal quality ${fmt(site.signalQuality ?? site.rewardTier)}. Scan or approach to learn what is really here.`}><GameImage src={site.image_url} assetType="material" category={site.visualCategory || site.kind || 'ancient exploration'} alt={site.realName || site.name || 'Ancient site'} /><em>Q{fmt(site.signalQuality ?? site.rewardTier)}</em></button>)}
         {visiblePlayerBases.map(b => <button key={b.id} className={`resourceNode playerBaseNode hasHoverTooltip ${b.ownBase ? 'ownBase' : ''}`} style={{left:`${b.x_pct}%`, top:`${b.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,b)} data-tooltip={b.ownBase ? `${b.name || 'Your base'}: your private base. Dock here to manage it.` : `${b.name || 'Private base'}: another pilot owns this. You cannot dock or attack it.`}><GameImage src={b.image_url} assetType="station" category="player base" alt={b.name || 'Player base'} /><em>{b.ownBase ? 'BASE' : 'PRIV'}</em></button>)}
-        {visiblePirateStations.map(st => <button key={st.id} className={`resourceNode pirateStationNode hasHoverTooltip ${st.locked ? 'locked' : ''}`} style={{left:`${st.x_pct}%`, top:`${st.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,st)} data-tooltip={`${st.name || st.label || 'Pirate station'}: assault site with a shared defender pool.`}><GameImage src={st.image_url} assetType="station" category="pirate station" alt={st.name || 'Pirate station'} /><em>{fmt(st.resourcePct ?? st.resource_pct)}%</em></button>)}
+        {visiblePirateStations.map(st => <button key={st.id} className={`resourceNode pirateStationNode tier${Math.max(1, Math.min(3, Number(st.tier || 2)))} hasHoverTooltip ${st.locked ? 'locked' : ''}`} style={{left:`${st.x_pct}%`, top:`${st.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,{...st, role:`pirate base tier ${st.tier || 2}`})} data-tooltip={`${st.name || st.label || 'Pirate base'}: assault site with a shared defender pool.`}><GameImage src={st.image_url} assetType="station" category={`pirate base tier ${st.tier || 2}`} alt={st.name || 'Pirate base'} /><em>{fmt(st.resourcePct ?? st.resource_pct)}%</em></button>)}
         {visibleEventSites.map(ev => <button key={ev.id || ev.objectKey} className={`resourceNode eventNode hasHoverTooltip ${ev.eventType || ev.event_type || ev.code || ''}`} style={{left:`${ev.x_pct}%`, top:`${ev.y_pct}%`, transform:iconTransform}} onMouseUp={(e)=>openContext(e,{...ev,kind:'server_event'})} data-tooltip={`${ev.name || ev.label || 'Server event'}: ${ev.selectedSummary || ev.dangerHint || ev.statusText || 'active event site'}`}><GameImage src={ev.image_url} assetType="item" category={ev.eventType || ev.event_type || ev.code || 'server event'} alt={ev.name || 'Server event'} /><em>EVT</em></button>)}
+        {currentGatheringAction && currentGatheringPlayer && onGatheringMinigame && <GatheringMinigameOverlay action={currentGatheringAction} playerEntry={currentGatheringPlayer} zoom={zoom} onEvent={onGatheringMinigame} />}
       </div>
     </div>
     {context && <div className="mapContextPopup phase23bPopup" style={{left:popupX, top:popupY}} onMouseDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}><b>{context.name || context.label || context.ship_name}</b><small>{context.selectedSummary || context.label || context.statusText || label(context.kind || context.role || 'object')}</small>{blockedReason && <small className="blockedReason">{blockedReason}</small>}{context.inActionRange === false && <small className="blockedReason">{context.rangeLabel || 'Out of range. Approach first.'}</small>}<div className="buttonRow verticalButtons">
       {type === 'system' && context.kind === 'blank' && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:'Open-space waypoint',map_type:type})}>Go Here</button>}
       {context.kind === 'blank' && travel?.active && <button className="dangerBtn" disabled={!onCancelTravel} onClick={()=>run(onCancelTravel,{})}>Cancel Current Travel</button>}
-      {type === 'system' && context.kind === 'blank' && <button disabled={travelBlocked || !onScanArea || scanCooldownActive} onClick={()=>run(onScanArea,{x_pct:context.x_pct,y_pct:context.y_pct,map_type:type})}>{scanCooldownActive ? `Scan Charging ${scanChargePct}%` : 'Scan Area'}</button>}
+      {type === 'system' && context.kind === 'blank' && <button disabled={travelBlocked || !onScanArea || scanCooldownActive} onClick={()=>run(onScanArea,{x_pct:context.x_pct,y_pct:context.y_pct,map_type:type})}>{scanCooldownActive ? `${scanCooldownSeconds}s Probe Cooldown` : 'Launch Probe'}</button>}
       {type === 'system' && context.kind === 'blank' && <button disabled={travelBlocked || !onPlaceBase} onClick={()=>run(onPlaceBase,{x_pct:context.x_pct,y_pct:context.y_pct})}>Build Base Here</button>}
       {type === 'system' && state?.user?.god_mode && context.kind === 'blank' && <button disabled={!onAdminSpawn} onClick={()=>{ setSpawnContext({x_pct:context.x_pct,y_pct:context.y_pct,map_type:type,adminSpawnConstraints:summary.admin_spawn_constraints}); closeContext(); }}>Spawn</button>}
       {context.kind === 'scan_blip' && scanInspectButton(context, 'Scan Contact', 'Inspect Contact')}
       {isSystemDockTarget(context) && scanInspectButton(context, 'Scan Details', 'Inspect')}
-      {type === 'galaxy' && context.kind === 'node' && scanInspectButton(context, 'Scan Details', 'Inspect')}{type === 'galaxy' && context.kind === 'node' && <button onClick={()=>run(onViewGalaxy,context)}>View Local Map</button>}
-      {isUninhabitableNode(context) && <div className="missionContextGroup"><b>Uninhabitable Planet Missions</b>{(context.mission_contracts || []).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>run(()=>onMissionTravel(context,m),{})}>{m.name} • {fmt(m.minutes)}m</button>)}{!(context.mission_contracts || []).length && <button disabled>No missions available</button>}</div>}
+      {type === 'galaxy' && context.kind === 'node' && scanInspectButton(context, 'Scan Details', 'Inspect')}{type === 'galaxy' && context.kind === 'node' && <button onClick={()=>run(onViewGalaxy,context)}>View Map</button>}
+      {isUninhabitableNode(context) && scanInspectButton(context, 'Scan Details', 'Inspect')}
+      {isUninhabitableNode(context) && <>{(context.mission_contracts || []).slice(0,1).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>run(()=>onMissionTravel(context,m),{})}>{m.name} • {fmt(m.minutes)}m</button>)}{!(context.mission_contracts || []).length && <button disabled>No mission available</button>}</>}
       {isSystemDockTarget(context) && (context.current || context.id===currentId) && travel?.open_space && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:context.kind || 'planet'})}>Dock Here</button>}
       {isSystemDockTarget(context) && !(context.current || context.id===currentId) && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:context.kind || 'planet'})}>Dock Here</button>}
       {type === 'galaxy' && context.kind === 'node' && !(context.current || context.id===currentId) && <button disabled={travelBlocked} onClick={()=>run(onTravel,context)}>Jump Here</button>}
-      {type === 'system' && context.kind === 'gate' && (context.current || context.id===currentId) && travel?.open_space && <button disabled={travelBlocked} onClick={()=>run(onTravel,{...context, kind:'planet'})}>Dock Here</button>}
       {context.kind === 'gate' && <button disabled={travelBlocked} onClick={()=>run(onTravel,context)}>Jump Gate</button>}
       {context.kind === 'player_base' && scanInspectButton(context, 'Scan Base', 'Inspect Base')}
       {context.kind === 'player_base' && context.ownBase && <button disabled={travelBlocked || !onDockBase} onClick={()=>run(onDockBase,context)}>Dock At My Base</button>}
@@ -7611,7 +9371,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
       {context.kind === 'war_zone' && scanInspectButton(context, 'Scan Objective', 'Inspect Objective')}
       {context.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>run(onGoHere,{x_pct:context.x_pct,y_pct:context.y_pct,label:context.name,map_type:'system'})}>{needsApproach(context) ? 'Approach Capture Ring' : 'Enter Capture Ring'}</button>}
       <button onClick={closeContext}>Cancel</button></div></div>}
-    {selected && selected.kind !== 'blank' && canShowInspect(selected) && <div className="mapInspectOverlay" onMouseDown={()=>setSelectedObject(null)} onMouseUp={stopMapBubble} onClick={stopMapBubble}><div className="mapObjectPanel phase23bObjectPanel mapInspectModal" style={{left:selectedX, top:selectedY}} onMouseDown={e=>e.stopPropagation()}><button className="modalX mapInspectX" onClick={()=>setSelectedObject(null)}>×</button><div className="mapObjectHeader mapObjectHeaderVisual">{selected.kind === 'player' ? <ProfileAvatar profile={findPublicProfile(publicProfiles, selected) || {displayName:selected.name, selectedBadgeCode:selected.selectedBadgeCode}} src={findPublicProfile(publicProfiles, selected)?.avatarUrl} size="md" onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }} /> : <GameImage src={selected.kind === 'npc' || selected.attackable ? '' : selected.image_url} assetType={selected.kind === 'npc' || selected.attackable ? 'ship' : selected.kind === 'node' ? (type === 'galaxy' ? 'galaxy' : (selected.type === 'station' ? 'station' : 'planet')) : selected.kind === 'ore' || selected.kind === 'salvage' || selected.kind === 'exploration' ? 'material' : 'item'} category={selected.role || selected.kind || selected.type || selected.economy_type} alt={selected.name || selected.realName || selected.label || selected.ship_name} />}<div><b>{selected.name || selected.realName || selected.label || selected.ship_name}</b><span>{label(selected.kind || selected.role || 'object')} • {selected.statusText || selected.label || ''}</span></div></div><div className="mapMetaGrid"><span>Risk <b>{selected.riskBand || fmt(selected.riskLevel ?? selected.risk_level ?? selected.route_danger ?? 0)}</b></span><span>Reward <b>{selected.rewardHint || `T${fmt(selected.rewardTier ?? selected.tier ?? selected.ship_tier ?? 0)}`}</b></span><span>State <b>{label(selected.signalState || selected.kind || selected.role || 'known')}</b></span><span>ETA <b>{travel?.active ? clockTimeLeft(travel.arrival_at) : 'Idle'}</b></span><span>Radar <b>{selected.radarDistancePct !== undefined ? `${fmt(selected.radarDistancePct)} / ${fmt(selected.radarRangePct || summary.radar_range_pct)}%` : `${fmt(summary.radar_range_pct || 0)}%`}</b></span><span>Range <b>{selected.rangeLabel || (selected.inActionRange === false ? 'Out of Range' : selected.inActionRange === true ? 'In Range' : '—')}</b></span></div><div className="selectedSummary">{selected.selectedSummary || selected.outcomeFactors || 'No extra intel yet. Scan or approach for better data.'}</div>{selected.dangerHint && <div className="mapWarningLine">{selected.dangerHint}</div>}{selected.npcObjectiveLabel && <div className="npcObjectiveBox"><b>NPC Objective</b><span>{selected.npcObjectiveLabel}</span><small>{selected.npcObjectiveState || selected.npcRadarBehavior}</small>{selected.npcObjectiveTargetName && <small>Target: {selected.npcObjectiveTargetName}</small>}</div>}{selected.kind === 'npc' && <div className="npcLifeBox"><span>Level <b>{fmt(selected.npcLevel || 1)}</b></span><span>XP <b>{fmt(selected.npcXp || 0)}</b></span><span>Gen <b>{fmt(selected.npcGeneration || 1)}</b></span><span>Deaths <b>{fmt(selected.npcDeathCount || 0)}</b></span>{selected.npcSkills && Object.entries(selected.npcSkills).slice(0,5).map(([k,v])=><em key={k}>{label(k)} {fmt(v)}</em>)}</div>}{selected.npcVisibleCounts && <div className="npcRadarCounts"><span>Radar sees ships <b>{fmt(selected.npcVisibleCounts.ship || 0)}</b></span><span>ore <b>{fmt(selected.npcVisibleCounts.ore || 0)}</b></span><span>wrecks <b>{fmt(selected.npcVisibleCounts.salvage || 0)}</b></span><span>ancient <b>{fmt(selected.npcVisibleCounts.exploration || 0)}</b></span></div>}{selected.disabledReason && <div className="mapWarningLine">{selected.disabledReason}</div>}{selected.outcomeFactors && <small>Factors: {selected.outcomeFactors}</small>}<div className="buttonRow">{selected.inActionRange === false && ['ore','salvage','exploration','pirate_station','war_zone'].includes(selected.kind) && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere(targetPayload(selected))}>Approach</button>}{isUninhabitableNode(selected) && (selected.mission_contracts || []).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>onMissionTravel && onMissionTravel(selected,m)}>{m.name} • Land & Start</button>)}{isSystemDockTarget(selected) && !(selected.current && !travel?.open_space) && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel({...selected, kind:selected.kind || 'planet'})}>Dock</button>}{type === 'galaxy' && selected.kind === 'node' && <button onClick={()=>onViewGalaxy && onViewGalaxy(selected)}>View Local Map</button>}{selected.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel(selected)}>Jump Gate</button>}{selected.attackable && selected.canAttack !== false && selected.inActionRange !== false && <button className="dangerBtn" onClick={()=>onIntercept && onIntercept(selected)}>Intercept / Attack</button>}{selected.kind === 'ore' && selected.canMine !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onMine && onMine(selected))}>{selected.inActionRange === false ? 'Approach to Mine' : `Mine • Energy ${fmt(selected.energyCost)}`}</button>}{selected.kind === 'salvage' && selected.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onSalvage && onSalvage(selected))}>{selected.inActionRange === false ? 'Approach to Salvage' : `Salvage • Energy ${fmt(selected.energy_cost)}`}</button>}{selected.kind === 'exploration' && selected.canScan !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onScanSite && onScanSite(selected))}>{selected.inActionRange === false ? 'Approach to Scan' : `Scan • Energy ${fmt(selected.scanEnergy)}`}</button>}{selected.kind === 'exploration' && selected.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onInvestigate && onInvestigate(selected))}>{selected.inActionRange === false ? 'Approach to Investigate' : `Investigate • Energy ${fmt(selected.investigateEnergy)}`}</button>}{selected.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || selected.locked || !onEnterPirateStation} onClick={()=>onEnterPirateStation && onEnterPirateStation(selected)}>{selected.locked ? 'Occupied' : selected.inActionRange === false ? 'Plot Approach / Dock' : 'Enter Station'}</button>}{selected.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere({x_pct:selected.x_pct,y_pct:selected.y_pct,label:selected.name,map_type:'galaxy'})}>Enter Capture Ring</button>}{selected.kind === 'player' && <><button onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }}>Profile</button><button onClick={()=>onPilotTrade && onPilotTrade(selected)}>Trade</button><button onClick={()=>onPilotParty && onPilotParty(selected)}>Party</button><button className="dangerBtn" onClick={()=>onPilotBlock && onPilotBlock(selected)}>Block</button></>}<button onClick={()=>setSelectedObject(null)}>Close</button></div><small>{selected.kind === 'exploration' ? 'Exploration is uncertain by design: scanning improves quality, modules improve analysis, hazard gear lowers trap damage, and bad sites can still produce nothing.' : selected.kind === 'npc' || selected.attackable ? 'Interceptions occur in open space. Planetary defense does not respond once ships are away from the planet.' : ''}</small></div></div>}
+    {selected && selected.kind !== 'blank' && canShowInspect(selected) && <div className="mapInspectOverlay" onMouseDown={()=>setSelectedObject(null)} onMouseUp={stopMapBubble} onClick={stopMapBubble}><div className="mapObjectPanel phase23bObjectPanel mapInspectModal" style={{left:selectedX, top:selectedY}} onMouseDown={e=>e.stopPropagation()}><button className="modalX mapInspectX" onClick={()=>setSelectedObject(null)}>×</button><div className="mapObjectHeader mapObjectHeaderVisual">{selected.kind === 'player' ? <ProfileAvatar profile={findPublicProfile(publicProfiles, selected) || {displayName:selected.name, selectedBadgeCode:selected.selectedBadgeCode}} src={findPublicProfile(publicProfiles, selected)?.avatarUrl} size="md" onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }} /> : <GameImage src={selected.kind === 'npc' || selected.attackable ? '' : selected.image_url} assetType={selected.kind === 'npc' || selected.attackable ? 'ship' : selected.kind === 'node' ? (type === 'galaxy' ? 'galaxy' : (selected.type === 'station' ? 'station' : 'planet')) : selected.kind === 'ore' || selected.kind === 'salvage' || selected.kind === 'exploration' ? 'material' : 'item'} category={selected.role || selected.kind || selected.type || selected.economy_type} alt={selected.name || selected.realName || selected.label || selected.ship_name} />}<div><b>{selected.name || selected.realName || selected.label || selected.ship_name}</b><span>{label(selected.kind || selected.role || 'object')} • {selected.statusText || selected.label || ''}</span></div></div><div className="mapMetaGrid"><span>Risk <b>{selected.riskBand || fmt(selected.riskLevel ?? selected.risk_level ?? selected.route_danger ?? 0)}</b></span><span>Reward <b>{selected.rewardHint || `T${fmt(selected.rewardTier ?? selected.tier ?? selected.ship_tier ?? 0)}`}</b></span><span>State <b>{label(selected.signalState || selected.kind || selected.role || 'known')}</b></span><span>ETA <b>{travel?.active ? clockTimeLeft(travel.arrival_at) : 'Idle'}</b></span><span>Radar <b>{selected.radarDistancePct !== undefined ? `${fmt(selected.radarDistancePct)} / ${fmt(selected.radarRangePct || summary.radar_range_pct)}%` : `${fmt(summary.radar_range_pct || 0)}%`}</b></span><span>Range <b>{selected.rangeLabel || (selected.inActionRange === false ? 'Out of Range' : selected.inActionRange === true ? 'In Range' : '—')}</b></span></div><div className="selectedSummary">{selected.selectedSummary || selected.outcomeFactors || 'No extra intel yet. Scan or approach for better data.'}</div><PlanetMissionInspectDetails selected={selected} onMissionTravel={onMissionTravel} travelBlocked={travelBlocked} />{selected.dangerHint && <div className="mapWarningLine">{selected.dangerHint}</div>}{selected.npcObjectiveLabel && <div className="npcObjectiveBox"><b>NPC Objective</b><span>{selected.npcObjectiveLabel}</span><small>{selected.npcObjectiveState || selected.npcRadarBehavior}</small>{selected.npcObjectiveTargetName && <small>Target: {selected.npcObjectiveTargetName}</small>}</div>}{selected.kind === 'npc' && <div className="npcLifeBox"><span>Level <b>{fmt(selected.npcLevel || 1)}</b></span><span>XP <b>{fmt(selected.npcXp || 0)}</b></span><span>Gen <b>{fmt(selected.npcGeneration || 1)}</b></span><span>Deaths <b>{fmt(selected.npcDeathCount || 0)}</b></span>{selected.npcSkills && Object.entries(selected.npcSkills).slice(0,5).map(([k,v])=><em key={k}>{label(k)} {fmt(v)}</em>)}</div>}{selected.npcVisibleCounts && <div className="npcRadarCounts"><span>Radar sees ships <b>{fmt(selected.npcVisibleCounts.ship || 0)}</b></span><span>ore <b>{fmt(selected.npcVisibleCounts.ore || 0)}</b></span><span>wrecks <b>{fmt(selected.npcVisibleCounts.salvage || 0)}</b></span><span>ancient <b>{fmt(selected.npcVisibleCounts.exploration || 0)}</b></span></div>}{selected.disabledReason && <div className="mapWarningLine">{selected.disabledReason}</div>}{selected.outcomeFactors && <small>Factors: {selected.outcomeFactors}</small>}<div className="buttonRow">{selected.inActionRange === false && ['ore','salvage','exploration','pirate_station','war_zone'].includes(selected.kind) && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere(targetPayload(selected))}>Approach</button>}{isUninhabitableNode(selected) && (selected.mission_contracts || []).slice(0,1).map(m => <button key={m.key} disabled={travelBlocked || !onMissionTravel || !m.canStart} onClick={()=>onMissionTravel && onMissionTravel(selected,m)}>{m.name} • Land & Start</button>)}{isSystemDockTarget(selected) && !(selected.current && !travel?.open_space) && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel({...selected, kind:selected.kind || 'planet'})}>Dock</button>}{type === 'galaxy' && selected.kind === 'node' && <button onClick={()=>onViewGalaxy && onViewGalaxy(selected)}>View Map</button>}{selected.kind === 'gate' && <button disabled={travelBlocked || !onTravel} onClick={()=>onTravel && onTravel(selected)}>Jump Gate</button>}{selected.attackable && selected.canAttack !== false && selected.inActionRange !== false && <button className="dangerBtn" onClick={()=>onIntercept && onIntercept(selected)}>Intercept / Attack</button>}{selected.kind === 'ore' && selected.canMine !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onMine && onMine(selected))}>{selected.inActionRange === false ? 'Approach to Mine' : `Mine`}</button>}{selected.kind === 'salvage' && selected.canSalvage !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onSalvage && onSalvage(selected))}>{selected.inActionRange === false ? 'Approach to Salvage' : `Salvage`}</button>}{selected.kind === 'exploration' && selected.canScan !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onScanSite && onScanSite(selected))}>{selected.inActionRange === false ? 'Approach to Scan' : `Scan`}</button>}{selected.kind === 'exploration' && selected.canInvestigate !== false && <button disabled={travelBlocked} onClick={()=>selected.inActionRange === false ? (onGoHere && onGoHere(targetPayload(selected))) : (onInvestigate && onInvestigate(selected))}>{selected.inActionRange === false ? 'Approach to Investigate' : `Investigate`}</button>}{selected.kind === 'pirate_station' && <button className="dangerBtn" disabled={travelBlocked || selected.locked || !onEnterPirateStation} onClick={()=>onEnterPirateStation && onEnterPirateStation(selected)}>{selected.locked ? 'Occupied' : selected.inActionRange === false ? 'Plot Approach / Dock' : 'Enter Station'}</button>}{selected.kind === 'war_zone' && <button disabled={travelBlocked || !onGoHere} onClick={()=>onGoHere && onGoHere({x_pct:selected.x_pct,y_pct:selected.y_pct,label:selected.name,map_type:'galaxy'})}>Enter Capture Ring</button>}{selected.kind === 'player' && <><button onClick={()=>{ const p=findPublicProfile(publicProfiles, selected); if(p) setProfileModal(p); }}>Profile</button><button onClick={()=>onPilotTrade && onPilotTrade(selected)}>Trade</button><button onClick={()=>onPilotParty && onPilotParty(selected)}>Party</button><button className="dangerBtn" onClick={()=>onPilotBlock && onPilotBlock(selected)}>Block</button></>}<button onClick={()=>setSelectedObject(null)}>Close</button></div><small>{selected.kind === 'exploration' ? 'Exploration is uncertain by design: scanning improves quality, modules improve analysis, hazard gear lowers trap damage, and bad sites can still produce nothing.' : selected.kind === 'npc' || selected.attackable ? 'Interceptions occur in open space. Planetary defense does not respond once ships are away from the planet.' : ''}</small></div></div>}
     {spawnContext && <AdminSpawnModal context={spawnContext} onSpawn={onAdminSpawn} onClose={()=>setSpawnContext(null)} />}
     <PublicProfileModal profile={profileModal} onClose={()=>setProfileModal(null)} />
   </div>;
@@ -7619,7 +9379,7 @@ function MapView({state=null, type, map, travel, onTravel, onCancelTravel, onInt
 
 function ShipStatusPanel({state}) {
   const ss = state.ship_status || {systems:[], warnings:[]};
-  return <Panel title="Ship Systems" help="Real ship, module, cargo, fuel, energy, hull, shield, and role-derived status.">
+  return <Panel title="Ship Systems" help="Real ship, module, cargo, fuel, hull, shield, and role-derived status.">
     <div className="shipStatusHead"><div className="shipArt smallShip"><GameImage src="" assetType="ship" category={state?.active_ship?.role || state?.active_ship?.class_name || state?.active_ship?.template_name || state?.active_ship?.name} alt={state?.active_ship?.name || 'Ship'} /></div><div><b>{state?.active_ship?.name || 'No Ship'}</b><span>Combat {fmt(ss.combat_rating)} • Mining {fmt(ss.mining_efficiency)} • Stealth {fmt(ss.stealth_rating)} • Scan {fmt(ss.scan_strength)} • Modules {fmt(ss.active_modules)}</span></div></div>
     <div className="systemBars">{(ss.systems || []).map(x=><div key={x.key}><span>{x.label}</span><Progress value={x.pct} danger={x.danger}/><small>{fmt(x.value)} / {fmt(x.max)}</small></div>)}</div>
     {!!(ss.warnings || []).length && <div className="warningStack">{ss.warnings.map(w=><span key={w}><AlertTriangle size={14}/>{w}</span>)}</div>}
@@ -7721,12 +9481,21 @@ function ItemVisual({item, size='md'}) {
 }
 
 
+function achievementBadgeCodeFrom(badge) {
+  const raw = typeof badge === 'string' ? badge : (badge?.code || badge?.url || badge?.badgeUrl || '');
+  return String(raw || '')
+    .trim()
+    .split(/[\\/]/)
+    .pop()
+    .replace(/\.(png|jpe?g|webp|svg)$/i, '');
+}
+
 function AchievementBadge({badge, size='md', locked=false, onClick=null}) {
-  const code = typeof badge === 'string' ? badge : (badge?.url || badge?.code || badge?.badgeUrl || '');
+  const code = achievementBadgeCodeFrom(badge);
   const tier = typeof badge === 'object' ? (badge?.tier || '') : '';
   const labelText = typeof badge === 'object' ? (badge?.name || badge?.code || 'Achievement') : 'Achievement';
   const body = <span className={`achievementBadge hasHoverTooltip ${size} ${locked ? 'locked' : ''}`} tabIndex={0} data-tooltip={labelText}>
-    <GameImage src={code} assetType="item" category={`achievement ${code}`} hint={code} alt={labelText} />
+    <GameImage src="" assetType="item" category={`achievement ${code}`} hint={code} alt={labelText} />
     {tier ? <em>T{tier}</em> : null}
   </span>;
   return onClick ? <button className="badgeButton" disabled={locked} onClick={onClick}>{body}</button> : body;
@@ -7783,7 +9552,6 @@ function TierBadge({item}) {
 function OperationRow({item, actionLabel, onRun}) {
   const creditsMin = item.preview_reward_min ?? item.reward_min ?? item.base;
   const creditsMax = item.preview_reward_max ?? item.reward_max ?? item.base;
-  const energy = item.energy_cost ?? item.energy;
   const fuel = item.fuel_cost ?? 0;
   const xp = item.xp_reward ?? item.xp;
   const success = item.success_odds !== undefined ? `${Math.round(item.success_odds * 100)}%` : '—';
@@ -7793,7 +9561,7 @@ function OperationRow({item, actionLabel, onRun}) {
     <div className="operationMain">
       <div className="operationTitle"><b>{item.name}</b><em>{label(tier)}</em><em>{item.risk_profile ? label(item.risk_profile) : 'Risk Rated'}</em></div>
       <p>{item.description || item.desc}</p>
-      <span>Energy {fmt(energy)} • Fuel {fmt(fuel)} • XP {fmt(xp)} • Credits {fmt(creditsMin)}{creditsMax !== creditsMin ? `-${fmt(creditsMax)}` : ''} • Success {success}</span>
+      <span>Fuel {fmt(fuel)} • XP {fmt(xp)} • Credits {fmt(creditsMin)}{creditsMax !== creditsMin ? `-${fmt(creditsMax)}` : ''} • Success {success}</span>
       <div className="factorLine"><small>Job {factorPct(item.job_bonus)} </small><small>Ship {factorPct(item.ship_bonus)} </small><small>Skill {factorPct(item.skill_bonus)} </small><small>Planet {factorPct(item.planet_bonus)} </small></div>
       <span className="operationHintWrap"><InfoTip text={item.recommendation_reason || 'Success chance is calculated from real ship, job, skill, and location state.'} label="Why this fits" side="left" /></span>
     </div>
@@ -7802,7 +9570,7 @@ function OperationRow({item, actionLabel, onRun}) {
 }
 
 const HUMAN_TOOLTIP_COPY = {
-  'Automatically fires Use All when attack energy is ready.': 'Turns the fight into cruise control. When you have enough attack energy, it presses Use All for you.',
+  'Automatically fires Use All when your weapons recover. Turns on after 1 minute without manual combat actions.': 'Turns the fight into cruise control. When your weapons recover, it presses Use All for you.',
   'Combat targets are limited to your current planet or station. Travel and jail block combat.': 'You can only fight targets where you are right now. Traveling or being jailed blocks combat.',
   'Your fitted weapons, shields, armor, scanners, engines, and skills affect battle outcome.': 'Your ship fit matters. Weapons, shields, armor, scanners, engines, and skills all affect the fight.',
   'NPCs and players shown here are at your current location only. Legal targets are safer; unlawful attacks can raise heat and cause jail.': 'These targets are standing where you are. Legal fights are safer; unlawful ones can bring heat or jail.',
@@ -7813,27 +9581,27 @@ const HUMAN_TOOLTIP_COPY = {
   'Available ships show requirements, role, tier, price, and purchase availability. Duplicate classes are blocked for normal players.': 'Market ships show role, tier, price, and requirements. Normal players cannot stack duplicate classes.',
   'Stat comparison shows selected ship vs active ship. Deltas help decide whether to activate or buy upgrades.': 'Compare this ship against what you are flying now. Green and red deltas show what you gain or give up.',
   'Ship loss is not permanent character death. Insurance pays part of the loss and the permanent starter ship is always usable.': 'Losing a ship hurts, but it does not delete your pilot. Insurance softens the hit, and your starter ship is always there as a fallback.',
-  'Current location prices. Legal goods are safer; illicit goods carry more risk and larger spread.': 'These are the prices at this stop. Legal cargo is steady. Illicit cargo can pay better, but it brings heat and bigger swings.',
-  'Illicit goods pay better but raise heat and can cause jail. Risk scales with item severity, quantity, security, stability, heat, ship stealth, and skills.': 'Smuggling can pay, but every run carries heat. Risk depends on what you carry, how much, local security, your heat, stealth, and skills.',
-  'Heat is created only by illegal activity. Legal trade never raises heat. Heat decays slowly server-side.': 'Heat comes from illegal work only. Legal trading is safe. Heat cools off slowly over time.',
+  'Current location prices. Goods are safer; restricted goods carry more risk and larger spread.': 'These are the prices at this stop. Legal cargo is steady. Restricted cargo can pay better, but it brings heat and bigger swings.',
+  'Restricted goods pay better but raise heat and can cause jail. Risk scales with item severity, quantity, security, stability, heat, ship stealth, and skills.': 'Smuggling can pay, but every run carries heat. Risk depends on what you carry, how much, local security, your heat, stealth, and skills.',
+  'Heat is created only by restricted activity. Goods trade never raises heat. Heat decays slowly server-side.': 'Heat comes from illegal work only. Legal trading is safe. Heat cools off slowly over time.',
   'Your current galaxy and stop live here, including local safety, stability, defense, and galaxy security forces.': 'Start here when you feel lost. It tells you where you are, how safe the area feels, and whether the local defenses are on your side.',
   'Current planet/station conditions. NPC ticks can slowly move market activity, security, stability, and pirate pressure.': 'These numbers are the local weather. Traffic, pirates, security, and market pressure can drift as the world sim runs.',
   'Local control affects prices, mission risk, illegal trade risk, crafting bonuses, and travel danger.': 'Control is not just color on the map. It nudges prices, job danger, smuggling risk, crafting, and travel safety.',
   'Only locations inside the current galaxy are shown here. Use the Galaxies map for cross-galaxy movement.': 'This is local travel only. For another galaxy, use the galaxy map and let the gate route handle the long leg.',
   'Planet-side/station-side missions. Each mission levels separately for each planet; higher local mission level takes slightly longer but pays much better.': 'Local missions remember where you run them. Repeating work on the same planet slowly turns it into better-paying work.',
-  'Dashboard operations are limited to basic credit/XP work plus current-career jobs. Bosses, raids, wars, and galaxy-scale content stay off this quick panel.': 'This panel is for quick errands, not the whole game. Big commitments live in their own screens so you do not start them by accident.',
-  'Sorted from current career, skills, ship power, energy use, and local planet conditions.': 'These are not random chores. The list weighs your ship, career, skills, energy, and the planet you are standing on.',
+  'Dashboard operations are limited to basic credit/XP work plus current-skill jobs. Bosses, raids, wars, and galaxy-scale content stay off this quick panel.': 'This panel is for quick errands, not the whole game. Big commitments live in their own screens so you do not start them by accident.',
+  'Sorted from current skill, skills, ship power, and local planet conditions.': 'These are not random chores. The list weighs your ship, skill, skills, and the planet you are standing on.',
   'Server-side NPC simulation events from planets and stations in your current galaxy.': 'This is the galaxy breathing in the background: patrols, traders, pressure changes, and trouble that happened while you were doing other things.',
   'Hospital time exists after ship destruction or serious injury. Surgery payments reduce time but never below 10 minutes.': 'Recovery is a penalty, not a lockout forever. Money can shorten it, but there is always a small floor after a serious loss.',
   'Fuel affects movement only. At 0 fuel, emergency power halves speed and jump gates are blocked.': 'Fuel only affects movement. Empty tanks mean half-speed emergency travel, and gates will not let you jump.',
   'Nodes summarize security, market activity, conflict, influence, and known locations across each galaxy.': 'Each node is a quick scan of a galaxy: safety, trade, conflict, influence, and known places.',
-  'Planet/station nodes expose security, stability, faction control, market strength, operation count, and route danger.': 'Hover or inspect a place to judge safety, stability, control, trade strength, available work, and route danger.',
+  'Planet nodes expose security, stability, faction control, market strength, operation count, and route danger.': 'Hover or inspect a place to judge safety, stability, control, trade strength, available work, and route danger.',
   'Profile|Pilot identity, public profile, stats, achievement badges, and passive tier-8 bonuses.': 'This is your public pilot card: portrait, badge, stats, achievements, and long-term passive bonuses.',
   'Map — Galaxy View|Galaxy travel uses gate lanes only. Select any destination galaxy and autopilot follows the connected gate path.': 'Galaxy travel is gate-only. Pick a destination galaxy and autopilot follows the connected gate route.',
-  'Map — System View|Planet view shows local planets, stations, pirate stations, resources, and galaxy gates leading to adjacent galaxies.': 'System view shows what is nearby: planets, stations, pirate bases, resources, and gates to nearby galaxies.',
+  'Map — System View|Planet view shows local planets, stations, pirate stations, resources, and galaxy gates leading to adjacent galaxies.': 'System view shows what is nearby: planets, uninhabitable planets, resources, traffic, and gates to nearby galaxies.',
   'Server Calendar|Server events, bounties, wormholes, derelicts, artifacts, refining, contracts, fuel, and weekly event ladder.': 'Use this to track timed world content: events, bounties, wormholes, derelicts, artifacts, contracts, fuel, and the weekly ladder.',
-  'Commodities Market|Station trade is local. Illicit goods are removed. Trade goods are station-market cargo only; player listings are galaxy-scoped.': 'Station trade is local. Legal goods stay in station markets, and player listings stay inside the current galaxy.',
-  'Inventory|Unified cargo, loose inventory, materials, modules, consumables, illegal goods, market listing readiness, and item inspection.': 'Everything you carry or store is here: cargo, loose items, materials, modules, consumables, contraband, and item details.',
+  'NPC Goods Market|Station trade is local. Restricted goods are removed. Trade goods are station-market cargo only; player listings are galaxy-scoped.': 'Station trade is local. Goods stay in station markets, and player listings stay inside the current galaxy.',
+  'Inventory|Unified cargo, loose inventory, materials, modules, consumables, restricted goods, market listing readiness, and item inspection.': 'Everything you carry or store is here: cargo, loose items, materials, modules, consumables, contraband, and item details.',
   'Guild Command|Guilds earn respect from wars, control, missions, and activity. Respect unlocks a large guild skill tree with small useful buffs.': 'Guilds build respect through wars, control, missions, and activity. Respect unlocks guild-wide perks over time.',
   'Faction War|Wars are declared by guilds on planets. A galaxy flips only after one faction controls every planet inside it.': 'Guilds start wars on planets. A whole galaxy flips only when one faction controls every planet in it.',
   'Faction War|Guild wars start on planets; galaxy control is earned planet by planet.': 'Think campaign, not duel. You win planets first; the galaxy follows only when the whole set belongs to one faction.',
@@ -7841,17 +9609,17 @@ const HUMAN_TOOLTIP_COPY = {
   'Galaxy count is the scoreboard. Planet count tells you where the next real pressure points are.': 'Galaxies show who is winning the map. Planet counts show where the next campaign can actually move.',
   'This is the travel board. Declared wars show when the ring opens; active wars show whether someone is already holding it.': 'Use this before undocking for war. It tells you where to go, whether you are early, and whether the capture clock is already under pressure.',
   'Disabled planets are not broken. The backend is telling you what still blocks the declaration: treasury, guild size, faction rules, or cooldowns.': 'If the button is locked, there is a real rule in the way: money, members, faction status, or a cooldown.',
-  'Operations Hub|PvE now uses career rank, skill levels, ship power, fuel/energy cost, local security, stability, pirate pressure, and job fit.': 'PvE jobs look at your career, skills, ship, fuel, energy, local safety, pirate pressure, and job fit.',
-  'Crafting & Fabrication|Crafting is timed. Raw ore now feeds refinery recipes first, then refined outputs feed higher-end manufacturing. Materials, credits, and energy are committed up front.': 'Crafting takes time and spends materials up front. Raw ore feeds refining first; refined outputs feed higher-end builds.',
-  'Jobs / Careers|Careers do not lock gameplay. Anyone can mine, craft, trade, fight, smuggle, salvage, explore, or jailbreak. The active career gives stronger bonuses and career XP only for matching action types.': 'Careers guide progression, not access. You can do any activity, but your active career gets the best bonuses on matching work.',
-  'Skills|Skills level by doing related actions. Progress is intentionally grindy. Careers add focused bonuses, but skills keep improving regardless of active career.': 'Skills improve by doing the thing. Careers focus your bonuses, but skills keep growing even if you switch careers later.',
+  'Operations Hub|PvE now uses skill rank, skill levels, ship power, fuel cost, local security, stability, pirate pressure, and job fit.': 'PvE jobs look at your skill, skills, ship, fuel, local safety, pirate pressure, and job fit.',
+  'Crafting & Fabrication|Crafting is timed. Raw ore now feeds refinery recipes first, then refined outputs feed higher-end manufacturing. Materials and credits are committed up front.': 'Crafting takes time and spends materials up front. Raw ore feeds refining first; refined outputs feed higher-end builds.',
+  'Deprecated Work|Skills do not lock gameplay. Anyone can mine, craft, trade, fight, smuggle, salvage, explore, or jailbreak. XP is universal; your build comes from skill point allocation.': 'Skills guide work preferences, not skills pools. Spend universal skill points to define your build.',
+  'Skill Tree Progress|XP is universal. Skill points from the character XP pool define your Combat, Industry, Market, and Exploration build.': 'All valid action XP becomes character progress. Your tree investments are what make you specialized.',
   'Medical Bay|No permanent death. Serious defeat causes hospital time; ship can be lost. Payments speed surgery but minimum hospital time is 10 minutes.': 'There is no permanent pilot death. A serious defeat can cost a ship and put you in recovery; payment can shorten, not erase, the timer.',
-  'Fight|Same-location PvE/PvP combat. Ship loadout, combat skills, career, legality, heat, and rewards all matter.': 'Combat only happens where you are. Your ship fit, skills, career, legality, heat, and target reward all matter.',
+  'Fight|Same-location PvE/PvP combat. Ship loadout, combat skills, skill, legality, heat, and rewards all matter.': 'Combat only happens where you are. Your ship fit, skills, skill, legality, heat, and target reward all matter.',
   'Ships & Hangar|Active ship, owned ships, ship market, modules, slots, compatibility, stats, repairs, and gameplay impact.': 'Manage what you fly here: active ship, owned ships, market ships, modules, slots, compatibility, stats, and repairs.',
   'Buying market goods uses backend cargo capacity checks. Trade goods are for station markets and cannot be exploited through player-market listing.': 'Cargo checks happen on the server, so the UI cannot sneak extra mass through. Station goods stay in the station economy.',
-  'Selling legal items restocks the local market with no risk. Listing on the player market creates a current-galaxy listing.': 'Selling is the simple exit. Listing is slower but can pay better, and it belongs to the galaxy you are standing in.',
+  'Selling legal items restocks the local market with no risk. Listing on the auction creates a current-galaxy listing.': 'Selling is the simple exit. Listing is slower but can pay better, and it belongs to the galaxy you are standing in.',
   'Player buying depletes supply and raises demand. Player selling restocks local markets and reduces demand. System restock slowly replenishes depleted stock.': 'Markets remember player pressure. Buying dries stock up, selling cools demand down, and restock takes time.',
-  'Success chance is calculated from real ship, job, skill, and location state.': 'The fit score is grounded in your actual situation: ship, skills, career, energy, and the planet around you.',
+  'Success chance is calculated from real ship, job, skill, and location state.': 'The fit score is grounded in your actual situation: ship, skills, skill, and the planet around you.',
   'Your selected achievement badge appears on the lower-right of your profile image in chat, sidebar, and public profile views.': 'Your showcase badge follows your pilot around the UI, so pick the one you want other players to notice.',
   'Each loop has 8 tiers. Tier 7 is tuned as a long active-play goal; Tier 8 is a deeper 8-month-style chase and unlocks a small relevant passive.': 'Achievements are long arcs. Tier 7 is a serious active goal, and Tier 8 is the slow prestige tier with a small passive reward.',
   'Pick one unlocked achievement badge. It overlays the lower-right of your profile image.': 'Choose the badge you want displayed on your portrait in social spaces.',
@@ -7861,7 +9629,7 @@ const HUMAN_TOOLTIP_COPY = {
   'Enemy-territory cargo and escort contracts complete only when docked at the destination. Escort NPCs detach on completion, abandon, failure, destruction, or timer expiry.': 'For enemy routes, getting there is not enough. Dock at the target to finish, and escorts leave when the job ends or fails.',
   'NPC bounties are server controlled and limited to one per galaxy. Player bounties cost reward plus a 10% fee. Last-seen data updates every 30 minutes.': 'Bounties are meant to feel scarce and traceable. NPC bounties are galaxy-limited, and player targets only update their last-seen trail every 30 minutes.',
   'Weekly event. Join the control ring, build capture time, and unlock a 48-hour reward wormhole when your faction wins.': 'This is a weekly faction race. Hold the ring long enough and your faction opens a reward wormhole for two days.',
-  'Scan outside radar to create 30-second category blips. Scanner/counter-scanner math is clamped between 20% and 80% certainty.': 'Probe scans give temporary hints, not perfect truth. Counter-scanners keep results uncertain even when your gear is strong.',
+  'Send probes outside radar to create 30-second category blips. Object scans still use scanner/counter-scanner math clamped between 20% and 80% certainty.': 'Probes give temporary area hints, not perfect truth. Scanning a specific contact is still where scanner strength and counter-scanners matter.',
   'Derelicts are scan/discovery objects. Exploration is shorter than planet exploration and pays about 85% of comparable rewards.': 'Derelicts are quick exploration finds. They resolve faster than planet runs and pay slightly less.',
   'Artifacts are planet-stored unless carried/equipped. Unidentified carried artifacts are lost if the ship is destroyed. Identified artifacts can be mounted to active ships.': 'Artifacts are safest in planet storage. Carry unidentified ones only when you accept the risk of losing them with the ship.',
   'Mining produces raw ore. Refining converts raw ore/materials into crafting materials at stations/inhabitable planets.': 'Mine first, refine second. Raw ore becomes useful crafting material only at places with refinery access.',
@@ -7870,9 +9638,9 @@ const HUMAN_TOOLTIP_COPY = {
   'Station trade goods are legal cargo. Same-galaxy arbitrage is intentionally low; cross-galaxy routes are the profit layer.': 'Legal station trade is steady inside one galaxy. The bigger margins are meant to come from cross-galaxy routes.',
   'Planet cargo is visible everywhere for planning. Deposits and withdrawals only work while docked at the cargo\'s planet or station.': 'You can plan from anywhere, but you still have to dock at the right place to move stored cargo.',
   'Inspection uses backend-resolved item data, not frontend-only guesses.': 'These details come from the server, so action locks and item rules should match what will actually happen.',
-  'Actions are small nudges. Job-matched actions gain extra influence but still consume energy/fuel/credits.': 'Control actions push a planet gradually. Matching your career helps, but every push still costs resources.',
+  'Actions are small nudges. Job-matched actions gain extra influence while fuel and credit costs still matter.': 'Control actions push a planet gradually. Matching your skill helps, while fuel and credit costs still matter.',
   'High fit does not mean no risk. It means your current build is better suited for the action.': 'A high fit score means your current setup matches the job. It does not make the job risk-free.',
-  'Available to all players. Lower reward, higher success rate, low energy cost.': 'Basic work is the reliable lane: cheaper, safer, and lower paying.',
+  'Available to all players. Lower reward, higher success rate.': 'Basic work is the reliable lane: safer, steadier, and lower paying.',
   'Better rewards. Lower success rate unless your ship, skills, and current job fit the operation.': 'Advanced work pays better when your build fits it. If your ship or skills are off, expect more failures.',
   'These are defeated ships in the current area. Player battles, PvE combat, PvP, and occasional NPC-vs-NPC fights can populate this list. Zero available wrecks is valid if the area has been cleaned out.': 'Fresh wrecks come from real combat in this area. If the list is empty, pilots may have already picked it clean.',
   'Timed crafting jobs persist through refresh. Completed jobs auto-resolve on state refresh or when you press Claim Completed. Ore refining recipes require refinery access at the current planet or station.': 'Crafting keeps running after refresh. Finished jobs claim on refresh or by button, and ore recipes need local refinery access.',
@@ -7894,12 +9662,12 @@ const HUMAN_TOOLTIP_COPY = {
   'Market cargo loading/offloading is not instant. You cannot travel, change ships, fight, or start another cargo operation until it completes. During loading/offloading you are protected from attacks.': 'Cargo handling takes time. While the crew is loading or unloading, you are locked in place but protected.',
   'The station resource is the shared defender pool. Defeated enemies stay defeated. Damaged enemies keep their damage for everyone in the station.': 'Pirate stations are shared assaults. Damage and defeated defenders persist for everyone working the station.',
   'This is a separate combat map. Pirates spawn spaced out and slowly converge on the closest pilot. Reach the outer 10% border to retreat.': 'Station assaults use their own map. Pirates move toward nearby pilots, and the outer edge is your retreat lane.',
-  'Real ship, module, cargo, fuel, energy, hull, shield, and role-derived status.': 'This is your actual ship state: gear, cargo, fuel, energy, defenses, and role effects.',
+  'Real ship, module, cargo, fuel, hull, shield, and role-derived status.': 'This is your actual ship state: gear, cargo, fuel, defenses, and role effects.',
   'Demand, scarcity, trend, pressure, and illicit risk calculated from local market and planet conditions.': 'These market signals come from the local planet: demand, scarcity, price motion, pressure, and smuggling risk.',
   'Planet control effects are live modifiers, not flavor text.': 'Control numbers actively change the planet. They are real bonuses and penalties, not just lore.',
   'Local Chat|Chat identity uses your selected profile image, badge, and display name.': 'Your chat presence uses your chosen portrait, badge, and pilot name.',
   'Social|Manage friends and blocked pilots. Friend online notifications are toasts only; invites and requests also appear in Messages.': 'Use this for people management. Friend pings are temporary, while invites and requests also land in Messages.',
-  'Map — Mission View|You are away from the ship on a planet mission. The local map returns after completion or cancellation.': 'Your ship is parked while the mission runs. Finish or cancel the mission to return to the local map.',
+  'Map — Mission View|You are away from the ship on a planet mission. The map returns after completion or cancellation.': 'Your ship is parked while the mission runs. Finish or cancel the mission to return to the map.',
   'Planet Control|Local influence, faction control, security, stability, taxes, conflict, and economy modifiers for the current planet or station.': 'This is the planet\'s political and economic dashboard: who controls it, how safe it is, and what that changes.',
   'Industry|Mining, battlefield salvage, refining, NPC contracts, and materials for crafting modules and ship parts.': 'Industry is the material pipeline: mine, salvage, refine, and feed crafting or ship work.',
   'Properties, Research & Bases|Mid-game private bases. Research costs credits/time; construction costs more credits/time. One private base per player. Other players cannot dock or attack it.': 'Private bases are mid-game projects. Research unlocks buildings, construction takes time, and the base is yours alone.',
@@ -7954,9 +9722,7 @@ function DescriptionBlock({eyebrow, title, lead, points=[]}) {
   </section>
 }
 function Page({title,sub,children}) {
-  const copy = humanHelpText(sub, title);
-  const compact = copy && copy.length > 92;
-  return <div className={`pageFrame pageFrame-${pageSlug(title)}`}><div className={`pageHead ${compact ? 'hasCompactGuide' : ''}`} style={{'--page-accent':pageIntel(title).accent}}><div className="pageTitleRow"><h1>{title}</h1>{compact && <InfoTip text={copy} label={`${title} summary`} side="left" />}</div>{copy && !compact && <p>{copy}</p>}</div>{children}</div>
+  return <div className={`pageFrame pageFrame-${pageSlug(title)}`}>{children}</div>
 }
 function Grid({children}) { return <div className="dashboardGrid">{children}</div> }
 function Bar({label,value,max,danger}) { const pct = Math.max(0,Math.min(100,(value/(max||1))*100)); return <div className="bar"><span>{label}</span><i><b style={{width:`${pct}%`}} className={danger?'danger':''}/></i><small>{fmt(value)} / {fmt(max)}</small></div> }
@@ -8065,6 +9831,9 @@ createRoot(document.getElementById('root')).render(<App/>);
   function qs(sel){ return document.querySelector(sel); }
   function qsa(sel){ return Array.from(document.querySelectorAll(sel)); }
   function hasAuthToken(){ return !!sessionStorage.getItem('nova_token'); }
+  function shouldShowFloatingChat(){
+    return hasAuthToken() && !!qs('.appShell') && !qs('.loginScreen') && !qs('.boot');
+  }
   function removeFloatingChat(){
     setOpen(false);
     qs('[data-nova-floating-chat]')?.remove();
@@ -8085,7 +9854,7 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function ensureRoot(){
-    if (!hasAuthToken()) return null;
+    if (!shouldShowFloatingChat()) return null;
     let root = qs('[data-nova-floating-chat]');
     if (root) return root;
     root = document.createElement('div');
@@ -8129,7 +9898,7 @@ createRoot(document.getElementById('root')).render(<App/>);
     el.classList.toggle('error', !!isError);
   }
   function setOpen(next){
-    if (!hasAuthToken()) {
+    if (!shouldShowFloatingChat()) {
       open = false;
       qs('[data-nova-floating-chat]')?.remove();
       clearInterval(pollTimer);
@@ -8233,7 +10002,7 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function ensureMessagesPage(){
-    if (!hasAuthToken()) return null;
+    if (!shouldShowFloatingChat()) return null;
     let page = qs('[data-nova-messages-page]');
     if (page) return page;
     page = document.createElement('section');
@@ -8264,7 +10033,7 @@ createRoot(document.getElementById('root')).render(<App/>);
     return page;
   }
   async function openMessages(target){
-    if (!hasAuthToken()) return;
+    if (!shouldShowFloatingChat()) return;
     const page = ensureMessagesPage();
     if (!page) return;
     page.hidden = false;
@@ -8368,29 +10137,32 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function boot(){
-    if (!hasAuthToken()) {
-      removeFloatingChat();
-      return;
-    }
     if (!cssReady()) return setTimeout(boot, 50);
-    hideChatNav();
-    ensureRoot();
-    routeWatcher();
-    installProfileMessageButtons();
     if (!bootWired) {
       window.addEventListener('hashchange', routeWatcher);
       bootWired = true;
     }
-    if (chatObserver) return;
-    chatObserver = new MutationObserver(() => {
-      if (!hasAuthToken()) {
-        removeFloatingChat();
-        return;
-      }
-      hideChatNav();
-      installProfileMessageButtons();
-    });
-    chatObserver.observe(document.body, {childList:true, subtree:true});
+    if (!chatObserver) {
+      chatObserver = new MutationObserver(() => {
+        if (!shouldShowFloatingChat()) {
+          removeFloatingChat();
+          return;
+        }
+        hideChatNav();
+        ensureRoot();
+        routeWatcher();
+        installProfileMessageButtons();
+      });
+      chatObserver.observe(document.body, {childList:true, subtree:true});
+    }
+    if (!shouldShowFloatingChat()) {
+      removeFloatingChat();
+      return;
+    }
+    hideChatNav();
+    ensureRoot();
+    routeWatcher();
+    installProfileMessageButtons();
   }
   window.addEventListener('nova:auth-changed', boot);
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
@@ -8438,13 +10210,13 @@ createRoot(document.getElementById('root')).render(<App/>);
     {
       screen: 'Dashboard',
       title: 'Command Deck: read your ship first',
-      body: 'The dashboard is your quiet checkpoint. Before you fly anywhere, use it to read your location, fuel, cargo, health, energy, local safety, and the game-suggested next actions.',
+      body: 'The dashboard is your quiet checkpoint. Before you fly anywhere, use it to read your location, fuel, cargo, health, local safety, and the game-suggested next actions.',
       points: [
-        'Fuel, cargo, health, and energy tell you what kind of trip is safe right now.',
+        'Fuel, cargo, and health tell you what kind of trip is safe right now.',
         'Current Details explains the galaxy, planet, security, market pressure, and local danger.',
         'Recommended Next Actions and Basic Work are the softest early income buttons.'
       ],
-      loop: 'Check status -> pick a safe action -> spend a little energy -> return to dock and reassess.',
+      loop: 'Check status -> pick a safe action -> return to dock and reassess.',
       route: '#dashboard',
       action: 'Open Dashboard'
     },
@@ -8474,7 +10246,7 @@ createRoot(document.getElementById('root')).render(<App/>);
     },
     {
       title: 'Combat is about timing, not spam',
-      body: 'Your attack energy fills over time. Early on, fight manually so you can see what shields, hull, buffs, debuffs, and cooldowns are doing. Auto battle is better after the basics click.',
+      body: 'Fight manually early so you can see what shields, hull, buffs, debuffs, and cooldowns are doing. Auto battle is better after the basics click.',
       route: '#map',
       action: 'Return to Map'
     },
@@ -8488,130 +10260,116 @@ createRoot(document.getElementById('root')).render(<App/>);
 
   steps.splice(0, steps.length,
     {
-      screen: 'Dashboard',
-      title: 'Command Deck: read your ship first',
-      body: 'The dashboard is your quiet checkpoint. Before you fly anywhere, use it to read your location, fuel, cargo, health, energy, local safety, and the game-suggested next actions.',
-      points: [
-        'Fuel, cargo, health, and energy tell you what kind of trip is safe right now.',
-        'Current Details explains the galaxy, planet, security, market pressure, and local danger.',
-        'Recommended Next Actions and Basic Work are the softest early income buttons.'
-      ],
-      loop: 'Check status -> pick a safe action -> spend a little energy -> return to dock and reassess.',
+      screen: 'Command',
+      title: 'Start with the command view',
+      body: 'This overview is your checkpoint before you spend fuel. Read your ship state, location, and recommended work, then decide what kind of run makes sense.',
+      loop: 'Check status -> pick safe work -> collect rewards -> reassess.',
+      hub: 'Galaxy',
+      tab: 'overview',
       route: '#dashboard',
-      action: 'Open Dashboard'
+      target: ['.commandRibbon', '.dashboardGrid', '.content']
     },
     {
-      screen: 'Map',
-      title: 'Map: this is where the space sim happens',
-      body: 'The map is not just a travel menu. It shows planets, stations, gates, routes, resources, pirate pressure, and your current movement. Start small: move around your current system before jumping across the galaxy.',
-      points: [
-        'Click nearby planets or stations to travel and dock.',
-        'Use system view for local stops, resources, and pirate stations.',
-        'Use galaxy view later when you are ready for gate routes and enemy territory.'
-      ],
-      loop: 'Pick a nearby stop -> travel -> dock -> scan, mine, sell, or take work -> move again.',
+      screen: 'Navigation',
+      title: 'Move from the map',
+      body: 'The map is the real flight layer. It highlights planets, stations, routes, resources, threats, and your current movement so you can choose the next stop with context.',
+      loop: 'Pick a nearby stop -> travel -> dock -> work the local loop.',
+      hub: 'Galaxy',
+      tab: 'navigation',
       route: '#map',
-      action: 'Open Map'
+      target: ['.mapShell.phase23bMapShell', '.mapShell', '.mapViewport']
     },
     {
-      screen: 'Jobs',
-      title: 'Jobs: choose a direction without locking yourself in',
-      body: 'Jobs are careers, not hard classes. They make one playstyle level faster, but any pilot can still trade, mine, craft, fight, salvage, explore, and run odd jobs.',
-      points: [
-        'Your active career gives bonuses and career XP to matching actions.',
-        'The recommended loop tells you what that career wants you to do next.',
-        'Switch later when you want to try a different money-making rhythm.'
-      ],
-      loop: 'Choose a career -> run matching low-risk actions -> earn career XP -> unlock stronger bonuses.',
-      route: '#jobs',
-      action: 'Open Jobs'
+      screen: 'Map Tools',
+      title: 'Use map controls before committing',
+      body: 'These controls help you switch scale, scan space, filter clutter, and understand what is worth clicking before you burn time moving there.',
+      loop: 'Filter -> inspect -> travel only when the target is worth it.',
+      hub: 'Galaxy',
+      tab: 'navigation',
+      route: '#map',
+      target: ['.mapToolbar', '.mapCommandBar', '.mapShell']
     },
     {
-      screen: 'Operations Hub',
-      title: 'Operations: the easiest active work',
-      body: 'Operations are bite-sized jobs for credits, XP, and materials. The Recommended tab is the beginner-friendly queue because it weighs your ship, skills, career, energy, and local conditions.',
-      points: [
-        'Recommended work is usually the best first click when you are unsure.',
-        'Basic Work trades lower rewards for safer success chances.',
-        'Bounties and advanced operations are better after you understand travel and repairs.'
-      ],
-      loop: 'Run recommended work -> collect credits and XP -> wait out cooldowns -> upgrade or move systems.',
-      route: '#contracts',
-      action: 'Open Operations'
+      screen: 'Planet',
+      title: 'Docking is your safe reset',
+      body: 'Planet screens are where you repair, sell, craft, store, and work local opportunities. When the frontier gets messy, dock and reset your plan here.',
+      loop: 'Dock -> repair or sell -> choose the next run.',
+      hub: 'Planet',
+      tab: 'overview',
+      route: '#planet',
+      target: ['.pageFrame-planet-control', '.hubBody .panel', '.hubBody']
     },
     {
-      screen: 'Market',
-      title: 'Market: buy, haul, sell, repeat',
-      body: 'Trading is the classic space-sim loop. The market shows local buy and sell prices, legal goods, inventory you can sell, player listings, and how much cargo room you have left.',
-      points: [
-        'Legal goods are the easiest early trade route because they avoid customs trouble.',
-        'Price, stock, demand, and cargo space matter more than raw item name.',
-        'Credits follow you everywhere; physical goods and materials live in cargo or storage.'
-      ],
-      loop: 'Buy where supply is good -> haul safely -> sell where demand pays -> refuel and repeat.',
+      screen: 'Goods',
+      title: 'Trade with cargo space in mind',
+      body: 'NPC goods are the cleanest early trade loop. Watch supply, demand, price, and free cargo before buying anything you need to haul.',
+      loop: 'Buy where supply is good -> haul safely -> sell where demand pays.',
+      hub: 'Planet',
+      tab: 'goods',
       route: '#market',
-      action: 'Open Market'
-    },
-    {
-      screen: 'Inventory',
-      title: 'Inventory: know what you are actually carrying',
-      body: 'Inventory is where loot, materials, cargo, modules, usable items, and sale value come together. It is the bridge between fighting, salvaging, trading, crafting, and upgrading your ship.',
-      points: [
-        'Sellable goods become credits; crafting materials should usually be saved early.',
-        'Filters help separate cargo, modules, usable items, and reserved ingredients.',
-        'If cargo is full, inventory is the screen that helps you decide what to sell or keep.'
-      ],
-      loop: 'Loot or buy items -> inspect value and use -> sell extras -> keep upgrade materials.',
-      route: '#inventory',
-      action: 'Open Inventory'
+      target: ['.pageFrame-npc-goods-market', '.marketTabs', '.hubBody .panel']
     },
     {
       screen: 'Crafting',
-      title: 'Crafting: turn scraps into progress',
-      body: 'Crafting is the long-form upgrade loop. Raw materials become refined parts, refined parts become modules, and modules make your ship better at the next loop you want to run.',
-      points: [
-        'Recipes consume materials, credits, and sometimes energy up front.',
-        'Timed jobs keep working through refreshes, then you claim completed output.',
-        'Mining and salvage feed crafting without requiring big market purchases.'
-      ],
-      loop: 'Mine or salvage -> refine materials -> craft modules -> equip or sell the result.',
+      title: 'Turn scraps into ship progress',
+      body: 'Industry turns mining and salvage into refined parts, modules, and upgrades. Timed jobs keep working while you keep playing.',
+      loop: 'Mine or salvage -> refine -> craft -> equip or sell.',
+      hub: 'Planet',
+      tab: 'industry',
       route: '#crafting',
-      action: 'Open Crafting'
+      target: ['.hubSplitStack', '.pageFrame-crafting', '.hubBody .panel']
     },
     {
-      screen: 'Fight',
-      title: 'Fight: risky money, useful loot, real repair bills',
-      body: 'Combat is best learned manually. Watch shields, hull, attack energy, effects, target level, and escape options before relying on automation or hunting stronger ships.',
-      points: [
-        'Start with weak or clearly safe targets until you understand damage and cooldowns.',
-        'Attack energy refills over time, so combat rewards timing more than button spam.',
-        'After a fight, check health, cargo, repairs, fuel, and whether your next target is worth it.'
-      ],
-      loop: 'Pick a safe target -> fight manually -> loot or retreat -> repair, refuel, and upgrade.',
-      route: '#fight',
-      action: 'Open Fight'
+      screen: 'Ship / Cargo',
+      title: 'Know what you are carrying',
+      body: 'Ship and cargo screens connect combat loot, trade goods, modules, materials, and sale value. If cargo is full, this is where you make the keep-or-sell decision.',
+      loop: 'Inspect loot -> sell extras -> equip upgrades -> keep core materials.',
+      hub: 'Character',
+      tab: 'ship',
+      route: '#inventory',
+      target: ['.inventoryLayout', '.hubSplitStack', '.hubBody .panel']
     },
     {
-      screen: 'Faction War',
-      title: 'Faction War: the bigger game can wait',
-      body: 'Your faction shapes friendly space, enemy space, planet control, and galaxy politics. You can peek early, but do not feel pressured to live here until you have steady money and a ship you trust.',
-      points: [
-        'Faction space changes who feels safe, hostile, profitable, or politically important.',
-        'Supplying, fighting, and controlling planets are mid-game extensions of basic loops.',
-        'When in doubt, learn trade, jobs, map travel, and repairs before chasing wars.'
-      ],
-      loop: 'Build stability first -> supply or fight on borders -> help control planets -> push galaxy politics.',
+      screen: 'Skills',
+      title: 'Spend skills with a plan',
+      body: 'Skills shape the loops you want to run more often. Spend points toward the skill rhythm you actually enjoy instead of chasing every bonus at once.',
+      loop: 'Earn XP -> spend points -> improve your favorite loop.',
+      hub: 'Character',
+      tab: 'skills',
+      route: '#skills',
+      target: ['.pageFrame-skills', '.skillGrid', '.hubBody .panel']
+    },
+    {
+      screen: 'Auction',
+      title: 'Use the Auction after basics click',
+      body: 'The auction view is for player listings and broader trade. It matters more once you understand cargo, planet storage, and where goods physically live.',
+      loop: 'Compare listings -> buy or list -> remember delivery location.',
+      hub: 'Market',
+      tab: 'auction',
+      route: '#auction',
+      target: ['.pageFrame-auction', '.marketTabs', '.hubBody .panel']
+    },
+    {
+      screen: 'Guilds / War',
+      title: 'The bigger game can wait',
+      body: 'Guilds, faction war, leaderboards, and social systems are long-term pressure. Peek here early, but build stable money and a ship you trust first.',
+      loop: 'Build stability -> coordinate -> fight or supply borders.',
+      hub: 'Market',
+      tab: 'guilds',
       route: '#faction',
-      action: 'Open Faction War'
+      target: ['.hubSplitStack', '.pageFrame-faction-war', '.hubBody .panel']
     }
   );
 
   let index = 0;
   let root = null;
+  let card = null;
+  let targetBox = null;
+  let shades = [];
   let activeUserKey = '';
   let autoCheckedForUser = '';
   let booted = false;
-  let openedSteps = new Set();
+  let targetRefreshTimer = null;
 
   function cleanKey(value) {
     return String(value || 'local-player').trim().toLowerCase().replace(/[^a-z0-9_.:@-]/g, '_').slice(0, 120) || 'local-player';
@@ -8630,39 +10388,32 @@ createRoot(document.getElementById('root')).render(<App/>);
   }
 
   function removeTutorialUi() {
+    document.body.classList.remove('novaTutorialActive');
     if (root) root.remove();
     root = null;
+    card = null;
+    targetBox = null;
+    shades = [];
+    window.clearTimeout(targetRefreshTimer);
     document.querySelector('.novaTutorialLauncher')?.remove();
   }
 
-  function goRoute(route) {
-    if (!route) return;
-    const pageMap = {
-      '#dashboard':'Dashboard',
-      '#map':'Map',
-      '#jobs':'Jobs',
-      '#contracts':'Contracts',
-      '#market':'Market',
-      '#inventory':'Inventory',
-      '#crafting':'Crafting',
-      '#fight':'Fight',
-      '#messages':'Messages',
-      '#faction':'Faction War'
-    };
-    if (pageMap[route]) window.dispatchEvent(new CustomEvent('nova:set-page', { detail: { page: pageMap[route] } }));
-    if (window.location.hash !== route) window.location.hash = route;
+  function applyStepRoute(step) {
+    if (!step) return;
+    if (step.hub) {
+      window.dispatchEvent(new CustomEvent('nova:set-page', {
+        detail: { hub: step.hub, tab: step.tab || '' }
+      }));
+    } else if (step.page) {
+      window.dispatchEvent(new CustomEvent('nova:set-page', { detail: { page: step.page } }));
+    }
+    if (step.route && window.location.hash !== step.route) window.location.hash = step.route;
   }
 
   function tutorialEscape(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
       return {'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#039;'}[ch];
     });
-  }
-
-  function stepPointsHtml(points) {
-    return (points || []).map(function(point) {
-      return `<li>${tutorialEscape(point)}</li>`;
-    }).join('');
   }
 
   function tutorialDone() {
@@ -8694,16 +10445,83 @@ createRoot(document.getElementById('root')).render(<App/>);
 
   function finish() {
     markDone();
-    if (root) root.remove();
-    root = null;
+    removeTutorialUi();
     ensureLauncher();
   }
 
-  function minimize() {
-    try { sessionStorage.setItem(minimizedKey(), '1'); } catch (err) {}
-    if (root) root.remove();
-    root = null;
-    ensureLauncher();
+  function isUsableRect(rect) {
+    return rect && rect.width >= 24 && rect.height >= 24 && rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
+  }
+
+  function firstVisibleTarget(selectors) {
+    const list = Array.isArray(selectors) ? selectors : [selectors];
+    for (const selector of list) {
+      if (!selector) continue;
+      const candidates = Array.from(document.querySelectorAll(selector));
+      for (const el of candidates) {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        if (style.display !== 'none' && style.visibility !== 'hidden' && isUsableRect(rect)) return el;
+      }
+    }
+    return document.querySelector('.content') || document.querySelector('.appShell') || document.body;
+  }
+
+  function paddedRect(rect, pad = 9) {
+    const left = Math.max(8, rect.left - pad);
+    const top = Math.max(8, rect.top - pad);
+    const right = Math.min(window.innerWidth - 8, rect.right + pad);
+    const bottom = Math.min(window.innerHeight - 8, rect.bottom + pad);
+    return {
+      left,
+      top,
+      width: Math.max(1, right - left),
+      height: Math.max(1, bottom - top),
+      right,
+      bottom
+    };
+  }
+
+  function updateSpotlight() {
+    if (!root || !targetBox || !card) return;
+    const step = steps[index] || steps[0];
+    const target = firstVisibleTarget(step.target);
+    const rect = paddedRect(target.getBoundingClientRect(), target === document.body ? 0 : 10);
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const [topShade, leftShade, rightShade, bottomShade] = shades;
+
+    topShade.style.cssText = `left:0;top:0;width:${vw}px;height:${rect.top}px`;
+    leftShade.style.cssText = `left:0;top:${rect.top}px;width:${rect.left}px;height:${rect.height}px`;
+    rightShade.style.cssText = `left:${rect.right}px;top:${rect.top}px;width:${Math.max(0, vw - rect.right)}px;height:${rect.height}px`;
+    bottomShade.style.cssText = `left:0;top:${rect.bottom}px;width:${vw}px;height:${Math.max(0, vh - rect.bottom)}px`;
+    targetBox.style.cssText = `left:${rect.left}px;top:${rect.top}px;width:${rect.width}px;height:${rect.height}px`;
+
+    const cardRect = card.getBoundingClientRect();
+    const cardLeft = Math.max(12, Math.min(vw - cardRect.width - 12, rect.left + rect.width / 2 - cardRect.width / 2));
+    const targetIsLow = rect.top > vh * 0.48;
+    card.style.left = `${cardLeft}px`;
+    card.style.right = 'auto';
+    if (targetIsLow) {
+      card.style.top = '18px';
+      card.style.bottom = 'auto';
+    } else {
+      card.style.top = 'auto';
+      card.style.bottom = '22px';
+    }
+  }
+
+  function scheduleSpotlightUpdate(delay = 70) {
+    window.clearTimeout(targetRefreshTimer);
+    targetRefreshTimer = window.setTimeout(updateSpotlight, delay);
+    window.requestAnimationFrame(updateSpotlight);
+  }
+
+  function setTutorialIndex(nextIndex) {
+    index = Math.max(0, Math.min(steps.length - 1, nextIndex));
+    applyStepRoute(steps[index]);
+    render();
+    scheduleSpotlightUpdate(120);
   }
 
   function render() {
@@ -8711,49 +10529,53 @@ createRoot(document.getElementById('root')).render(<App/>);
       root = document.createElement('div');
       root.className = 'novaTutorialOverlay';
       document.body.appendChild(root);
+      shades = ['top', 'left', 'right', 'bottom'].map(function(pos) {
+        const shade = document.createElement('div');
+        shade.className = `novaTutorialShade novaTutorialShade-${pos}`;
+        root.appendChild(shade);
+        return shade;
+      });
+      targetBox = document.createElement('div');
+      targetBox.className = 'novaTutorialSpotlightBox';
+      root.appendChild(targetBox);
     }
+    document.body.classList.add('novaTutorialActive');
     const step = steps[index] || steps[0];
-    const opened = openedSteps.has(index);
-    const needsOpen = !!step.route && !opened;
-    root.innerHTML = '';
-    const card = document.createElement('div');
+    if (card) card.remove();
+    card = document.createElement('div');
     card.className = 'novaTutorialCard';
     card.innerHTML = `
       <div class="novaTutorialTopline">
         <span>Starter Flight Plan</span>
         <span>${index + 1} / ${steps.length}</span>
       </div>
-      <div class="novaTutorialScreenBadge">Screen: ${tutorialEscape(step.screen || step.action || 'Guide')}</div>
+      <div class="novaTutorialScreenBadge">${tutorialEscape(step.screen || 'Guide')}</div>
       <h2>${tutorialEscape(step.title)}</h2>
       <p>${tutorialEscape(step.body)}</p>
-      <ul class="novaTutorialChecklist">${stepPointsHtml(step.points)}</ul>
       <div class="novaTutorialCallout">
-        <b>Easy loop</b>
+        <b>Loop</b>
         <span>${tutorialEscape(step.loop || '')}</span>
       </div>
       <div class="novaTutorialProgress"><span style="width:${((index + 1) / steps.length) * 100}%"></span></div>
-      ${needsOpen ? `<div class="novaTutorialHint">Click "${tutorialEscape(step.action || 'Open Screen')}" to visit this screen, then continue.</div>` : `<div class="novaTutorialHint done">Screen opened. Take a quick look around, then continue.</div>`}
       <div class="novaTutorialActions">
-        <button type="button" data-role="back" ${index === 0 ? 'disabled' : ''}>Back</button>
-        <button type="button" data-role="route" class="${opened ? 'visited' : ''}">${opened ? 'Screen Opened' : tutorialEscape(step.action || 'Open Screen')}</button>
-        <button type="button" data-role="next" ${needsOpen ? 'disabled' : ''}>${index === steps.length - 1 ? 'Done' : 'Next'}</button>
+        <button type="button" data-role="cancel">Cancel</button>
+        <button type="button" data-role="back" ${index === 0 ? 'disabled' : ''}>Prev</button>
+        <button type="button" data-role="next">${index === steps.length - 1 ? 'Done' : 'Next'}</button>
       </div>
-      <button type="button" class="novaTutorialMinimize" data-role="minimize">Not now</button>
     `;
     root.appendChild(card);
     card.addEventListener('click', function(evt){
       const btn = evt.target.closest('button');
       if (!btn) return;
       const role = btn.getAttribute('data-role');
-      if (role === 'back') { index = Math.max(0, index - 1); render(); }
-      if (role === 'route') { goRoute(step.route); openedSteps.add(index); render(); }
+      if (role === 'cancel') finish();
+      if (role === 'back') setTutorialIndex(index - 1);
       if (role === 'next') {
-        if (!!step.route && !openedSteps.has(index)) return;
         if (index >= steps.length - 1) finish();
-        else { index += 1; render(); }
+        else setTutorialIndex(index + 1);
       }
-      if (role === 'minimize') minimize();
     });
+    scheduleSpotlightUpdate(30);
   }
 
   function start() {
@@ -8764,9 +10586,7 @@ createRoot(document.getElementById('root')).render(<App/>);
     try { sessionStorage.removeItem(minimizedKey()); } catch (err) {}
     const launcher = document.querySelector('.novaTutorialLauncher');
     if (launcher) launcher.remove();
-    index = 0;
-    openedSteps = new Set();
-    render();
+    setTutorialIndex(0);
   }
 
   function ensureLauncher() {
@@ -8805,10 +10625,13 @@ createRoot(document.getElementById('root')).render(<App/>);
     window.addEventListener('nova:auth-changed', function(evt){
       if (!evt.detail?.authenticated) removeTutorialUi();
     });
+    window.addEventListener('resize', function(){ scheduleSpotlightUpdate(0); });
+    window.addEventListener('scroll', function(){ scheduleSpotlightUpdate(0); }, true);
     window.novaOpenTutorial = function(){ start(); };
     new MutationObserver(function(){
       if (!isGameShellReady()) removeTutorialUi();
       else maybeAutoStart();
+      if (root) scheduleSpotlightUpdate(80);
     }).observe(document.documentElement, { childList: true, subtree: true });
   }
 
@@ -9115,7 +10938,7 @@ createRoot(document.getElementById('root')).render(<App/>);
     summary: null,
     board: null,
     scope: "global",
-    category: "Progression",
+    category: "Skills",
     metric: "player_level",
     period: "daily",
     lastVersion: null,
@@ -9202,7 +11025,7 @@ createRoot(document.getElementById('root')).render(<App/>);
     state.lastVersion = state.summary?.state_versions?.leaderboards ?? state.summary?.snapshot_version ?? null;
     if (!state.summary.metrics?.some(m => m.metric_key === state.metric)) {
       state.metric = state.summary.metrics?.[0]?.metric_key || "player_level";
-      state.category = state.summary.metrics?.[0]?.category || "Progression";
+      state.category = state.summary.metrics?.[0]?.category || "Skills";
     }
     return state.summary;
   }

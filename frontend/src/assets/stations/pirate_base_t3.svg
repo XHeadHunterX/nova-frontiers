@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Tier 3 pirate ring fortress">
+  <defs>
+    <radialGradient id="flare" cx="50%" cy="52%" r="62%">
+      <stop offset="0" stop-color="#ffe19a" stop-opacity=".95"/>
+      <stop offset=".22" stop-color="#ff7c3f" stop-opacity=".82"/>
+      <stop offset=".56" stop-color="#5f1f35" stop-opacity=".62"/>
+      <stop offset="1" stop-color="#04060d" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="drawn">
+      <feTurbulence type="fractalNoise" baseFrequency="0.62" numOctaves="4" seed="43" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="1.55"/>
+    </filter>
+  </defs>
+  <circle cx="64" cy="64" r="62" fill="url(#flare)"/>
+  <g filter="url(#drawn)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M25 35 C44 10 84 9 105 34 C128 62 116 101 83 115 C50 128 14 108 8 75 C5 59 11 46 25 35 Z" stroke="#747f83" stroke-width="14"/>
+    <path d="M27 36 C47 20 82 18 101 38 M13 76 C24 103 54 117 82 108 M108 42 C124 69 111 99 88 111" stroke="#d7d4c7" stroke-width="2.5" opacity=".82"/>
+    <path d="M43 28 L35 8 M62 20 L60 2 M84 24 L98 5 M105 42 L124 31 M112 75 L128 82 M88 110 L99 127 M50 113 L44 127 M15 81 L0 90 M21 48 L3 40" stroke="#1b252d" stroke-width="7"/>
+    <path d="M41 50 L62 30 L87 45 L96 70 L80 94 L52 94 L34 72 Z" fill="#3a3440" stroke="#0c1017" stroke-width="5"/>
+    <path d="M50 43 L51 25 L65 13 L82 27 L85 46" fill="#2d2d39" stroke="#0c1017" stroke-width="5"/>
+    <path d="M39 63 L18 59 M89 63 L113 58 M50 88 L42 108 M79 89 L91 108" stroke="#111922" stroke-width="6"/>
+    <path d="M51 64 C58 53 75 52 84 63 C77 75 58 76 51 64 Z" fill="#0d1118" stroke="#ffbc63" stroke-width="4"/>
+    <path d="M51 64 L61 58 L70 66 L81 58 M47 80 L59 77 M67 81 L82 77 M57 45 L73 45" stroke="#ff5b3e" stroke-width="3"/>
+    <path d="M43 33 C55 27 74 25 88 34 M24 94 C44 113 75 118 100 94 M28 45 C43 36 57 32 73 31" stroke="#f1ba7a" stroke-width="2" opacity=".58"/>
+    <path d="M45 26 L33 22 M62 13 L73 5 M82 27 L96 23 M34 72 L20 72 M96 70 L111 72" stroke="#879297" stroke-width="3"/>
+  </g>
+</svg>
